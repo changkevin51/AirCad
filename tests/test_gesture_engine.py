@@ -5,11 +5,8 @@ from gesture_engine import (
     GestureEngine,
     HandObservation,
     NavigationDelta,
-    StrokeEvent,
-    TrackedHand,
     ViewTransform,
 )
-from hand_tracker import consume_stroke_events, visible_hands_for_display
 
 
 def hand(
@@ -32,45 +29,6 @@ def hand(
 
 
 class GestureEngineTests(unittest.TestCase):
-    def test_paused_display_hides_stale_hand_overlay_state(self):
-        stale = TrackedHand(
-            hand_id=1,
-            handedness="left",
-            index_tip=(120.0, 100.0),
-            thumb_tip=(100.0, 100.0),
-            palm_center=(110.0, 110.0),
-            palm_size=80.0,
-            pinch_ratio=0.25,
-            pinching=True,
-            open_palm=False,
-            open_armed=False,
-        )
-        self.assertEqual(visible_hands_for_display(True, (stale,)), ())
-        self.assertEqual(visible_hands_for_display(False, (stale,)), (stale,))
-
-    def test_release_recognizes_once_and_snap_toggle_keeps_raw_points(self):
-        active = {}
-        strokes = []
-        view = ViewTransform((320.0, 240.0))
-        status = consume_stroke_events(
-            (
-                StrokeEvent("start", 1, (20.0, 40.0)),
-                StrokeEvent("point", 1, (90.0, 68.0)),
-                StrokeEvent("point", 1, (160.0, 96.0)),
-                StrokeEvent("end", 1, reason="release"),
-            ),
-            active,
-            strokes,
-            view,
-        )
-        self.assertEqual(status.split()[0:2], ["Shape:", "line"])
-        self.assertEqual(len(strokes), 1)
-        raw = strokes[0].raw_points
-        self.assertEqual(strokes[0].display_points(False), raw)
-        self.assertEqual(strokes[0].display_points(True), raw[:1] + raw[-1:])
-        view.apply_pan((80.0, 30.0))
-        self.assertEqual(strokes[0].raw_points, raw)
-
     def test_pinch_hysteresis_debounce_and_release(self):
         engine = GestureEngine(pinch_debounce_ms=20, smoothing_alpha=1.0)
         self.assertEqual(engine.update([hand((100, 100), ratio=0.4)], 0).stroke_events, ())

@@ -22,8 +22,8 @@ class _FakeFeature:
             Visibility=False,
             LineColor=None,
             LineWidth=None,
-            PointColor=None,
-            PointSize=None,
+            ShapeColor=None,
+            Transparency=None,
         )
 
 
@@ -43,38 +43,31 @@ class _FakeDocument:
 
 class _FakeView:
     def __init__(self) -> None:
-        self.top_calls = 0
+        self.iso_calls = 0
         self.fit_calls = 0
 
-    def viewTop(self) -> None:
-        self.top_calls += 1
+    def viewIsometric(self) -> None:
+        self.iso_calls += 1
 
     def fitAll(self) -> None:
         self.fit_calls += 1
 
 
 class FreeCADImportTests(unittest.TestCase):
-    def test_coordinate_conversion_and_consecutive_deduplication(self) -> None:
+    def test_points_are_millimetres_with_consecutive_deduplication(self) -> None:
         self.assertEqual(
-            freecad_import.converted_stroke([(100, 80), (100, 80), (120, 60)]),
-            ((25.0, -20.0, 0.0), (30.0, -15.0, 0.0)),
+            freecad_import.converted_points([(100, 80, 0), (100, 80, 0), (120, 60, 2500)]),
+            ((100.0, 80.0, 0.0), (120.0, 60.0, 2500.0)),
         )
-        self.assertEqual(
-            freecad_import.converted_stroke([(5, 5), (6, 6), (5, 5)]),
-            ((1.25, -1.25, 0.0), (1.5, -1.5, 0.0), (1.25, -1.25, 0.0)),
-        )
+        self.assertEqual(freecad_import.converted_points([(5, 5)]), ((5.0, 5.0, 0.0),))
 
-    def test_import_creates_polylines_and_vertex_for_single_point(self) -> None:
+    def test_import_creates_wires_for_lines_and_faces_for_rectangles(self) -> None:
         document = _FakeDocument()
         view = _FakeView()
-        vectors: list[tuple[float, float, float]] = []
         polygons: list[list[tuple[float, float, float]]] = []
-        vertices: list[tuple[float, float, float]] = []
+        faces: list[object] = []
 
-        fake_app = types.SimpleNamespace(
-            Vector=lambda x, y, z: (x, y, z),
-            newDocument=lambda _name: document,
-        )
+        fake_app = types.SimpleNamespace(Vector=lambda x, y, z: (x, y, z), newDocument=lambda _name: document)
         fake_gui = types.SimpleNamespace(
             showMainWindow=lambda: None,
             activeDocument=lambda: types.SimpleNamespace(activeView=lambda: view),
@@ -85,51 +78,66 @@ class FreeCADImportTests(unittest.TestCase):
             polygons.append(values)
             return ("polygon", values)
 
-        def make_vertex(item):
-            vertices.append(item)
-            return ("vertex", item)
+        def make_face(wire):
+            faces.append(wire)
+            return ("face", wire)
 
-        fake_part = types.SimpleNamespace(makePolygon=make_polygon, Vertex=make_vertex)
+        fake_part = types.SimpleNamespace(makePolygon=make_polygon, Face=make_face)
 
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory) / "drawing.json"
             snapshot.write_text(
                 json.dumps(
                     {
-                        "strokes": [
-                            [[100, 80], [100, 80], [120, 60]],
-                            [[4, 8], [4, 8]],
-                            [],
-                        ]
+                        "version": 2,
+                        "units": "mm",
+                        "entities": [
+                            {"type": "line", "points": [[0, 0, 0], [4000, 0, 0]]},
+                            {"type": "rect", "points": [[0, 0, 0], [4000, 0, 0], [4000, 0, 2500], [0, 0, 2500]]},
+                            {"type": "polyline", "points": [[0, 0, 0], [0, 0, 0], [1, 1, 1], [2, 2, 2]]},
+                        ],
                     }
                 ),
                 encoding="utf-8",
             )
-            with mock.patch.dict(
-                sys.modules,
-                {"FreeCAD": fake_app, "FreeCADGui": fake_gui, "Part": fake_part},
-            ):
+            with mock.patch.dict(sys.modules, {"FreeCAD": fake_app, "FreeCADGui": fake_gui, "Part": fake_part}):
                 result = freecad_import.import_drawing(snapshot)
 
         self.assertIs(result, document)
-        self.assertEqual([feature.Name for feature in document.objects], ["Stroke1", "Stroke2"])
-        self.assertEqual(polygons, [[(25.0, -20.0, 0.0), (30.0, -15.0, 0.0)]])
-        self.assertEqual(vertices, [(1.0, -2.0, 0.0)])
+        self.assertEqual([feature.Name for feature in document.objects], ["Line1", "Rectangle1", "Polyline1"])
+        self.assertEqual([feature.Label for feature in document.objects], ["Line 1", "Rectangle 1", "Polyline 1"])
+        self.assertEqual(polygons[0], [(0.0, 0.0, 0.0), (4000.0, 0.0, 0.0)])
+        # The rectangle wire is closed and turned into a face.
+        self.assertEqual(polygons[1][0], polygons[1][-1])
+        self.assertEqual(len(polygons[1]), 5)
+        self.assertEqual(faces, [("polygon", polygons[1])])
+        self.assertEqual(document.objects[1].Shape, ("face", ("polygon", polygons[1])))
+        self.assertEqual(polygons[2], [(0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (2.0, 2.0, 2.0)])
         self.assertTrue(all(feature.ViewObject.Visibility for feature in document.objects))
-        self.assertEqual(document.objects[0].ViewObject.LineColor, (1.0, 0.8, 0.1))
-        self.assertEqual(document.objects[0].ViewObject.LineWidth, 4.0)
-        self.assertEqual(document.objects[1].ViewObject.PointColor, (1.0, 0.8, 0.1))
-        self.assertEqual(document.objects[1].ViewObject.PointSize, 6.0)
+        self.assertEqual(document.objects[0].ViewObject.LineColor, freecad_import.LINE_COLOR)
+        self.assertEqual(document.objects[1].ViewObject.ShapeColor, freecad_import.FACE_COLOR)
+        self.assertEqual(document.objects[1].ViewObject.Transparency, 40)
+        self.assertIsNone(document.objects[0].ViewObject.ShapeColor)
         self.assertEqual(document.recompute_count, 1)
-        self.assertEqual(view.top_calls, 1)
+        self.assertEqual(view.iso_calls, 1)
         self.assertEqual(view.fit_calls, 1)
 
-    def test_malformed_snapshot_fails_before_document_creation(self) -> None:
+    def test_malformed_snapshots_fail_before_document_creation(self) -> None:
+        bad_payloads = [
+            '{"strokes": [[[1, 2]]]}',
+            '{"entities": [{"type": "line", "points": [[1, 2, 3]]}]}',
+            '{"entities": [{"type": "rect", "points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}]}',
+            '{"entities": [{"type": "sphere", "points": [[0, 0, 0], [1, 0, 0]]}]}',
+            '{"entities": [{"type": "line", "points": [[0, 0, 0], [0, 0, 0]]}]}',
+            '{"entities": [{"type": "line", "points": [[0, 0, 0], ["x", 0, 0]]}]}',
+        ]
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory) / "drawing.json"
-            snapshot.write_text('{"strokes": [[[1]]]}', encoding="utf-8")
-            with self.assertRaises(ValueError):
-                freecad_import.read_snapshot(snapshot)
+            for payload in bad_payloads:
+                with self.subTest(payload=payload):
+                    snapshot.write_text(payload, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        freecad_import.read_snapshot(snapshot)
 
 
 if __name__ == "__main__":

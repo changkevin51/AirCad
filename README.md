@@ -1,200 +1,192 @@
-# Webcam finger drawing
+# AirCAD
 
-This is a camera drawing app with an optional FreeCAD proof-of-concept bridge.
-It uses MediaPipe Hand Landmarker Tasks and OpenCV to draw directly over a
-mirrored webcam preview. Only completed stroke points can be sent to FreeCAD;
-camera frames are never saved or sent over the network.
+A spatial CAD sketching app: draw lines and rectangles in millimetres on a 3D work plane using a webcam-tracked fingertip (stand-in for a digital pen) or the mouse. The browser owns the CAD model; Python only tracks the hand and can export the sketch to FreeCAD.
 
-## Run on macOS
+## Requirements
 
-The dependencies are already installed in this project's `.venv`. In Finder,
-open the project folder and double-click **Start Drawing.command**.
-Allow Terminal (or the app running Python) to use the camera when macOS asks.
-If the first attempt exits during the permission prompt, launch it again.
+- **Python 3.10, 3.11, or 3.12** (MediaPipe 0.10.35 has no wheels for 3.13+)
+- **Node.js 18+** (to install and build the web UI)
+- A webcam is optional. Without one, run with `--no-camera` and draw with the mouse.
 
-Alternatively:
+## Install
+
+### Windows
+
+Install Python from [python.org](https://www.python.org/downloads/) and tick **Add python.exe to PATH**. Install [Node.js 18+](https://nodejs.org/). Then double-click **install.bat**.
+
+### macOS
+
+Install Python 3.10–3.12 and Node 18+, then double-click **install.command** (allow it in System Settings if macOS blocks it the first time).
+
+Alternatively from a terminal:
 
 ```bash
-cd "/path/to/Codex AirCad"
-.venv/bin/python hand_tracker.py
+# macOS / Linux
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cd web && npm install && npm run build && cd ..
 ```
-
-Use `.venv/bin/python hand_tracker.py --camera 1` for another camera index.
-
-## Run on Windows
-
-Install **Python 3.10, 3.11, or 3.12** from [python.org](https://www.python.org/downloads/)
-and tick **Add python.exe to PATH**. MediaPipe 0.10.35 does not support Python 3.13+.
-
-Then double-click **install.bat** once, allow camera access if Windows asks, and
-double-click **Start Drawing.bat**. If the first attempt exits during the
-permission prompt, launch it again.
-
-Alternatively from PowerShell or Command Prompt:
 
 ```bat
-cd "C:\path\to\Codex AirCad"
-install.bat
-.venv\Scripts\python.exe -u hand_tracker.py
+REM Windows
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+cd web && npm install && npm run build && cd ..
 ```
 
-Use `.venv\Scripts\python.exe -u hand_tracker.py --camera 1` for another camera
-index. A macOS `.venv` copied onto Windows will not work; `install.bat` replaces
-it with a Windows environment. Keep separate checkouts if you need both at once.
+A macOS `.venv` copied onto Windows will not work; `install.bat` replaces it. Keep separate checkouts if you need both at once.
 
-## Gesture workflow
+## Run
 
-1. Put one or both whole hands in view. Each hand gets its own color, cursor,
-   palm marker, and stable on-screen hand label.
-2. Touch thumb tip to index fingertip to pinch. After a brief debounce, the
-   index tip starts a stroke; move while pinched and release to finish. Both
-   hands can draw independent strokes at the same time.
-3. A single fully open palm held briefly arms one-hand pan. Move it deliberately
-   to pan every saved trail. Merely showing a hand does not pan.
-4. Two fully open palms held apart form navigation handles. Their midpoint
-   pans, their separation zooms, and the angle of the connecting line rotates
-   the saved drawing around the handle midpoint. Pinch always wins and blocks
-   navigation.
-5. Each completed stroke is checked by `shape_recognition.py`. Confident lines,
-   circles, triangles, and rectangles are shown as canonical shapes when
-   snapping is on. Uncertain strokes remain freehand. The original points stay
-   intact, so **S** can switch between snapped and raw display at any time.
+Double-click **Start AirCAD.bat** (Windows) or **Start AirCAD.command** (macOS). The server opens http://127.0.0.1:8765/ in your browser.
 
-The camera image stays fixed. Trails are stored in canvas coordinates and the
-pan/zoom/rotation view is applied when they are rendered; new fingertip points
-are inverse-projected into that same canvas, so drawing continues under the
-finger after navigation.
+```bash
+# macOS / Linux
+.venv/bin/python server.py
+```
+
+```bat
+REM Windows
+.venv\Scripts\python.exe -u server.py
+```
+
+Useful flags:
+
+- `--no-camera` — skip the webcam; the mouse drives the cursor
+- `--no-browser` — do not open a browser tab
+- `--camera 1` — another webcam index
+- `--port 8765` — HTTP port
+
+If Windows or macOS asked for camera access on first launch, allow it and start the app again.
+
+## Sketch a house
+
+1. Press **1** for the top view and draw a closed rectangle: the floor (for example 4000 × 3000 mm).
+2. Press **0** for the isometric view, then **Tab** until the plane chip says **XZ Front**.
+3. Hover a floor corner until the cursor becomes a square (vertex snap), hold **Space** and draw a rectangle upwards. The work plane moves through that corner, so the wall stands on the floor.
+4. **Tab** to **YZ Right**, hover another corner and draw the side wall the same way.
+5. Roof: hover a wall top corner, hold **Space** and draw a straight line to the opposite wall top. Vertex snaps connect the ends.
+6. Press **L** to type an exact size (`4000` or `4000x3000`) for the hovered or last entity, **E** to export to FreeCAD.
+
+**H** opens the same walkthrough plus the full key list.
 
 ## Controls
 
-Click the camera window first so it receives the keys.
+Keys stand in for pen buttons. Click the browser window first so it receives input.
 
-- **Space** — pause/resume gesture input. A held pinch must be released and
-  pinched again after resuming.
-- **C** — clear all trails and active strokes.
-- **U** — undo the most recent completed stroke.
-- **R** — reset pan, zoom, and rotation without clearing trails.
-- **S** — toggle automatic shape snapping.
-- **F** — send the completed raw strokes to FreeCAD. The same action is
-  available from the **SEND TO FREECAD** button in the camera window.
-- **Q**, **Esc**, or close the window — quit.
+### Pen buttons (hold)
 
-The in-window HUD repeats these controls and the current hand/trail/snap/view
-status. Tracking uses the camera frame; the preview starts at 960×720 and can
-be resized. Widescreen cameras and non-matching window sizes are letterboxed
-instead of stretched. The HUD also changes to `PAN ARMED` or `2-HAND VIEW`
-after the open-palm dwell, and marks the participating cursors.
+| Key | Action |
+| --- | --- |
+| **Space** | Pen button 1 — hold to draw a line or closed rectangle, release to commit |
+| **Shift** | Pen button 2 — hold and move to orbit |
+| **Ctrl** | Pen button 3 — hold and move to pan (Cmd is used for edit shortcuts on macOS) |
+| **X / Y / Z** | Hold while drawing to lock to that world axis |
 
-## Send a drawing to FreeCAD
+### Views and camera
 
-Draw and release the pinch to finish one or more strokes, then click **SEND TO
-FREECAD** or press **F**. The bridge snapshots the completed raw canvas points
-in `.runtime/freecad_drawing.json`, starts FreeCAD as a separate GUI process,
-and opens a top view containing one visible polyline per stroke. Export is a
-one-time snapshot: drawing afterward does not change an already opened
-FreeCAD document. Shape snapping affects the camera display only; the bridge
-always receives the original points. Inspect the JSON file when checking the
-transfer.
+| Key | Action |
+| --- | --- |
+| **1 / 2 / 3** | Top / Front / Right view (also sets the work plane to XY / XZ / YZ) |
+| **0** | Isometric view |
+| **5** | Orthographic / perspective |
+| **F** | Fit the sketch in view |
+| **= / -** | Zoom in / out around the cursor (or use the mouse wheel) |
 
-The bridge looks for `FreeCAD` on `PATH`, the standard macOS app executable,
-and typical Windows install folders under Program Files. If FreeCAD is
-installed elsewhere, run the camera with its executable path:
+### Work plane and snapping
+
+| Key | Action |
+| --- | --- |
+| **Tab** | Cycle work plane XY → XZ → YZ without moving the camera |
+| **G** | Grid snap on / off |
+| **N** | Off-hand palm navigation on / off (one open palm orbits, two palms pan/zoom) |
+
+Snapping priority while drawing: vertex → midpoint → axis-align to the stroke start (±8°) → edge → grid (1 / 10 / 100 / 1000 mm) → free. Starting on a vertex, midpoint, or edge moves the work plane through that point so the next wall connects to the last shape.
+
+### Editing and tools
+
+| Key | Action |
+| --- | --- |
+| **Ctrl+Z** / **Cmd+Z** | Undo |
+| **Ctrl+Shift+Z** / **Ctrl+Y** | Redo |
+| **Delete** / **Backspace** | Delete the hovered (or last) entity |
+| **Ctrl+Backspace** / **Cmd+Backspace** | Clear the sketch |
+| **Esc** | Cancel the current stroke / close overlays |
+| **L** | Type a length (`4000`) or size (`4000x3000`) |
+| **E** | Export to FreeCAD |
+| **P** | Camera picture-in-picture |
+| **H** | Help overlay |
+
+### Mouse (no webcam)
+
+Move the pointer to drive the cursor. Left drag draws, right drag orbits, middle drag pans, wheel zooms.
+
+## Coordinate system
+
+Everything is in millimetres. The origin is `(0, 0, 0)`, **Z is up**. The work plane is one of XY (top), XZ (front), or YZ (right) and always passes through an anchor point (the origin until you snap or commit).
+
+## Development
+
+Serve the tracker without a camera and run Vite for hot reload:
+
+```bash
+.venv/bin/python server.py --no-camera --no-browser
+cd web && npm run dev
+```
+
+On Windows use `.venv\Scripts\python.exe -u server.py --no-camera --no-browser`. Vite proxies `/ws` and `/api` to `http://127.0.0.1:8765`. Open the URL Vite prints (usually http://127.0.0.1:5173/).
+
+`window.aircad` in the browser is the same command surface (`commands.setDimension`, undo, export payload) that a later voice/AI layer can call.
+
+## Send a sketch to FreeCAD
+
+Finish at least one line or rectangle, then press **E**. The bridge writes millimetre entities to `.runtime/freecad_drawing.json`, starts FreeCAD as a separate GUI process, and opens an isometric view. Rectangles become faces; lines become wires. Export is a one-time snapshot: drawing afterward does not change an already opened FreeCAD document.
+
+The bridge looks for `FreeCAD` on `PATH`, the standard macOS app executable, and typical Windows install folders under Program Files. If FreeCAD is installed elsewhere:
 
 ```bash
 # macOS / Linux
 FREECAD_EXECUTABLE="/Applications/FreeCAD.app/Contents/MacOS/FreeCAD" \
-  .venv/bin/python hand_tracker.py
+  .venv/bin/python server.py
 ```
 
 ```powershell
 # Windows
 $env:FREECAD_EXECUTABLE = "C:\Program Files\FreeCAD 1.0\bin\FreeCAD.exe"
-.\.venv\Scripts\python.exe -u hand_tracker.py
+.\.venv\Scripts\python.exe -u server.py
 ```
 
-If sending reports that FreeCAD cannot be found or started, set
-`FREECAD_EXECUTABLE` to the executable (not the `.app` directory or a Windows
-install folder), confirm that `freecad_import.py` is beside `hand_tracker.py`,
-and read the terminal error detail. An empty send means no pinch has been
-completed yet; release the pinch and try **F** again. The camera remains
-usable after an empty send or a bridge launch failure.
+Set `FREECAD_EXECUTABLE` to the executable (not the `.app` directory or a Windows install folder). An empty export means nothing has been committed yet.
 
-## Hand labels and practical limits
-
-There is no dominant-hand requirement. MediaPipe's Left/Right label is useful
-for the HUD but is only a hint for identity; geometry and recent motion keep a
-hand stable when detector order changes, labels are missing/duplicated, or a
-hand briefly disappears. A temporary loss ends that hand's stroke so no unseen
-gap is connected. Reappearing while still pinched does not restart until the
-hand visibly releases. Crossings and heavy occlusion can still be ambiguous;
-keep the two hands reasonably separated for the most reliable two-hand
-navigation.
-
-Use good, even lighting and keep the whole hand inside the frame. Pinch needs
-the thumb and index tips to be visible. Open-palm navigation requires the
-fingers to be intentionally extended and held for roughly a quarter second;
-slow motion below the per-frame deadband accumulates rather than being ignored.
-Fast motion, extreme foreshortening, glare, motion blur, and hands leaving the
-camera image can temporarily pause tracking. Trails remain visible while
-tracking is lost or input is paused, but drawings are held in memory and are
-discarded when the app quits.
-
-## Install on a fresh setup
-
-macOS / Linux:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python hand_tracker.py
-```
-
-Windows: double-click **install.bat**, or:
-
-```bat
-py -3.12 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe -u hand_tracker.py
-```
-
-The `hand_landmarker.task` file next to the script is Google's hand-tracking
-model. If missing, the script downloads it automatically on first run (about
-8 MB). Tracking then runs locally; camera frames are not uploaded or saved.
-
-MediaPipe is pinned to 0.10.35 because the installed 1.0.1 release crashed
-during hand-landmarker initialization on this Apple Silicon Mac. This uses the
-Hand Landmarker Tasks API with two hands. See Google's
-[Python guide](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker/python)
-and [model download](https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task).
-
-## Troubleshooting
-
-- **Camera does not open (macOS):** allow the app running Python (such as
-  Terminal) under System Settings → Privacy & Security → Camera. Quit and
-  reopen that app after changing permission. Close other apps using the camera.
-- **Camera does not open (Windows):** allow camera access under Settings →
-  Privacy & security → Camera, then run **Start Drawing.bat** again. Close
-  other apps using the camera, or try `--camera 1`.
-- **Space/C/U/R/S do nothing:** click the camera window, not the terminal.
-- **No pinch cursor or trail:** show the whole hand, make the thumb/index
-  relationship clear, and check that the HUD is not paused.
-- **Navigation moves unexpectedly:** hold an open palm still until it arms;
-  pinch takes priority. Use **R** to rebaseline the view.
-- **Missing Python packages (macOS / Linux):** run
-  `.venv/bin/python -m pip install -r requirements.txt`.
-- **Missing Python packages (Windows):** run **install.bat**, or
-  `.venv\Scripts\python.exe -m pip install -r requirements.txt`.
-
-Unit tests use synthetic pixel-space observations and never require webcam
-access:
+## Tests
 
 ```bash
 # macOS / Linux
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+cd web && npm test
 ```
 
 ```bat
 REM Windows
 .venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
+cd web && npm test
 ```
+
+Python tests use synthetic observations and never require a webcam. The TypeScript tests cover recognition, snapping, work planes, sketch history, and measurements.
+
+## Troubleshooting
+
+- **Camera does not open (macOS):** allow the app running Python (such as Terminal) under System Settings → Privacy & Security → Camera. Quit and reopen that app after changing permission.
+- **Camera does not open (Windows):** allow camera access under Settings → Privacy & security → Camera, close other camera apps, or try `--camera 1`.
+- **Browser shows “web UI is not built yet”:** run **install.bat** / **install.command**, or `npm install && npm run build` inside `web/`.
+- **Keys do nothing:** click the 3D viewport so it has focus. If a measurement field is open, finish or cancel it first.
+- **Plane is edge-on:** press **Tab** or **1 / 2 / 3**, or orbit with **Shift**.
+- **Palm navigation moves unexpectedly:** press **N** to turn it off. Drawing (**Space**) always wins over palm nav.
+- **FreeCAD not found:** set `FREECAD_EXECUTABLE` as above and confirm `freecad_import.py` is beside `server.py`.
+- **Missing Python packages:** run **install.bat** / **install.command**, or `pip install -r requirements.txt` in `.venv`.
+- **Missing Node packages:** run `npm install` inside `web/`.
+
+The `hand_landmarker.task` file next to the scripts is Google's hand-tracking model. If missing, the server downloads it automatically on first camera run (about 8 MB). Tracking then runs locally; camera frames are not uploaded or saved.
+
+MediaPipe is pinned to 0.10.35 because the 1.0.1 release crashed during hand-landmarker initialization on Apple Silicon. See Google's [Hand Landmarker Python guide](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker/python).

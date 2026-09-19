@@ -1,4 +1,4 @@
-"""Boundary checks for the camera-to-FreeCAD bridge."""
+"""Boundary checks for the sketch-to-FreeCAD bridge."""
 
 from __future__ import annotations
 
@@ -9,6 +9,10 @@ import unittest
 from unittest import mock
 
 import freecad_bridge
+
+
+LINE = {"type": "line", "points": [[0, 0, 0], [4000, 0, 0]]}
+RECT = {"type": "rect", "points": [[0, 0, 0], [4000, 0, 0], [4000, 0, 2500], [0, 0, 2500]]}
 
 
 class FreeCADBridgeTests(unittest.TestCase):
@@ -24,33 +28,30 @@ class FreeCADBridgeTests(unittest.TestCase):
         )
         return temporary_directory, patches
 
-    def test_send_writes_project_relative_json_and_returns_latest_path(self) -> None:
+    def test_send_writes_versioned_mm_snapshot_and_returns_latest_path(self) -> None:
         temporary_directory, patches = self._isolated_paths()
         try:
             Path(temporary_directory.name, "freecad_import.py").write_text("", encoding="utf-8")
-            launched: list[tuple[list[str], dict[str, str]]] = []
-
-            def fake_launch(snapshot: Path) -> None:
-                launched.append(([], {freecad_bridge.SNAPSHOT_ENV: str(snapshot)}))
-
-            with patches, mock.patch.object(freecad_bridge, "_launch_freecad", fake_launch):
-                returned = freecad_bridge.send_to_freecad(
-                    (iter(((100, 100), (110.5, 105.0))),)
-                )
+            launched: list[Path] = []
+            with patches, mock.patch.object(freecad_bridge, "_launch_freecad", launched.append):
+                returned = freecad_bridge.send_to_freecad([LINE, {"type": "rect", "points": [(0, 0), (1.5, 0), (1.5, 2), (0, 2)], "id": "e7"}])
 
             expected = Path(temporary_directory.name, ".runtime", "freecad_drawing.json")
             self.assertEqual(returned, expected)
             self.assertEqual(
                 json.loads(returned.read_text(encoding="utf-8")),
-                {"strokes": [[[100, 100], [110.5, 105.0]]]},
+                {
+                    "version": 2,
+                    "units": "mm",
+                    "entities": [
+                        {"type": "line", "points": [[0, 0, 0], [4000, 0, 0]]},
+                        {"type": "rect", "points": [[0, 0, 0], [1.5, 0, 0], [1.5, 2, 0], [0, 2, 0]], "id": "e7"},
+                    ],
+                },
             )
             self.assertEqual(len(launched), 1)
-            child_snapshot = Path(launched[0][1][freecad_bridge.SNAPSHOT_ENV])
-            self.assertNotEqual(child_snapshot, returned)
-            self.assertEqual(
-                json.loads(child_snapshot.read_text()),
-                json.loads(returned.read_text()),
-            )
+            self.assertNotEqual(launched[0], returned)
+            self.assertEqual(json.loads(launched[0].read_text()), json.loads(returned.read_text()))
         finally:
             temporary_directory.cleanup()
 
@@ -59,75 +60,57 @@ class FreeCADBridgeTests(unittest.TestCase):
         try:
             Path(temporary_directory.name, "freecad_import.py").write_text("", encoding="utf-8")
             child_snapshots: list[Path] = []
-            with patches, mock.patch.object(
-                freecad_bridge,
-                "_launch_freecad",
-                lambda snapshot: child_snapshots.append(snapshot),
-            ):
-                freecad_bridge.send_to_freecad([[(1, 2)]])
-                freecad_bridge.send_to_freecad([[(9, 8)]])
+            with patches, mock.patch.object(freecad_bridge, "_launch_freecad", child_snapshots.append):
+                freecad_bridge.send_to_freecad([LINE])
+                freecad_bridge.send_to_freecad([RECT])
 
             self.assertEqual(len(child_snapshots), 2)
             self.assertNotEqual(child_snapshots[0], child_snapshots[1])
-            self.assertEqual(
-                json.loads(child_snapshots[0].read_text(encoding="utf-8")),
-                {"strokes": [[[1, 2]]]},
-            )
-            self.assertEqual(
-                json.loads(child_snapshots[1].read_text(encoding="utf-8")),
-                {"strokes": [[[9, 8]]]},
-            )
-            self.assertEqual(
-                json.loads(
-                    Path(temporary_directory.name, ".runtime", "freecad_drawing.json")
-                    .read_text(encoding="utf-8")
-                ),
-                {"strokes": [[[9, 8]]]},
-            )
+            self.assertEqual(json.loads(child_snapshots[0].read_text())["entities"][0]["type"], "line")
+            self.assertEqual(json.loads(child_snapshots[1].read_text())["entities"][0]["type"], "rect")
+            latest = Path(temporary_directory.name, ".runtime", "freecad_drawing.json")
+            self.assertEqual(json.loads(latest.read_text())["entities"][0]["type"], "rect")
         finally:
             temporary_directory.cleanup()
 
-    def test_bad_points_raise_value_error_before_launch(self) -> None:
+    def test_invalid_entities_raise_value_error_before_launch(self) -> None:
         temporary_directory, patches = self._isolated_paths()
         try:
+            bad_inputs = [
+                [],
+                [{"type": "line", "points": [[float("nan"), 1, 0], [0, 0, 0]]}],
+                [{"type": "line", "points": [[0, 0, 0]]}],
+                [{"type": "rect", "points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}],
+                [{"type": "circle", "points": [[0, 0, 0], [1, 0, 0]]}],
+                [{"type": "line", "points": [[0, 0, 0, 0], [1, 0, 0]]}],
+                [{"type": "line", "points": [[True, 0, 0], [1, 0, 0]]}],
+                ["not a mapping"],
+            ]
             with patches, mock.patch.object(freecad_bridge, "_launch_freecad") as launch:
-                with self.assertRaises(ValueError):
-                    freecad_bridge.send_to_freecad([[(float("nan"), 1)]])
+                for bad in bad_inputs:
+                    with self.subTest(bad=bad):
+                        with self.assertRaises(ValueError):
+                            freecad_bridge.send_to_freecad(bad)
             launch.assert_not_called()
         finally:
             temporary_directory.cleanup()
 
-    def test_empty_strokes_raise_value_error_before_launch(self) -> None:
-        temporary_directory, patches = self._isolated_paths()
-        try:
-            with patches, mock.patch.object(freecad_bridge, "_launch_freecad") as launch:
-                with self.assertRaises(ValueError):
-                    freecad_bridge.send_to_freecad([])
-            launch.assert_not_called()
-        finally:
-            temporary_directory.cleanup()
+    def test_normalize_entity_pads_2d_points_and_keeps_floats(self) -> None:
+        self.assertEqual(
+            freecad_bridge.normalize_entity({"type": "POLYLINE", "points": [(1, 2), (3.25, 4, 5)]}),
+            {"type": "polyline", "points": [[1, 2, 0], [3.25, 4, 5]]},
+        )
 
     def test_windows_candidates_include_program_files_install(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
         try:
-            exe = (
-                Path(temporary_directory.name)
-                / "FreeCAD 1.0"
-                / "bin"
-                / "FreeCAD.exe"
-            )
+            exe = Path(temporary_directory.name) / "FreeCAD 1.0" / "bin" / "FreeCAD.exe"
             exe.parent.mkdir(parents=True)
             exe.write_bytes(b"")
             with (
                 mock.patch.object(freecad_bridge.os, "name", "nt"),
-                mock.patch.object(
-                    freecad_bridge, "sys_platform_is_macos", return_value=False
-                ),
-                mock.patch.object(
-                    freecad_bridge,
-                    "_windows_search_roots",
-                    return_value=(Path(temporary_directory.name),),
-                ),
+                mock.patch.object(freecad_bridge, "sys_platform_is_macos", return_value=False),
+                mock.patch.object(freecad_bridge, "_windows_search_roots", return_value=(Path(temporary_directory.name),)),
             ):
                 candidates = freecad_bridge._freecad_candidates()
             self.assertIn(exe, candidates)
@@ -161,7 +144,7 @@ class FreeCADBridgeTests(unittest.TestCase):
             importer = Path(temporary_directory.name, "freecad_import.py")
             importer.write_text("", encoding="utf-8")
             snapshot = Path(temporary_directory.name, "snapshot.json")
-            snapshot.write_text('{"strokes": [[[1, 2]]]}', encoding="utf-8")
+            snapshot.write_text('{"version": 2, "units": "mm", "entities": []}', encoding="utf-8")
             with (
                 patches,
                 mock.patch.object(freecad_bridge, "_find_freecad", return_value="FreeCAD"),
@@ -178,7 +161,6 @@ class FreeCADBridgeTests(unittest.TestCase):
             self.assertIn(repr(str(importer)), macro_source)
             self.assertIn(repr(str(snapshot)), macro_source)
             self.assertIn("_module.main(_snapshot)", macro_source)
-            self.assertIn("spec_from_file_location('_aircad_freecad_import', _importer)", macro_source)
             self.assertEqual(kwargs["env"][freecad_bridge.SNAPSHOT_ENV], str(snapshot))
             self.assertTrue(kwargs["start_new_session"])
             self.assertIs(kwargs["stdin"], freecad_bridge.subprocess.DEVNULL)

@@ -1,0 +1,367 @@
+import {
+  add,
+  clone,
+  distance,
+  isFinite3,
+  lerp,
+  normalize,
+  scale,
+  sub,
+  v3,
+  type Vec3,
+} from './vec';
+
+export interface LineEntity {
+  id: string;
+  type: 'line';
+  a: Vec3;
+  b: Vec3;
+}
+
+/** Planar rectangle; corners are ordered around the outline, `corners[0]` is the origin corner. */
+export interface RectEntity {
+  id: string;
+  type: 'rect';
+  corners: [Vec3, Vec3, Vec3, Vec3];
+}
+
+export type Entity = LineEntity | RectEntity;
+export type EntityInput =
+  | { type: 'line'; a: Vec3; b: Vec3 }
+  | { type: 'rect'; corners: [Vec3, Vec3, Vec3, Vec3] };
+
+export interface Vertex {
+  entityId: string;
+  point: Vec3;
+  /** Index of the vertex within its entity. */
+  index: number;
+}
+
+export interface Segment {
+  entityId: string;
+  a: Vec3;
+  b: Vec3;
+  index: number;
+}
+
+export interface BoundingBox {
+  min: Vec3;
+  max: Vec3;
+}
+
+export interface SketchJSON {
+  version: 1;
+  units: 'mm';
+  entities: Entity[];
+}
+
+export interface SketchCommand {
+  label: string;
+  apply(): void;
+  revert(): void;
+}
+
+export type SketchListener = (reason: string) => void;
+
+export const lineLength = (line: LineEntity): number => distance(line.a, line.b);
+
+export function rectFrame(rect: RectEntity): { origin: Vec3; uDir: Vec3; vDir: Vec3; width: number; height: number } {
+  const [c0, c1, , c3] = rect.corners;
+  const uEdge = sub(c1, c0);
+  const vEdge = sub(c3, c0);
+  return {
+    origin: clone(c0),
+    uDir: normalize(uEdge),
+    vDir: normalize(vEdge),
+    width: distance(c0, c1),
+    height: distance(c0, c3),
+  };
+}
+
+export function makeRect(origin: Vec3, uDir: Vec3, vDir: Vec3, width: number, height: number): [Vec3, Vec3, Vec3, Vec3] {
+  const u = scale(normalize(uDir), width);
+  const v = scale(normalize(vDir), height);
+  return [clone(origin), add(origin, u), add(add(origin, u), v), add(origin, v)];
+}
+
+export function rectNormal(rect: RectEntity): Vec3 {
+  const { uDir, vDir } = rectFrame(rect);
+  return normalize(v3(
+    uDir.y * vDir.z - uDir.z * vDir.y,
+    uDir.z * vDir.x - uDir.x * vDir.z,
+    uDir.x * vDir.y - uDir.y * vDir.x,
+  ));
+}
+
+export function entityVertices(entity: Entity): Vertex[] {
+  if (entity.type === 'line') {
+    return [
+      { entityId: entity.id, point: entity.a, index: 0 },
+      { entityId: entity.id, point: entity.b, index: 1 },
+    ];
+  }
+  return entity.corners.map((point, index) => ({ entityId: entity.id, point, index }));
+}
+
+export function entitySegments(entity: Entity): Segment[] {
+  if (entity.type === 'line') return [{ entityId: entity.id, a: entity.a, b: entity.b, index: 0 }];
+  return entity.corners.map((corner, index) => ({
+    entityId: entity.id,
+    a: corner,
+    b: entity.corners[(index + 1) % 4],
+    index,
+  }));
+}
+
+export function entityMidpoints(entity: Entity): Vertex[] {
+  return entitySegments(entity).map((segment) => ({
+    entityId: entity.id,
+    point: lerp(segment.a, segment.b, 0.5),
+    index: segment.index,
+  }));
+}
+
+export function entityCenter(entity: Entity): Vec3 {
+  if (entity.type === 'line') return lerp(entity.a, entity.b, 0.5);
+  return lerp(entity.corners[0], entity.corners[2], 0.5);
+}
+
+export function entityPoints(entity: Entity): Vec3[] {
+  return entity.type === 'line' ? [entity.a, entity.b] : [...entity.corners];
+}
+
+export function describeEntity(entity: Entity): string {
+  if (entity.type === 'line') return `line ${formatMm(lineLength(entity))}`;
+  const { width, height } = rectFrame(entity);
+  return `rectangle ${formatMm(width)} x ${formatMm(height)}`;
+}
+
+export function formatMm(value: number): string {
+  const rounded = Math.round(value * 10) / 10;
+  return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)} mm`;
+}
+
+function validateInput(input: EntityInput): void {
+  const points = input.type === 'line' ? [input.a, input.b] : input.corners;
+  if (input.type === 'rect' && input.corners.length !== 4) throw new Error('a rectangle needs four corners');
+  for (const point of points) {
+    if (!isFinite3(point)) throw new Error('entity coordinates must be finite');
+  }
+}
+
+/**
+ * The sketch model: a list of entities plus an undo/redo command stack.
+ * Every mutation goes through `execute`, so undo/redo and change events
+ * stay consistent whether the change came from a pen stroke, a key, a
+ * measurement edit, or (later) a voice/AI command.
+ */
+export class Sketch {
+  private entities: Entity[] = [];
+  private undoStack: SketchCommand[] = [];
+  private redoStack: SketchCommand[] = [];
+  private listeners = new Set<SketchListener>();
+  private nextId = 1;
+
+  get all(): readonly Entity[] {
+    return this.entities;
+  }
+
+  get size(): number {
+    return this.entities.length;
+  }
+
+  get last(): Entity | undefined {
+    return this.entities[this.entities.length - 1];
+  }
+
+  get canUndo(): boolean {
+    return this.undoStack.length > 0;
+  }
+
+  get canRedo(): boolean {
+    return this.redoStack.length > 0;
+  }
+
+  get(id: string): Entity | undefined {
+    return this.entities.find((entity) => entity.id === id);
+  }
+
+  onChange(listener: SketchListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(reason: string): void {
+    for (const listener of this.listeners) listener(reason);
+  }
+
+  execute(command: SketchCommand): void {
+    command.apply();
+    this.undoStack.push(command);
+    this.redoStack.length = 0;
+    this.emit(command.label);
+  }
+
+  undo(): string | null {
+    const command = this.undoStack.pop();
+    if (!command) return null;
+    command.revert();
+    this.redoStack.push(command);
+    this.emit(`undo ${command.label}`);
+    return command.label;
+  }
+
+  redo(): string | null {
+    const command = this.redoStack.pop();
+    if (!command) return null;
+    command.apply();
+    this.undoStack.push(command);
+    this.emit(`redo ${command.label}`);
+    return command.label;
+  }
+
+  private allocateId(): string {
+    return `e${this.nextId++}`;
+  }
+
+  private materialize(input: EntityInput, id: string): Entity {
+    if (input.type === 'line') return { id, type: 'line', a: clone(input.a), b: clone(input.b) };
+    return { id, type: 'rect', corners: input.corners.map(clone) as [Vec3, Vec3, Vec3, Vec3] };
+  }
+
+  addEntity(input: EntityInput, label?: string): Entity {
+    validateInput(input);
+    const entity = this.materialize(input, this.allocateId());
+    this.execute({
+      label: label ?? `add ${entity.type}`,
+      apply: () => {
+        this.entities = [...this.entities, entity];
+      },
+      revert: () => {
+        this.entities = this.entities.filter((candidate) => candidate.id !== entity.id);
+      },
+    });
+    return entity;
+  }
+
+  removeEntity(id: string, label?: string): boolean {
+    const index = this.entities.findIndex((entity) => entity.id === id);
+    if (index < 0) return false;
+    const removed = this.entities[index];
+    this.execute({
+      label: label ?? `delete ${removed.type}`,
+      apply: () => {
+        this.entities = this.entities.filter((entity) => entity.id !== id);
+      },
+      revert: () => {
+        const next = [...this.entities];
+        next.splice(Math.min(index, next.length), 0, removed);
+        this.entities = next;
+      },
+    });
+    return true;
+  }
+
+  replaceEntity(id: string, input: EntityInput, label?: string): Entity | null {
+    const index = this.entities.findIndex((entity) => entity.id === id);
+    if (index < 0) return null;
+    validateInput(input);
+    const previous = this.entities[index];
+    const next = this.materialize(input, id);
+    this.execute({
+      label: label ?? `edit ${next.type}`,
+      apply: () => {
+        this.entities = this.entities.map((entity) => (entity.id === id ? next : entity));
+      },
+      revert: () => {
+        this.entities = this.entities.map((entity) => (entity.id === id ? previous : entity));
+      },
+    });
+    return next;
+  }
+
+  clear(): number {
+    const removed = this.entities;
+    if (!removed.length) return 0;
+    this.execute({
+      label: `clear ${removed.length} entities`,
+      apply: () => {
+        this.entities = [];
+      },
+      revert: () => {
+        this.entities = removed;
+      },
+    });
+    return removed.length;
+  }
+
+  vertices(): Vertex[] {
+    return this.entities.flatMap(entityVertices);
+  }
+
+  midpoints(): Vertex[] {
+    return this.entities.flatMap(entityMidpoints);
+  }
+
+  segments(): Segment[] {
+    return this.entities.flatMap(entitySegments);
+  }
+
+  boundingBox(): BoundingBox | null {
+    let box: BoundingBox | null = null;
+    for (const entity of this.entities) {
+      for (const point of entityPoints(entity)) {
+        if (!box) {
+          box = { min: clone(point), max: clone(point) };
+          continue;
+        }
+        box.min = v3(Math.min(box.min.x, point.x), Math.min(box.min.y, point.y), Math.min(box.min.z, point.z));
+        box.max = v3(Math.max(box.max.x, point.x), Math.max(box.max.y, point.y), Math.max(box.max.z, point.z));
+      }
+    }
+    return box;
+  }
+
+  /** Orbit pivot: bounding-box centre, or the origin when the sketch is empty. */
+  center(): Vec3 {
+    const box = this.boundingBox();
+    return box ? lerp(box.min, box.max, 0.5) : v3(0, 0, 0);
+  }
+
+  toJSON(): SketchJSON {
+    return {
+      version: 1,
+      units: 'mm',
+      entities: this.entities.map((entity) => this.materialize(entity, entity.id)),
+    };
+  }
+
+  serialize(): string {
+    return JSON.stringify(this.toJSON());
+  }
+
+  /** Replace the contents without touching history (e.g. loading a file). */
+  load(data: SketchJSON): void {
+    const entities: Entity[] = [];
+    let maxId = 0;
+    for (const raw of data.entities ?? []) {
+      const input = raw as EntityInput & { id?: string };
+      validateInput(input);
+      const id = typeof input.id === 'string' && input.id ? input.id : this.allocateId();
+      const numeric = Number(id.replace(/^e/, ''));
+      if (Number.isFinite(numeric)) maxId = Math.max(maxId, numeric);
+      entities.push(this.materialize(input, id));
+    }
+    this.entities = entities;
+    this.nextId = Math.max(this.nextId, maxId + 1);
+    this.undoStack = [];
+    this.redoStack = [];
+    this.emit('load');
+  }
+
+  static fromJSON(data: SketchJSON): Sketch {
+    const sketch = new Sketch();
+    sketch.load(data);
+    return sketch;
+  }
+}

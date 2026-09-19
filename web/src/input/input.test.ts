@@ -1,0 +1,120 @@
+import { describe, expect, it } from 'vitest';
+import { v2 } from '../model/vec';
+import { CursorSource, mapFrameToViewport, pickCursorHand, regionRect } from './cursor';
+import { holdActionForCode, keyLabel, PRESS_BINDINGS, resolveHold, resolvePress, type KeyLike } from './keymap';
+import { OneEuroFilter } from './one-euro';
+import { parseTrackerMessage, type HandsMessage, type TrackedHandMessage } from './tracker-client';
+
+const key = (code: string, mods: Partial<KeyLike> = {}): KeyLike => ({
+  code,
+  ctrlKey: false,
+  shiftKey: false,
+  altKey: false,
+  metaKey: false,
+  ...mods,
+});
+
+describe('keymap', () => {
+  it('resolves press actions with platform-aware modifiers', () => {
+    expect(resolvePress(key('Digit1'), 'other')).toBe('viewTop');
+    expect(resolvePress(key('KeyZ', { ctrlKey: true }), 'other')).toBe('undo');
+    expect(resolvePress(key('KeyZ', { ctrlKey: true, shiftKey: true }), 'other')).toBe('redo');
+    expect(resolvePress(key('KeyY', { ctrlKey: true }), 'other')).toBe('redo');
+    expect(resolvePress(key('KeyZ', { metaKey: true }), 'mac')).toBe('undo');
+    expect(resolvePress(key('KeyZ', { ctrlKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('Backspace'), 'other')).toBe('delete');
+    expect(resolvePress(key('Backspace', { ctrlKey: true }), 'other')).toBe('clear');
+    expect(resolvePress(key('Backspace', { metaKey: true }), 'mac')).toBe('clear');
+    expect(resolvePress(key('KeyQ'), 'other')).toBeNull();
+  });
+
+  it('keeps plain Z as an axis lock but not with the primary modifier', () => {
+    expect(resolveHold(key('KeyZ'), 'other')).toBe('lockZ');
+    expect(resolveHold(key('KeyZ', { ctrlKey: true }), 'other')).toBeNull();
+    expect(resolveHold(key('Space'), 'other')).toBe('draw');
+    expect(resolveHold(key('ShiftRight'), 'other')).toBe('orbit');
+    expect(holdActionForCode('ControlLeft')).toBe('pan');
+  });
+
+  it('labels primary-modifier bindings per platform', () => {
+    const undo = PRESS_BINDINGS.find((b) => b.action === 'undo')!;
+    expect(keyLabel(undo, 'other')).toBe('Ctrl+Z');
+    expect(keyLabel(undo, 'mac')).toBe('Cmd+Z');
+  });
+});
+
+describe('cursor mapping', () => {
+  it('maps the central camera region onto the whole viewport', () => {
+    const frame = { w: 640, h: 480 };
+    const viewport = { w: 1280, h: 720 };
+    const region = regionRect(frame);
+    expect(region.x).toBeCloseTo(76.8);
+    expect(region.y).toBeCloseTo(57.6);
+    expect(region.w).toBeCloseTo(486.4);
+    expect(region.h).toBeCloseTo(364.8);
+    const centre = mapFrameToViewport(v2(320, 240), frame, viewport);
+    expect(centre.x).toBeCloseTo(640);
+    expect(centre.y).toBeCloseTo(360);
+    const topLeft = mapFrameToViewport(v2(76.8, 57.6), frame, viewport);
+    expect(topLeft.x).toBeCloseTo(0);
+    expect(topLeft.y).toBeCloseTo(0);
+    const clamped = mapFrameToViewport(v2(0, 480), frame, viewport);
+    expect(clamped).toEqual(v2(0, 720));
+  });
+
+  const hand = (id: number, openArmed = false): TrackedHandMessage => ({
+    id,
+    handedness: 'right',
+    tip: [320, 240],
+    thumb: [300, 250],
+    palm: [330, 300],
+    palmSize: 80,
+    pinching: false,
+    open: openArmed,
+    openArmed,
+    landmarks: [],
+  });
+
+  it('sticks to the current hand and avoids the navigating palm', () => {
+    expect(pickCursorHand([hand(1, true), hand(2)], null)?.id).toBe(2);
+    expect(pickCursorHand([hand(1), hand(2)], 2)?.id).toBe(2);
+    expect(pickCursorHand([hand(1, true)], null)?.id).toBe(1);
+    expect(pickCursorHand([], 1)).toBeNull();
+  });
+
+  it('lets the mouse take over only after the hand is lost', () => {
+    const cursor = new CursorSource({}, 0.3);
+    const message: HandsMessage = { type: 'hands', t: 0, frame: { w: 640, h: 480 }, hands: [hand(1)], nav: null };
+    cursor.updateHands(message, { w: 1000, h: 800 }, 1.0);
+    expect(cursor.tracking).toBe('hand');
+    expect(cursor.updateMouse(v2(5, 5), 1.1)).toBe(false);
+    cursor.updateHands({ ...message, hands: [] }, { w: 1000, h: 800 }, 1.2);
+    expect(cursor.tracking).toBe('lost');
+    expect(cursor.position?.x).toBeCloseTo(500);
+    expect(cursor.updateMouse(v2(5, 5), 1.25)).toBe(true);
+    expect(cursor.tracking).toBe('mouse');
+    cursor.updateHands(message, { w: 1000, h: 800 }, 1.3);
+    expect(cursor.tracking).toBe('hand');
+  });
+});
+
+describe('one-euro filter', () => {
+  it('converges on a constant and follows a fast ramp closely', () => {
+    const filter = new OneEuroFilter({ minCutoff: 1, beta: 0.05 });
+    let value = 0;
+    for (let i = 0; i < 60; i++) value = filter.filter(100, i / 60);
+    expect(value).toBeCloseTo(100, 0);
+    const fast = new OneEuroFilter({ minCutoff: 1, beta: 0.05 });
+    let out = 0;
+    for (let i = 0; i <= 30; i++) out = fast.filter(i * 40, i / 60);
+    expect(Math.abs(out - 1200)).toBeLessThan(120);
+  });
+});
+
+describe('tracker protocol parsing', () => {
+  it('accepts known message types only', () => {
+    expect(parseTrackerMessage('{"type":"status","camera":"ready","message":"ok"}')?.type).toBe('status');
+    expect(parseTrackerMessage('{"type":"bogus"}')).toBeNull();
+    expect(parseTrackerMessage('not json')).toBeNull();
+  });
+});

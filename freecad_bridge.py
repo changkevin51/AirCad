@@ -1,8 +1,14 @@
-"""Small, asynchronous bridge from camera strokes to the FreeCAD GUI.
+"""Small, asynchronous bridge from AirCAD sketch entities to the FreeCAD GUI.
 
-The camera process only imports this module's standard-library code.  FreeCAD
+The server process only imports this module's standard-library code.  FreeCAD
 is launched as a separate process and imports :mod:`freecad_import` itself,
-so no FreeCAD package is required in the camera virtual environment.
+so no FreeCAD package is required in the AirCAD virtual environment.
+
+Entities are millimetre geometry produced by the web UI::
+
+    {"type": "line", "points": [[x, y, z], [x, y, z]]}
+    {"type": "rect", "points": [[x, y, z] * 4]}          # becomes a face
+    {"type": "polyline", "points": [[x, y, z], ...]}      # open wire
 """
 
 from __future__ import annotations
@@ -18,13 +24,14 @@ import sys
 import tempfile
 import threading
 import uuid
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = PROJECT_ROOT / ".runtime"
 SNAPSHOT_PATH = RUNTIME_DIR / "freecad_drawing.json"
 FREECAD_IMPORT_SCRIPT = PROJECT_ROOT / "freecad_import.py"
+SNAPSHOT_VERSION = 2
 
 # A child process gets its own immutable snapshot path.  The canonical path is
 # still updated on every send for inspection and for manual FreeCAD runs.
@@ -32,52 +39,67 @@ SNAPSHOT_ENV = "AIRCAD_FREECAD_SNAPSHOT"
 FREECAD_EXECUTABLE_ENV = "FREECAD_EXECUTABLE"
 _SNAPSHOT_LOCK = threading.Lock()
 
+ENTITY_POINT_COUNTS = {"line": (2, 2), "rect": (4, 4), "polyline": (2, None)}
+
 
 def _numeric(value: object) -> int | float:
     """Return a JSON-safe finite number, rejecting booleans and NaN/Inf."""
 
     if isinstance(value, bool) or not isinstance(value, numbers.Number):
-        raise ValueError("stroke coordinates must be numeric")
+        raise ValueError("coordinates must be numeric")
     try:
         converted = float(value)
     except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError("stroke coordinates must be numeric") from error
+        raise ValueError("coordinates must be numeric") from error
     if not math.isfinite(converted):
-        raise ValueError("stroke coordinates must be finite")
-    # Keep ordinary integral camera coordinates compact in the snapshot.
-    if converted.is_integer() and isinstance(value, numbers.Integral):
-        return int(value)
+        raise ValueError("coordinates must be finite")
+    if converted.is_integer():
+        return int(converted)
     return converted
 
 
-def _snapshot_strokes(
-    strokes: Iterable[Iterable[Iterable[object]]],
-) -> list[list[list[int | float]]]:
-    """Validate and materialize the completed raw strokes for JSON export."""
+def _point(value: object) -> list[int | float]:
+    """Accept ``[x, y]`` or ``[x, y, z]`` and always return three coordinates."""
 
     try:
-        stroke_values = iter(strokes)
+        coordinates = list(value)  # type: ignore[arg-type]
     except TypeError as error:
-        raise ValueError("strokes must be an iterable of strokes") from error
+        raise ValueError("each point must contain two or three coordinates") from error
+    if len(coordinates) == 2:
+        coordinates.append(0)
+    if len(coordinates) != 3:
+        raise ValueError("each point must contain two or three coordinates")
+    return [_numeric(coordinate) for coordinate in coordinates]
 
-    snapshot: list[list[list[int | float]]] = []
-    for stroke in stroke_values:
-        try:
-            point_values = iter(stroke)
-        except TypeError as error:
-            raise ValueError("each stroke must be an iterable of points") from error
 
-        points: list[list[int | float]] = []
-        for point in point_values:
-            try:
-                coordinates = list(point)
-            except TypeError as error:
-                raise ValueError("each point must contain two numeric coordinates") from error
-            if len(coordinates) != 2:
-                raise ValueError("each point must contain exactly two coordinates")
-            points.append([_numeric(coordinates[0]), _numeric(coordinates[1])])
-        snapshot.append(points)
-    return snapshot
+def normalize_entity(entity: object) -> dict[str, Any]:
+    """Validate one entity mapping and return its JSON-ready form."""
+
+    if not isinstance(entity, Mapping):
+        raise ValueError("each entity must be a mapping with 'type' and 'points'")
+    kind = str(entity.get("type", "")).lower()
+    if kind not in ENTITY_POINT_COUNTS:
+        raise ValueError("unsupported entity type: {!r}".format(entity.get("type")))
+    try:
+        raw_points = list(entity.get("points", ()))
+    except TypeError as error:
+        raise ValueError("entity points must be a list of points") from error
+    minimum, maximum = ENTITY_POINT_COUNTS[kind]
+    if len(raw_points) < minimum or (maximum is not None and len(raw_points) > maximum):
+        raise ValueError("a {} needs {} points".format(kind, minimum if maximum == minimum else f"at least {minimum}"))
+    points = [_point(point) for point in raw_points]
+    normalized: dict[str, Any] = {"type": kind, "points": points}
+    if entity.get("id") is not None:
+        normalized["id"] = str(entity["id"])
+    return normalized
+
+
+def _snapshot_entities(entities: Iterable[object]) -> list[dict[str, Any]]:
+    try:
+        values = iter(entities)
+    except TypeError as error:
+        raise ValueError("entities must be an iterable of entity mappings") from error
+    return [normalize_entity(entity) for entity in values]
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:
@@ -219,8 +241,8 @@ def _launch_freecad(snapshot: Path) -> None:
         raise OSError(f"could not start FreeCAD GUI: {error}") from error
 
 
-def send_to_freecad(strokes: Iterable[Iterable[Iterable[object]]]) -> Path:
-    """Snapshot completed raw strokes and asynchronously open them in FreeCAD.
+def send_to_freecad(entities: Iterable[object]) -> Path:
+    """Snapshot sketch entities (mm) and asynchronously open them in FreeCAD.
 
     The returned path is always the project-relative runtime snapshot
     ``.runtime/freecad_drawing.json``.  Each process receives a separate hidden
@@ -228,11 +250,11 @@ def send_to_freecad(strokes: Iterable[Iterable[Iterable[object]]]) -> Path:
     change what an earlier FreeCAD process imports.
     """
 
-    normalized = _snapshot_strokes(strokes)
-    if not any(normalized_stroke for normalized_stroke in normalized):
-        raise ValueError("at least one completed stroke with points is required")
+    normalized = _snapshot_entities(entities)
+    if not normalized:
+        raise ValueError("at least one entity is required")
     payload = json.dumps(
-        {"strokes": normalized},
+        {"version": SNAPSHOT_VERSION, "units": "mm", "entities": normalized},
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -246,4 +268,4 @@ def send_to_freecad(strokes: Iterable[Iterable[Iterable[object]]]) -> Path:
     return SNAPSHOT_PATH
 
 
-__all__ = ["send_to_freecad"]
+__all__ = ["normalize_entity", "send_to_freecad"]
