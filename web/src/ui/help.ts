@@ -11,10 +11,11 @@ import {
 
 const WALKTHROUGH = [
   'Press 1 for the top view and draw a closed rectangle: the floor (e.g. 4000 x 3000).',
-  'Press 0 for the isometric view, then Tab until the plane chip says XZ Front.',
-  'Hover a floor corner until the cursor becomes a square (vertex snap), hold Space and draw a rectangle upwards: the plane moves through that corner, so the wall stands on the floor.',
-  'Tab to YZ Right, hover another corner and draw the side wall the same way.',
-  'Roof: hover a wall top corner, hold Space and draw a straight line to the opposite wall top. Vertex snaps connect the ends exactly.',
+  'Press 0 for the isometric view, then Tab until the plane preview shows XZ Front.',
+  'Hold Space starting on a floor border and draw the other three sides of the wall upwards: one continuous stroke completes against the shared border. Or draw the three sides as three separately committed straight strokes; the third one assembles the wall.',
+  'Tab until YZ Right and repeat on the side borders to raise the other walls, then snap a roof line between wall-top vertices.',
+  'A switches to optional Auto mode: the work plane follows the view and what you hover (a face interior, an edge, or a vertex). Check the plane preview and use Tab or 1 / 2 / 3 when the choice is ambiguous; the plane locks while you draw and never moves mid-stroke.',
+  'Views 1 / 2 / 3 / 0 glide smoothly, and releasing an orbit within 6 degrees of a view settles onto it.',
   'Press L to type an exact size (4000 or 4000x3000) for the hovered or last entity, E to export to FreeCAD.',
 ];
 
@@ -56,7 +57,7 @@ export class HelpOverlay {
         <header><h2>AirCAD - pen sketching in 3D</h2><span>H or Esc to close</span></header>
         <p class="help__intro">
           Your index fingertip (or the mouse) is the cursor. Keys stand in for the pen buttons:
-          hold <kbd>Space</kbd> to draw a straight line or a closed rectangle on the work plane,
+          hold <kbd>Space</kbd> to draw a straight line, a closed rectangle, or three wall sides onto a shared border on the work plane,
           hold <kbd>Shift</kbd> to orbit and <kbd>Ctrl</kbd> to pan. Everything is in millimetres.
         </p>
         <div class="help__grid">

@@ -81,3 +81,72 @@ describe('Commands.setDimension', () => {
     expect(commands.addLine(v3(1, 1, 1), v3(1, 1, 1)).ok).toBe(false);
   });
 });
+
+describe('Commands.commitStroke', () => {
+  const completedRect = (): [ReturnType<typeof v3>, ReturnType<typeof v3>, ReturnType<typeof v3>, ReturnType<typeof v3>] =>
+    [v3(4000, 0, 0), v3(4000, 3000, 0), v3(7000, 3000, 0), v3(7000, 0, 0)];
+
+  it('dispatches to addLine/addRect when no replacements are given', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const line = commands.commitStroke({ type: 'line', a: v3(0, 0, 0), b: v3(100, 0, 0) });
+    expect(line.ok).toBe(true);
+    const rect = commands.commitStroke({ type: 'rect', corners: completedRect() });
+    expect(rect.ok).toBe(true);
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e2']);
+    expect(commands.commitStroke({ type: 'line', a: v3(0, 0, 0), b: v3(0, 0, 0) }).ok).toBe(false);
+  });
+
+  it('commits a completed rectangle and removes the consolidated lines atomically', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    commands.addLine(v3(4000, 0, 0), v3(7000, 0, 0));
+    commands.addLine(v3(7000, 0, 0), v3(7000, 3000, 0));
+
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+    const result = commands.commitStroke({ type: 'rect', corners: completedRect() }, ['e2', 'e3']);
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.entity.id).toBe('e4');
+    expect(result.ok && result.message).toMatch(/rectangle/i);
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e4']);
+    expect(reasons).toEqual(['complete rectangle']);
+
+    commands.undo();
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e2', 'e3']);
+    commands.redo();
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e4']);
+  });
+
+  it('fails on unknown replacement ids without history or id allocation', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    commands.addLine(v3(4000, 0, 0), v3(7000, 0, 0));
+    const result = commands.commitStroke({ type: 'rect', corners: completedRect() }, ['e1', 'e9']);
+    expect(result.ok).toBe(false);
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1']);
+    expect(commands.undo()).toBe('add line');
+    const after = commands.addLine(v3(0, 0, 0), v3(5, 0, 0));
+    expect(after.ok && after.entity.id).toBe('e2');
+  });
+
+  it('rejects invalid or non-rectangle input for replacements', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    commands.addLine(v3(4000, 0, 0), v3(7000, 0, 0));
+    expect(commands.commitStroke({ type: 'line', a: v3(0, 0, 0), b: v3(9, 0, 0) }, ['e1']).ok).toBe(false);
+    const flat = commands.commitStroke(
+      { type: 'rect', corners: [v3(0, 0, 0), v3(0, 0, 0), v3(0, 0, 0), v3(0, 0, 0)] },
+      ['e1'],
+    );
+    expect(flat.ok).toBe(false);
+    const nan = commands.commitStroke(
+      { type: 'rect', corners: [v3(0, 0, 0), v3(Number.NaN, 0, 0), v3(3, 3, 0), v3(0, 3, 0)] },
+      ['e1'],
+    );
+    expect(nan.ok).toBe(false);
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1']);
+    expect(commands.undo()).toBe('add line');
+  });
+});

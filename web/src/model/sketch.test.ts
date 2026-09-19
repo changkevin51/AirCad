@@ -83,4 +83,44 @@ describe('Sketch', () => {
     expect(frame.uDir).toEqual(v3(1, 0, 0));
     expect(frame.vDir).toEqual(v3(0, 0, 1));
   });
+
+  it('replaces several entities atomically with one event and exact undo/redo', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'rect', corners: floor() });
+    sketch.addEntity({ type: 'line', a: v3(4000, 0, 0), b: v3(7000, 0, 0) });
+    sketch.addEntity({ type: 'line', a: v3(7000, 0, 0), b: v3(7000, 3000, 0) });
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+
+    const added = sketch.replaceEntities(
+      ['e2', 'e3'],
+      [{ type: 'rect', corners: makeRect(v3(4000, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 3000, 3000) }],
+      'complete rectangle',
+    );
+    expect(added).toHaveLength(1);
+    expect(added[0].id).toBe('e4');
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e4']);
+    expect(reasons).toEqual(['complete rectangle']);
+
+    sketch.undo();
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e2', 'e3']);
+    expect((sketch.get('e2') as { b: { x: number } }).b.x).toBe(7000);
+    sketch.redo();
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e4']);
+    expect(sketch.get('e4')?.type).toBe('rect');
+  });
+
+  it('validates every replacement id and input before mutating', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(0, 0, 0), b: v3(100, 0, 0) });
+    expect(() =>
+      sketch.replaceEntities(['e1', 'missing'], [{ type: 'line', a: v3(0, 0, 0), b: v3(5, 0, 0) }], 'x'),
+    ).toThrow('entity vanished');
+    expect(() =>
+      sketch.replaceEntities(['e1'], [{ type: 'line', a: v3(0, 0, 0), b: v3(Number.NaN, 0, 0) }], 'x'),
+    ).toThrow();
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1']);
+    expect(sketch.undo()).toBe('add line');
+    expect(sketch.canUndo).toBe(false);
+  });
 });

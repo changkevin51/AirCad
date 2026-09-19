@@ -5,9 +5,10 @@ import {
   makeRect,
   rectFrame,
   type Entity,
+  type EntityInput,
   type Sketch,
 } from './sketch';
-import { add, distance, normalize, scale, sub, toArray, type Vec3 } from './vec';
+import { add, distance, isFinite3, normalize, scale, sub, toArray, type Vec3 } from './vec';
 
 export interface DimensionSpec {
   /** New length for a line, in mm. */
@@ -86,6 +87,22 @@ export class Commands {
     if (width < 1e-6 || height < 1e-6) return { ok: false, error: 'rectangle has a zero-length side' };
     const entity = this.sketch.addEntity({ type: 'rect', corners });
     return { ok: true, entity, message: `Added ${describeEntity(entity)}` };
+  }
+
+  commitStroke(input: EntityInput, replaceIds: readonly string[] = []): CommandResult {
+    if (replaceIds.length === 0) {
+      return input.type === 'line' ? this.addLine(input.a, input.b) : this.addRect(input.corners);
+    }
+    if (input.type !== 'rect') return { ok: false, error: 'stroke completion expects a rectangle' };
+    if (!input.corners.every(isFinite3)) return { ok: false, error: 'entity coordinates must be finite' };
+    const width = distance(input.corners[0], input.corners[1]);
+    const height = distance(input.corners[0], input.corners[3]);
+    if (width < 1e-6 || height < 1e-6) return { ok: false, error: 'rectangle has a zero-length side' };
+    for (const id of replaceIds) {
+      if (!this.sketch.get(id)) return { ok: false, error: 'shared geometry changed; draw again' };
+    }
+    const [entity] = this.sketch.replaceEntities(replaceIds, [input], 'complete rectangle');
+    return { ok: true, entity, message: `Completed ${describeEntity(entity)}` };
   }
 
   deleteEntity(id: string): CommandResult {

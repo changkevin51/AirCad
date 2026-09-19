@@ -280,6 +280,25 @@ export class Sketch {
     return next;
   }
 
+  replaceEntities(removeIds: readonly string[], inputs: readonly EntityInput[], label: string): Entity[] {
+    const ids = new Set(removeIds);
+    if ([...ids].some((id) => !this.get(id))) throw new Error('entity vanished');
+    inputs.forEach(validateInput);
+    const previous = this.entities;
+    const added = inputs.map((input) => this.materialize(input, this.allocateId()));
+    const next = [...previous.filter((entity) => !ids.has(entity.id)), ...added];
+    this.execute({
+      label,
+      apply: () => {
+        this.entities = next;
+      },
+      revert: () => {
+        this.entities = previous;
+      },
+    });
+    return added;
+  }
+
   clear(): number {
     const removed = this.entities;
     if (!removed.length) return 0;

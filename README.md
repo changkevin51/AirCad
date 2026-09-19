@@ -63,11 +63,12 @@ If Windows or macOS asked for camera access on first launch, allow it and start 
 ## Sketch a house
 
 1. Press **1** for the top view and draw a closed rectangle: the floor (for example 4000 × 3000 mm).
-2. Press **0** for the isometric view, then **Tab** until the plane chip says **XZ Front**.
-3. Hover a floor corner until the cursor becomes a square (vertex snap), hold **Space** and draw a rectangle upwards. The work plane moves through that corner, so the wall stands on the floor.
-4. **Tab** to **YZ Right**, hover another corner and draw the side wall the same way.
+2. Press **0** for the isometric view, then **Tab** until the plane preview shows **XZ Front**.
+3. Hold **Space** starting on a floor border and draw the other three sides of the wall upwards: one continuous stroke completes against the shared border. You can also draw the three sides as three separately committed straight strokes — the third one assembles the wall.
+4. **Tab** until **YZ Right** and repeat the same border-start stroke on a side border; do the same on the remaining borders (Tab back to **XZ** or **YZ** so the plane stands on that border) to raise the other walls.
 5. Roof: hover a wall top corner, hold **Space** and draw a straight line to the opposite wall top. Vertex snaps connect the ends.
-6. Press **L** to type an exact size (`4000` or `4000x3000`) for the hovered or last entity, **E** to export to FreeCAD.
+6. **A** switches to optional **Auto** mode, where the work plane follows the view and what you hover — a face interior, an edge, or a vertex. Check the plane preview before drawing and press **Tab** or **1 / 2 / 3** to pick a plane when the choice is ambiguous. The plane locks while you draw and never moves mid-stroke.
+7. Press **L** to type an exact size (`4000` or `4000x3000`) for the hovered or last entity, **E** to export to FreeCAD.
 
 **H** opens the same walkthrough plus the full key list.
 
@@ -88,17 +89,20 @@ Keys stand in for pen buttons. Click the browser window first so it receives inp
 
 | Key | Action |
 | --- | --- |
-| **1 / 2 / 3** | Top / Front / Right view (also sets the work plane to XY / XZ / YZ) |
+| **1 / 2 / 3** | Top / Front / Right view (also pins the work plane to XY / XZ / YZ) |
 | **0** | Isometric view |
 | **5** | Orthographic / perspective |
 | **F** | Fit the sketch in view |
 | **= / -** | Zoom in / out around the cursor (or use the mouse wheel) |
 
+Views glide smoothly into place, and releasing an orbit within about 6° of a view settles onto it.
+
 ### Work plane and snapping
 
 | Key | Action |
 | --- | --- |
-| **Tab** | Cycle work plane XY → XZ → YZ without moving the camera |
+| **A** | Automatic / manual work plane (auto picks XY / XZ / YZ from the view and what you hover) |
+| **Tab** | Cycle work plane XY → XZ → YZ and pin it (A returns to auto) |
 | **G** | Grid snap on / off |
 | **N** | Off-hand palm navigation on / off (one open palm orbits, two palms pan/zoom) |
 
@@ -120,7 +124,7 @@ Snapping priority while drawing: vertex → midpoint → axis-align to the strok
 
 ### Mouse (no webcam)
 
-Move the pointer to drive the cursor. Left drag draws, right drag orbits, middle drag pans, wheel zooms.
+Move the pointer to drive the cursor. Left drag draws, right drag orbits, middle drag pans, wheel zooms toward the cursor (faster spin zooms faster).
 
 ## Coordinate system
 
@@ -181,7 +185,7 @@ Python tests use synthetic observations and never require a webcam. The TypeScri
 - **Camera does not open (Windows):** allow camera access under Settings → Privacy & security → Camera, close other camera apps, or try `--camera 1`.
 - **Browser shows “web UI is not built yet”:** run **install.bat** / **install.command**, or `npm install && npm run build` inside `web/`.
 - **Keys do nothing:** click the 3D viewport so it has focus. If a measurement field is open, finish or cancel it first.
-- **Plane is edge-on:** press **Tab** or **1 / 2 / 3**, or orbit with **Shift**.
+- **Plane is edge-on:** press **A** for auto, **Tab** or **1 / 2 / 3**, or orbit with **Shift**.
 - **Palm navigation moves unexpectedly:** press **N** to turn it off. Drawing (**Space**) always wins over palm nav.
 - **FreeCAD not found:** set `FREECAD_EXECUTABLE` as above and confirm `freecad_import.py` is beside `server.py`.
 - **Missing Python packages:** run **install.bat** / **install.command**, or `pip install -r requirements.txt` in `.venv`.

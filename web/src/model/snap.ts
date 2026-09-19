@@ -70,24 +70,6 @@ export const DEFAULT_SNAP_TOLERANCE_PX = 14;
 export const DEFAULT_AXIS_SNAP_DEG = 8;
 export const GRID_STEPS = [1, 10, 100, 1000];
 
-function nearestTarget(
-  cursor: Vec2,
-  projector: Projector,
-  targets: readonly Vertex[],
-  tolerance: number,
-  exclude: string | null | undefined,
-): { target: Vertex; screen: Vec2; distance: number } | null {
-  let best: { target: Vertex; screen: Vec2; distance: number } | null = null;
-  for (const target of targets) {
-    if (exclude && target.entityId === exclude) continue;
-    const screen = projector.project(target.point);
-    if (!screen) continue;
-    const d = distance2(screen, cursor);
-    if (d <= tolerance && (!best || d < best.distance)) best = { target, screen, distance: d };
-  }
-  return best;
-}
-
 function makeResult(
   plane: WorkPlane,
   projector: Projector,
@@ -108,6 +90,57 @@ function makeResult(
   };
 }
 
+function axisEdgeSnap(
+  plane: WorkPlane,
+  projector: Projector,
+  ray: { origin: Vec3; dir: Vec3 },
+  preferOnPlane: boolean,
+  segments: readonly Segment[],
+  start2: Vec2,
+  axis: 'u' | 'v',
+  cursor: Vec2,
+  toward: number,
+  tolerance: number,
+  exclude: string | null | undefined,
+): SnapCandidate<Segment> | null {
+  const candidates: SnapCandidate<Segment>[] = [];
+  const fixed = axis === 'u' ? start2.y : start2.x;
+  const startAlong = axis === 'u' ? start2.x : start2.y;
+  for (const segment of segments) {
+    if (exclude && segment.entityId === exclude) continue;
+    if (!plane.contains(segment.a, 1e-6) || !plane.contains(segment.b, 1e-6)) continue;
+    const a = plane.toPlane(segment.a);
+    const b = plane.toPlane(segment.b);
+    const acrossA = (axis === 'u' ? a.y : a.x) - fixed;
+    const acrossB = (axis === 'u' ? b.y : b.x) - fixed;
+    const denom = acrossB - acrossA;
+    let along: number;
+    if (Math.abs(denom) < 1e-12) {
+      if (Math.abs(acrossA) > 1e-6) continue;
+      const hit = plane.intersectRay(ray.origin, ray.dir);
+      if (!hit) continue;
+      const hit2 = plane.toPlane(hit);
+      const lo = Math.min(axis === 'u' ? a.x : a.y, axis === 'u' ? b.x : b.y);
+      const hi = Math.max(axis === 'u' ? a.x : a.y, axis === 'u' ? b.x : b.y);
+      along = Math.min(hi, Math.max(lo, axis === 'u' ? hit2.x : hit2.y));
+    } else {
+      const tRaw = -acrossA / denom;
+      if (tRaw < -1e-9 || tRaw > 1 + 1e-9) continue;
+      const t = Math.min(1, Math.max(0, tRaw));
+      along = (axis === 'u' ? a.x : a.y) + t * ((axis === 'u' ? b.x : b.y) - (axis === 'u' ? a.x : a.y));
+    }
+    if ((along - startAlong) * toward <= 0) continue;
+    const world = plane.toWorld(axis === 'u' ? v2(along, fixed) : v2(fixed, along));
+    const screen = projector.project(world);
+    if (!screen) continue;
+    const depth = rayDepth(ray, world);
+    if (!(depth > 0)) continue;
+    const d = distance2(screen, cursor);
+    if (d <= tolerance) candidates.push({ target: segment, world, screen, distance: d, depth });
+  }
+  return pickNearest(candidates, plane, preferOnPlane);
+}
+
 /**
  * Pick the grid step (mm) whose on-screen size is at least `minPx` pixels
  * around `reference`, so the grid stays usable at every zoom level.
@@ -122,6 +155,64 @@ export function adaptiveGridStep(projector: Projector, plane: WorkPlane, referen
     if (px >= minPx) return step;
   }
   return steps[steps.length - 1];
+}
+
+const NEAR_TIE_PX = 0.75;
+
+interface SnapCandidate<T> {
+  target: T;
+  world: Vec3;
+  screen: Vec2;
+  distance: number;
+  depth: number;
+}
+
+const rayDepth = (ray: { origin: Vec3; dir: Vec3 }, world: Vec3): number =>
+  dot(sub(world, ray.origin), ray.dir) / Math.max(1e-24, dot(ray.dir, ray.dir));
+
+function pickNearest<T extends { entityId: string; index: number }>(
+  candidates: SnapCandidate<T>[],
+  plane: WorkPlane,
+  preferOnPlane: boolean,
+): SnapCandidate<T> | null {
+  if (!candidates.length) return null;
+  const best = Math.min(...candidates.map((candidate) => candidate.distance));
+  const tied = candidates.filter((candidate) => candidate.distance <= best + NEAR_TIE_PX);
+  tied.sort((a, b) => {
+    if (preferOnPlane) {
+      const aOn = plane.contains(a.world, 1e-6) ? 0 : 1;
+      const bOn = plane.contains(b.world, 1e-6) ? 0 : 1;
+      if (aOn !== bOn) return aOn - bOn;
+    }
+    if (a.depth !== b.depth) return a.depth - b.depth;
+    const byId = a.target.entityId.localeCompare(b.target.entityId);
+    if (byId !== 0) return byId;
+    return a.target.index - b.target.index;
+  });
+  return tied[0];
+}
+
+function pointTargets<T extends Vertex>(
+  cursor: Vec2,
+  projector: Projector,
+  ray: { origin: Vec3; dir: Vec3 },
+  plane: WorkPlane,
+  preferOnPlane: boolean,
+  tolerancePx: number,
+  targets: readonly T[],
+  excludeEntityId: string | null | undefined,
+): SnapCandidate<T> | null {
+  const candidates: SnapCandidate<T>[] = [];
+  for (const target of targets) {
+    if (excludeEntityId && target.entityId === excludeEntityId) continue;
+    const screen = projector.project(target.point);
+    if (!screen) continue;
+    const depth = rayDepth(ray, target.point);
+    if (!(depth > 0)) continue;
+    const d = distance2(screen, cursor);
+    if (d <= tolerancePx) candidates.push({ target, world: target.point, screen, distance: d, depth });
+  }
+  return pickNearest(candidates, plane, preferOnPlane);
 }
 
 /**
@@ -161,15 +252,16 @@ export function snapCursor(context: SnapContext): SnapResult {
     }
   }
 
+  const preferOnPlane = strokeStart !== null;
   if (!disableObjectSnaps) {
-    const vertex = nearestTarget(cursor, projector, targets.vertices, tolerancePx, excludeEntityId);
+    const vertex = pointTargets(cursor, projector, ray, plane, preferOnPlane, tolerancePx, targets.vertices, excludeEntityId);
     if (vertex) {
       return makeResult(plane, projector, vertex.target.point, 'vertex', cursor, planeHit, {
         screen: vertex.screen,
         entityId: vertex.target.entityId,
       });
     }
-    const midpoint = nearestTarget(cursor, projector, targets.midpoints, tolerancePx, excludeEntityId);
+    const midpoint = pointTargets(cursor, projector, ray, plane, preferOnPlane, tolerancePx, targets.midpoints, excludeEntityId);
     if (midpoint) {
       return makeResult(plane, projector, midpoint.target.point, 'midpoint', cursor, planeHit, {
         screen: midpoint.screen,
@@ -186,11 +278,31 @@ export function snapCursor(context: SnapContext): SnapResult {
     if (len > 1e-9) {
       const angle = (Math.atan2(Math.abs(d.y), Math.abs(d.x)) * 180) / Math.PI;
       if (angle <= axisSnapDeg) {
+        if (!disableObjectSnaps) {
+          const hit = axisEdgeSnap(plane, projector, ray, preferOnPlane, targets.segments, start2, 'u', cursor, Math.sign(d.x), tolerancePx, excludeEntityId);
+          if (hit) {
+            return makeResult(plane, projector, hit.world, 'edge', cursor, planeHit, {
+              screen: hit.screen,
+              entityId: hit.target.entityId,
+              axis: 'u',
+            });
+          }
+        }
         const x = gridEnabled && gridStep > 0 ? roundTo(p2.x, gridStep) : p2.x;
         const world = plane.toWorld(v2(x, start2.y));
         return makeResult(plane, projector, world, 'axis', cursor, planeHit, { axis: 'u' });
       }
       if (angle >= 90 - axisSnapDeg) {
+        if (!disableObjectSnaps) {
+          const hit = axisEdgeSnap(plane, projector, ray, preferOnPlane, targets.segments, start2, 'v', cursor, Math.sign(d.y), tolerancePx, excludeEntityId);
+          if (hit) {
+            return makeResult(plane, projector, hit.world, 'edge', cursor, planeHit, {
+              screen: hit.screen,
+              entityId: hit.target.entityId,
+              axis: 'v',
+            });
+          }
+        }
         const y = gridEnabled && gridStep > 0 ? roundTo(p2.y, gridStep) : p2.y;
         const world = plane.toWorld(v2(start2.x, y));
         return makeResult(plane, projector, world, 'axis', cursor, planeHit, { axis: 'v' });
@@ -199,21 +311,22 @@ export function snapCursor(context: SnapContext): SnapResult {
   }
 
   if (!disableObjectSnaps) {
-    let bestEdge: { world: Vec3; screen: Vec2; distance: number; entityId: string } | null = null;
+    const edgeCandidates: SnapCandidate<Segment>[] = [];
     for (const segment of targets.segments) {
       if (excludeEntityId && segment.entityId === excludeEntityId) continue;
       const { point } = closestPointOnSegmentToRay(ray.origin, ray.dir, segment.a, segment.b);
       const screen = projector.project(point);
       if (!screen) continue;
+      const depth = rayDepth(ray, point);
+      if (!(depth > 0)) continue;
       const d = distance2(screen, cursor);
-      if (d <= tolerancePx && (!bestEdge || d < bestEdge.distance)) {
-        bestEdge = { world: point, screen, distance: d, entityId: segment.entityId };
-      }
+      if (d <= tolerancePx) edgeCandidates.push({ target: segment, world: point, screen, distance: d, depth });
     }
+    const bestEdge = pickNearest(edgeCandidates, plane, preferOnPlane);
     if (bestEdge) {
       return makeResult(plane, projector, bestEdge.world, 'edge', cursor, planeHit, {
         screen: bestEdge.screen,
-        entityId: bestEdge.entityId,
+        entityId: bestEdge.target.entityId,
       });
     }
   }

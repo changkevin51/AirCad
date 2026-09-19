@@ -8,6 +8,8 @@ export type Mode = 'READY' | 'DRAWING' | 'ORBIT' | 'PAN';
 export interface HudState {
   mode: Mode;
   plane: PlaneInfo;
+  planeMode: 'Auto' | 'Manual' | 'Locked';
+  planeReason: string | null;
   snap: SnapType | null;
   snapAxis: string | null;
   gridStep: number;
@@ -80,7 +82,7 @@ export class Hud {
     const snapText = state.snap ? `${SNAP_NAMES[state.snap]}${state.snapAxis ? ` ${state.snapAxis.toUpperCase()}` : ''}` : '–';
     const chips: [string, string, string][] = [
       ['Mode', state.mode, `mode-${state.mode.toLowerCase()}`],
-      ['Plane', state.plane.label, `axis-${state.plane.normalAxis}`],
+      ['Plane', `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` · ${state.planeReason}` : ''}`, `axis-${state.plane.normalAxis}`],
       ['Snap', snapText, state.snap && state.snap !== 'free' ? `snap-${state.snap}` : 'muted'],
       ['Grid', state.gridEnabled ? formatGridStep(state.gridStep) : 'off', state.gridEnabled ? '' : 'muted'],
       ['View', state.projection, ''],
@@ -94,7 +96,7 @@ export class Hud {
       this.lastChips = html;
       this.chips.innerHTML = html;
     }
-    const hintText = state.edgeOn ? `Work plane ${state.plane.label} is edge-on. Press Tab or 1 / 2 / 3, or orbit with Shift.` : '';
+    const hintText = state.edgeOn ? `Work plane ${state.plane.label} is edge-on. Press A for auto, Tab or 1 / 2 / 3, or orbit with Shift.` : '';
     if (hintText !== this.hint.textContent) {
       this.hint.textContent = hintText;
       this.hint.classList.toggle('hidden', !hintText);

@@ -16,6 +16,7 @@ export type PressAction =
   | 'toggleProjection'
   | 'fitAll'
   | 'cyclePlane'
+  | 'toggleAutoPlane'
   | 'zoomIn'
   | 'zoomOut'
   | 'undo'
@@ -56,20 +57,21 @@ export const HOLD_BINDINGS: readonly KeyBinding<HoldAction>[] = [
   { action: 'orbit', codes: ['ShiftLeft', 'ShiftRight'], label: 'Shift', help: 'Pen button 2 - hold and move to orbit', group: 'pen' },
   { action: 'pan', codes: ['ControlLeft', 'ControlRight'], label: 'Ctrl', help: 'Pen button 3 - hold and move to pan', group: 'pen' },
   { action: 'lockX', codes: ['KeyX'], label: 'X', help: 'Hold while drawing - lock to the X axis', group: 'pen' },
-  { action: 'lockY', codes: ['KeyY'], label: 'Y', help: 'Hold while drawing - lock to the Y axis', group: 'pen' },
+  { action: 'lockY', codes: ['KeyY'], mods: { primary: false, ctrl: false }, label: 'Y', help: 'Hold while drawing - lock to the Y axis', group: 'pen' },
   { action: 'lockZ', codes: ['KeyZ'], mods: { primary: false }, label: 'Z', help: 'Hold while drawing - lock to the Z axis', group: 'pen' },
 ];
 
 export const PRESS_BINDINGS: readonly KeyBinding<PressAction>[] = [
-  { action: 'viewTop', codes: ['Digit1', 'Numpad1'], label: '1', help: 'Top view + XY plane', group: 'view' },
-  { action: 'viewFront', codes: ['Digit2', 'Numpad2'], label: '2', help: 'Front view + XZ plane', group: 'view' },
-  { action: 'viewRight', codes: ['Digit3', 'Numpad3'], label: '3', help: 'Right view + YZ plane', group: 'view' },
+  { action: 'viewTop', codes: ['Digit1', 'Numpad1'], label: '1', help: 'Top view + XY plane (pins the plane)', group: 'view' },
+  { action: 'viewFront', codes: ['Digit2', 'Numpad2'], label: '2', help: 'Front view + XZ plane (pins the plane)', group: 'view' },
+  { action: 'viewRight', codes: ['Digit3', 'Numpad3'], label: '3', help: 'Right view + YZ plane (pins the plane)', group: 'view' },
   { action: 'viewIso', codes: ['Digit0', 'Numpad0'], label: '0', help: 'Isometric view', group: 'view' },
   { action: 'toggleProjection', codes: ['Digit5', 'Numpad5'], label: '5', help: 'Orthographic / perspective', group: 'view' },
   { action: 'fitAll', codes: ['KeyF'], label: 'F', help: 'Fit the sketch in view', group: 'view' },
   { action: 'zoomIn', codes: ['Equal', 'NumpadAdd'], label: '=', help: 'Zoom in (or mouse wheel)', group: 'view' },
   { action: 'zoomOut', codes: ['Minus', 'NumpadSubtract'], label: '-', help: 'Zoom out (or mouse wheel)', group: 'view' },
-  { action: 'cyclePlane', codes: ['Tab'], label: 'Tab', help: 'Cycle work plane XY -> XZ -> YZ (camera stays)', group: 'plane' },
+  { action: 'cyclePlane', codes: ['Tab'], label: 'Tab', help: 'Cycle work plane XY -> XZ -> YZ (pins; A returns to auto)', group: 'plane' },
+  { action: 'toggleAutoPlane', codes: ['KeyA'], label: 'A', help: 'Automatic / manual work plane', group: 'plane' },
   { action: 'toggleGrid', codes: ['KeyG'], label: 'G', help: 'Grid snap on / off', group: 'plane' },
   { action: 'undo', codes: ['KeyZ'], mods: { primary: true, shift: false }, label: 'Ctrl+Z', help: 'Undo', group: 'edit' },
   { action: 'redo', codes: ['KeyZ'], mods: { primary: true, shift: true }, label: 'Ctrl+Shift+Z', help: 'Redo', group: 'edit' },
@@ -160,5 +162,5 @@ export const MOUSE_HELP: readonly { label: string; help: string }[] = [
   { label: 'Left drag', help: 'Draw (same as Space)' },
   { label: 'Right drag', help: 'Orbit (same as Shift)' },
   { label: 'Middle drag', help: 'Pan (same as Ctrl)' },
-  { label: 'Wheel', help: 'Zoom' },
+  { label: 'Wheel', help: 'Zoom toward the cursor (faster spin zooms faster)' },
 ];

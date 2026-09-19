@@ -36,6 +36,17 @@ describe('keymap', () => {
     expect(holdActionForCode('ControlLeft')).toBe('pan');
   });
 
+  it('binds A to the plane mode toggle and keeps Y locking off Ctrl/Cmd+Y', () => {
+    expect(resolvePress(key('KeyA'), 'other')).toBe('toggleAutoPlane');
+    expect(resolveHold(key('KeyY'), 'other')).toBe('lockY');
+    expect(resolveHold(key('KeyY', { ctrlKey: true }), 'other')).toBeNull();
+    expect(resolvePress(key('KeyY', { ctrlKey: true }), 'other')).toBe('redo');
+    expect(resolveHold(key('KeyY', { ctrlKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyY', { ctrlKey: true }), 'mac')).toBe('redo');
+    expect(resolveHold(key('KeyY', { metaKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyY', { metaKey: true }), 'mac')).toBeNull();
+  });
+
   it('labels primary-modifier bindings per platform', () => {
     const undo = PRESS_BINDINGS.find((b) => b.action === 'undo')!;
     expect(keyLabel(undo, 'other')).toBe('Ctrl+Z');

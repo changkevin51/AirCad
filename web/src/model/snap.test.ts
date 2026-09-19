@@ -133,6 +133,153 @@ describe('snapCursor priorities', () => {
   });
 });
 
+describe('axis-aligned edge snaps', () => {
+  function sketchWithCrossing(): Sketch {
+    const sketch = floorSketch();
+    sketch.addEntity({ type: 'line', a: v3(2537, -500, 0), b: v3(2537, 1600, 0) });
+    sketch.addEntity({ type: 'line', a: v3(2000, 2537, 0), b: v3(3500, 2537, 0) });
+    return sketch;
+  }
+
+  it('snaps the axis endpoint to the exact edge crossing off the grid', () => {
+    const sketch = sketchWithCrossing();
+    const result = snapCursor(
+      context({ cursor: screenOf(2567, 1010), strokeStart: v3(1000, 1000, 0), targets: targetsOf(sketch) }),
+    );
+    expect(result.type).toBe('edge');
+    expect(result.axis).toBe('u');
+    expect(result.entityId).toBe('e2');
+    expect(result.world).toEqual(v3(2537, 1000, 0));
+  });
+
+  it('does the same on the v axis', () => {
+    const sketch = sketchWithCrossing();
+    const result = snapCursor(
+      context({ cursor: screenOf(2510, 2527), strokeStart: v3(2500, 500, 0), targets: targetsOf(sketch) }),
+    );
+    expect(result.type).toBe('edge');
+    expect(result.axis).toBe('v');
+    expect(result.entityId).toBe('e3');
+    expect(result.world).toEqual(v3(2500, 2537, 0));
+  });
+
+  it('keeps vertex priority over an axis edge crossing', () => {
+    const sketch = floorSketch();
+    sketch.addEntity({ type: 'line', a: v3(2545, 1005, 0), b: v3(2545, 2000, 0) });
+    const result = snapCursor(
+      context({ cursor: screenOf(2545, 1010), strokeStart: v3(1000, 1000, 0), targets: targetsOf(sketch) }),
+    );
+    expect(result.type).toBe('vertex');
+  });
+
+  it('ignores excluded entities and disabled object snaps', () => {
+    const sketch = sketchWithCrossing();
+    const base = { cursor: screenOf(2567, 1010), strokeStart: v3(1000, 1000, 0), targets: targetsOf(sketch) };
+    const excluded = snapCursor(context({ ...base, excludeEntityId: 'e2' }));
+    expect(excluded.type).toBe('axis');
+    expect(excluded.world).toEqual(v3(2600, 1000, 0));
+    const disabled = snapCursor(context({ ...base, disableObjectSnaps: true }));
+    expect(disabled.type).toBe('axis');
+    expect(disabled.world).toEqual(v3(2600, 1000, 0));
+  });
+
+  it('snaps an axis-collinear segment as an edge at the cursor position', () => {
+    const result = snapCursor(
+      context({ cursor: screenOf(2500, 0), strokeStart: v3(1000, 0, 0) }),
+    );
+    expect(result.type).toBe('edge');
+    expect(result.axis).toBe('u');
+    expect(result.entityId).toBe('e1');
+    expect(result.world.x).toBeCloseTo(2500);
+    expect(result.world.y).toBeCloseTo(0);
+    expect(result.world.z).toBeCloseTo(0);
+  });
+
+  it('clamps a collinear edge snap to the segment range', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(2000, 1000, 0), b: v3(3000, 1000, 0) });
+    const targets = targetsOf(sketch);
+    const near = snapCursor(
+      context({ cursor: screenOf(3050, 1010), strokeStart: v3(1000, 1000, 0), targets }),
+    );
+    expect(near.type).toBe('vertex');
+    expect(near.world).toEqual(v3(3000, 1000, 0));
+    const far = snapCursor(
+      context({ cursor: screenOf(3500, 1010), strokeStart: v3(1000, 1000, 0), targets }),
+    );
+    expect(far.type).toBe('axis');
+    expect(far.world).toEqual(v3(3500, 1000, 0));
+  });
+
+  it('ignores crossings behind the stroke start or outside the tolerance', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(500, 0, 0), b: v3(500, 2000, 0) });
+    sketch.addEntity({ type: 'line', a: v3(1500, 0, 0), b: v3(1500, 2000, 0) });
+    const result = snapCursor(
+      context({ cursor: screenOf(800, 1010), strokeStart: v3(1000, 1000, 0), targets: targetsOf(sketch) }),
+    );
+    expect(result.type).toBe('axis');
+    expect(result.world).toEqual(v3(800, 1000, 0));
+  });
+});
+
+describe('snap tie-breaking', () => {
+  it('prefers the nearer vertex on a screen tie when idle', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(100, 100, 0), b: v3(500, 500, 0) });
+    sketch.addEntity({ type: 'line', a: v3(100, 100, 2500), b: v3(900, 900, 2500) });
+    const result = snapCursor(context({ cursor: screenOf(100, 100), targets: targetsOf(sketch) }));
+    expect(result.type).toBe('vertex');
+    expect(result.entityId).toBe('e2');
+    expect(result.world).toEqual(v3(100, 100, 2500));
+  });
+
+  it('prefers the on-plane vertex during a stroke', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(100, 100, 0), b: v3(500, 500, 0) });
+    sketch.addEntity({ type: 'line', a: v3(100, 100, 2500), b: v3(900, 900, 2500) });
+    const result = snapCursor(
+      context({ cursor: screenOf(100, 100), targets: targetsOf(sketch), strokeStart: v3(3000, 3000, 0) }),
+    );
+    expect(result.type).toBe('vertex');
+    expect(result.entityId).toBe('e1');
+    expect(result.onPlane).toBe(true);
+  });
+
+  it('applies the same depth and on-plane rules to edge snaps', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(0, 2000, 0), b: v3(4000, 2000, 0) });
+    sketch.addEntity({ type: 'line', a: v3(0, 2000, 2500), b: v3(4000, 2000, 2500) });
+    const base = { cursor: screenOf(1000, 2000), targets: targetsOf(sketch) };
+    const idle = snapCursor(context(base));
+    expect(idle.type).toBe('edge');
+    expect(idle.entityId).toBe('e2');
+    const stroking = snapCursor(context({ ...base, strokeStart: v3(3000, 3000, 0) }));
+    expect(stroking.type).toBe('edge');
+    expect(stroking.entityId).toBe('e1');
+  });
+
+  it('never lets a deeper candidate outside the near-tie band beat a closer pixel', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(100, 100, 0), b: v3(500, 500, 0) });
+    sketch.addEntity({ type: 'line', a: v3(150, 100, 2500), b: v3(900, 900, 2500) });
+    const result = snapCursor(context({ cursor: screenOf(100, 100), targets: targetsOf(sketch) }));
+    expect(result.type).toBe('vertex');
+    expect(result.entityId).toBe('e1');
+  });
+
+  it('still connects to a deliberate off-plane vertex during a stroke', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(100, 100, 2500), b: v3(900, 900, 2500) });
+    const result = snapCursor(
+      context({ cursor: screenOf(100, 100), targets: targetsOf(sketch), strokeStart: v3(3000, 3000, 0) }),
+    );
+    expect(result.type).toBe('vertex');
+    expect(result.onPlane).toBe(false);
+    expect(result.world).toEqual(v3(100, 100, 2500));
+  });
+});
+
 describe('adaptiveGridStep', () => {
   it('picks the smallest step that is at least minPx on screen', () => {
     const plane = new WorkPlane('XY');

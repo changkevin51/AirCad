@@ -1,12 +1,16 @@
 import type { WorkPlane } from './plane';
 import { recognizeStroke, type RecognizeOptions, type RecognizeResult, type RecognizedShape } from './recognize';
+import { completeLineRectangle, completeSharedBorder, sameRectangle } from './rect-completion';
 import type { Projector, SnapResult } from './snap';
-import type { EntityInput, Vertex } from './sketch';
-import { add, distance2, dot, normalize, roundTo, scale, sub, type Vec2, type Vec3 } from './vec';
+import type { Entity, EntityInput, Vertex } from './sketch';
+import { add, distance2, dot, nearlyEqual, normalize, roundTo, scale, sub, type Vec2, type Vec3 } from './vec';
 
 const OBJECT_SNAPS = new Set(['vertex', 'midpoint', 'edge', 'lock']);
 
 export const isObjectSnap = (snap: SnapResult): boolean => OBJECT_SNAPS.has(snap.type);
+
+const BORDER_SNAPS = new Set(['vertex', 'midpoint', 'edge']);
+const isBorderSnap = (snap: SnapResult): boolean => BORDER_SNAPS.has(snap.type) && snap.onPlane;
 
 /**
  * One pen-down → pen-up gesture.
@@ -24,6 +28,7 @@ export class StrokeSession {
   private readonly rawScreen: Vec2[] = [];
   private lastSnap: SnapResult;
   private lastScreen: Vec2;
+  private revisionCount = 0;
   /** Set when the plane anchor moved to a snapped vertex at pen-down. */
   readonly anchorMoved: boolean;
 
@@ -39,18 +44,35 @@ export class StrokeSession {
     return this.lastSnap;
   }
 
+  get revision(): number {
+    return this.revisionCount;
+  }
+
   get pointCount(): number {
     return this.rawPlane.length + 2;
   }
 
   /** Add a cursor sample.  Returns false when it was too close to the last one. */
   add(snap: SnapResult, rawWorld: Vec3 | null, cursorScreen: Vec2, minScreenDistance = 2): boolean {
+    const previous = this.lastSnap;
+    if (
+      snap.type !== previous.type ||
+      snap.entityId !== previous.entityId ||
+      snap.onPlane !== previous.onPlane ||
+      !nearlyEqual(snap.world, previous.world) ||
+      (snap.raw === null) !== (previous.raw === null) ||
+      (snap.raw !== null && previous.raw !== null && !nearlyEqual(snap.raw, previous.raw)) ||
+      distance2(snap.plane, previous.plane) > 1e-9
+    ) {
+      this.revisionCount++;
+    }
     this.lastSnap = snap;
     if (distance2(cursorScreen, this.lastScreen) < minScreenDistance) return false;
     this.lastScreen = cursorScreen;
     const raw = rawWorld ?? snap.world;
     this.rawPlane.push(this.plane.toPlane(raw));
     this.rawScreen.push(cursorScreen);
+    this.revisionCount++;
     return true;
   }
 
@@ -210,4 +232,66 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
 /** The point the work-plane anchor moves to after a commit. */
 export function anchorAfterCommit(entity: EntityInput): Vec3 {
   return entity.type === 'line' ? entity.b : entity.corners[0];
+}
+
+export type StrokeResolution =
+  | { status: 'ready'; input: EntityInput; removeIds: string[]; reason: string }
+  | { status: 'unrecognized' | 'duplicate'; input: null; removeIds: []; reason: string };
+
+const isDuplicateRectangle = (corners: readonly Vec3[], entities: readonly Entity[]): boolean =>
+  entities.some((entity) => entity.type === 'rect' && sameRectangle(entity.corners, corners));
+
+export function resolveStroke(
+  session: StrokeSession,
+  context: CommitContext & { entities: readonly Entity[] },
+): StrokeResolution {
+  const result: RecognizeResult =
+    session.last.type === 'lock'
+      ? { shape: { kind: 'line', a: session.start.plane, b: session.last.plane, alignedTo: null }, reason: 'axis-locked line' }
+      : session.recognize();
+  const completionContext = { plane: session.plane, entities: context.entities, gridStep: context.gridStep };
+
+  if (result.shape?.kind === 'line') {
+    const input = buildEntityFromStroke(session, result.shape, context);
+    if (input.type === 'line') {
+      const completion = completeLineRectangle(input, completionContext);
+      if (completion) {
+        if (isDuplicateRectangle(completion.corners, context.entities)) {
+          return { status: 'duplicate', input: null, removeIds: [], reason: 'rectangle already exists' };
+        }
+        return {
+          status: 'ready',
+          input: { type: 'rect', corners: completion.corners },
+          removeIds: completion.removeIds,
+          reason: 'assembled rectangle',
+        };
+      }
+    }
+    return { status: 'ready', input, removeIds: [], reason: result.reason };
+  }
+
+  if (result.shape?.kind === 'rect') {
+    const input = buildEntityFromStroke(session, result.shape, context);
+    if (input.type === 'rect' && isDuplicateRectangle(input.corners, context.entities)) {
+      return { status: 'duplicate', input: null, removeIds: [], reason: 'rectangle already exists' };
+    }
+    return { status: 'ready', input, removeIds: [], reason: result.reason };
+  }
+
+  if (isBorderSnap(session.start) && isBorderSnap(session.last)) {
+    const completion = completeSharedBorder(session.planePoints(), session.start.world, session.last.world, completionContext);
+    if (completion) {
+      if (isDuplicateRectangle(completion.corners, context.entities)) {
+        return { status: 'duplicate', input: null, removeIds: [], reason: 'rectangle already exists' };
+      }
+      return {
+        status: 'ready',
+        input: { type: 'rect', corners: completion.corners },
+        removeIds: completion.removeIds,
+        reason: 'shared-border rectangle',
+      };
+    }
+  }
+
+  return { status: 'unrecognized', input: null, removeIds: [], reason: result.reason };
 }

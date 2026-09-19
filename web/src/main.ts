@@ -13,10 +13,11 @@ import { MouseSource } from './input/mouse-source';
 import { defaultTrackerUrl, TrackerClient, type CameraState, type ConnectionState, type HandsMessage, type NavMessage } from './input/tracker-client';
 import { Commands } from './model/commands';
 import { nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
+import { PlaneInference, type PlaneMode } from './model/plane-inference';
 import { adaptiveGridStep, snapCursor, type SnapResult } from './model/snap';
-import { describeEntity, entityMidpoints, entityVertices, formatMm, Sketch, type Entity } from './model/sketch';
-import { anchorAfterCommit, buildEntityFromStroke, StrokeSession } from './model/stroke';
-import { nearlyEqual, v2, type Vec2, type Vec3 } from './model/vec';
+import { describeEntity, entityCenter, entityMidpoints, entityPoints, entityVertices, Sketch, type Entity } from './model/sketch';
+import { anchorAfterCommit, resolveStroke, StrokeSession, type StrokeResolution } from './model/stroke';
+import { dot, nearlyEqual, type Vec2, type Vec3 } from './model/vec';
 import { entityLabel, SketchRenderer } from './render/sketch-renderer';
 import { AxisTriad, createGroundGrid } from './scene/grid';
 import { OrbitController, type ViewPreset } from './scene/orbit';
@@ -36,6 +37,29 @@ const GRID_MIN_PX = 8;
 const PALM_ORBIT_GAIN = 1.0;
 const LOCK_AXES: Partial<Record<HoldAction, Axis>> = { lockX: 'x', lockY: 'y', lockZ: 'z' };
 const PLANE_FOR_VIEW: Record<Exclude<ViewPreset, 'iso'>, PlaneKind> = { top: 'XY', front: 'XZ', right: 'YZ' };
+const BLOCKED_WHILE_DRAWING = new Set<PressAction>([
+  'viewTop',
+  'viewFront',
+  'viewRight',
+  'viewIso',
+  'toggleProjection',
+  'fitAll',
+  'zoomIn',
+  'zoomOut',
+  'cyclePlane',
+  'toggleAutoPlane',
+]);
+const CANCEL_STROKE_FIRST = new Set<PressAction>(['undo', 'redo', 'delete', 'clear', 'measure', 'help']);
+const REASON_LABELS: Record<string, string> = {
+  current: 'current plane',
+  view: 'view',
+  vertex: 'snapped vertex',
+  midpoint: 'snapped midpoint',
+  edge: 'snapped edge',
+  face: 'hovered face',
+  unavailable: 'unusable',
+  manual: 'pinned',
+};
 
 class App {
   private readonly platform = detectPlatform();
@@ -55,11 +79,31 @@ class App {
   private readonly pip: CameraPip;
   private readonly measure: MeasureInput;
   private readonly glyph: CursorGlyph;
+  private readonly inference = new PlaneInference();
 
   private plane = new WorkPlane('XY');
+  private planeMode: PlaneMode = 'auto';
+  private planeReason = 'current';
   private readonly held = new Set<HoldAction>();
+  private readonly holdSources = new Map<string, HoldAction>();
+  private navMode: 'orbit' | 'pan' | null = null;
+  private orbitGesture = false;
+  private palmNavMode: 'one' | 'two' | null = null;
   private stroke: StrokeSession | null = null;
-  private lastSnap: SnapResult | null = null;
+  private strokeGridStep = 100;
+  private resolutionCache: {
+    session: StrokeSession;
+    revision: number;
+    sketchRev: number;
+    cameraRev: number;
+    gridStep: number;
+    gridEnabled: boolean;
+    resolution: StrokeResolution;
+  } | null = null;
+  private sketchRevision = 0;
+  private cameraRevision = 0;
+  private cursorSourceTag: 'hand' | 'mouse' | null = null;
+  private lastHandId: number | null = null;
   private previousCursor: Vec2 | null = null;
   private hover: Entity | null = null;
   private lastCommitted: Entity | null = null;
@@ -70,6 +114,7 @@ class App {
   private cameraState: CameraState | null = null;
   private reportedCameraError = false;
   private lastRecognition: { reason: string; points: Vec2[]; screenExtent: number } | null = null;
+  private nowMs = 0;
 
   constructor(root: HTMLElement) {
     const viewportElement = document.createElement('div');
@@ -78,7 +123,13 @@ class App {
     root.appendChild(viewportElement);
 
     this.viewport = new Viewport(viewportElement);
-    this.orbit = new OrbitController(this.viewport);
+    this.orbit = new OrbitController(this.viewport, {
+      reducedMotion: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false,
+    });
+    this.orbit.onChange(() => {
+      this.cameraRevision++;
+      this.inference.reset();
+    });
     this.viewport.scene.add(createGroundGrid());
     this.viewport.scene.add(this.planeVisual.group);
     this.sketchRenderer = new SketchRenderer(this.viewport);
@@ -92,6 +143,7 @@ class App {
     this.help = new HelpOverlay(root, this.platform);
 
     this.sketch.onChange(() => {
+      this.sketchRevision++;
       this.sketchRenderer.setSketch(this.sketch.all);
       if (this.lastCommitted && !this.sketch.get(this.lastCommitted.id)) this.lastCommitted = this.sketch.last ?? null;
       this.sketchRenderer.setLastLabel(this.lastCommitted && this.sketch.get(this.lastCommitted.id) ? this.sketch.get(this.lastCommitted.id)! : null);
@@ -99,10 +151,14 @@ class App {
 
     this.mouse = new MouseSource(viewportElement, {
       onMove: (point) => {
-        if (this.cursor.updateMouse(point, performance.now() / 1000)) this.onCursorMoved();
+        if (this.cursor.updateMouse(point, performance.now() / 1000)) {
+          this.noteCursorSource('mouse');
+          this.onCursorMoved();
+        }
       },
-      onHold: (action, down) => this.setHold(action, down),
-      onWheel: (deltaY, point) => this.orbit.zoom(deltaY < 0 ? 1.15 : 1 / 1.15, point),
+      onHold: (action, down) => this.setHold(action, down, `mouse:${action}`),
+      onWheel: (factor, point) => this.zoomAtCursor(factor, point),
+      onCancel: () => this.cancelInteraction(),
     });
 
     this.tracker = new TrackerClient(defaultTrackerUrl(), {
@@ -118,7 +174,11 @@ class App {
       },
       onConnection: (state) => {
         this.connection = state;
-        if (state !== 'open') this.cursor.dropHand();
+        if (state !== 'open') {
+          this.cursor.dropHand();
+          this.endPalmNav(false);
+          this.synchronizeNavigation(false);
+        }
         this.pip.setCameraState(this.cameraState, state === 'open');
       },
     });
@@ -126,7 +186,7 @@ class App {
 
     window.addEventListener('keydown', (event) => this.onKeyDown(event));
     window.addEventListener('keyup', (event) => this.onKeyUp(event));
-    window.addEventListener('blur', () => this.releaseAll());
+    window.addEventListener('blur', () => this.cancelInteraction());
     viewportElement.focus();
 
     this.toasts.show('Hold Space to draw, Shift to orbit, Ctrl to pan. H for help.', 'info', 5000);
@@ -145,7 +205,7 @@ class App {
     const hold = resolveHold(event, this.platform);
     if (hold) {
       event.preventDefault();
-      if (!event.repeat && !this.held.has(hold)) this.setHold(hold, true);
+      if (!event.repeat) this.setHold(hold, true, event.code);
       return;
     }
     const press = resolvePress(event, this.platform);
@@ -156,22 +216,73 @@ class App {
 
   private onKeyUp(event: KeyboardEvent): void {
     const hold = holdActionForCode(event.code);
-    if (hold && this.held.has(hold)) this.setHold(hold, false);
+    if (hold) this.setHold(hold, false, event.code);
   }
 
-  private releaseAll(): void {
-    for (const action of [...this.held]) this.setHold(action, false);
-    this.mouse.releaseAll();
-  }
-
-  private setHold(action: HoldAction, down: boolean): void {
-    if (down) this.held.add(action);
-    else this.held.delete(action);
-    if (action === 'draw') {
-      if (down) this.beginStroke();
-      else this.endStroke();
+  private setHold(action: HoldAction, down: boolean, source = `api:${action}`): void {
+    if (down) {
+      if (this.help.visible || this.measure.isOpen) return;
+      this.holdSources.set(source, action);
+    } else {
+      this.holdSources.delete(source);
     }
-    if (action === 'orbit' || action === 'pan') this.previousCursor = null;
+    const was = this.held.has(action);
+    this.held.clear();
+    for (const heldAction of this.holdSources.values()) this.held.add(heldAction);
+    const is = this.held.has(action);
+    if (is && !was) this.beginHold(action);
+    else if (!is && was) this.endHold(action);
+    if (was !== is && this.stroke && (action === 'lockX' || action === 'lockY' || action === 'lockZ')) this.sampleStroke();
+  }
+
+  private beginHold(action: HoldAction): void {
+    if (action === 'draw') {
+      this.endPalmNav(false);
+      this.synchronizeNavigation(false);
+      this.beginStroke();
+      return;
+    }
+    this.synchronizeNavigation(false);
+  }
+
+  private endHold(action: HoldAction): void {
+    if (action === 'draw') {
+      this.endStroke();
+      this.synchronizeNavigation(false);
+      return;
+    }
+    this.synchronizeNavigation(action === 'orbit');
+  }
+
+  private synchronizeNavigation(allowSettle = false): void {
+    const blocked =
+      !!this.stroke || this.held.has('draw') || this.help.visible || this.measure.isOpen || this.cursor.isLost;
+    const desired: 'orbit' | 'pan' | null = blocked ? null : this.held.has('orbit') ? 'orbit' : this.held.has('pan') ? 'pan' : null;
+    const changed = desired !== this.navMode || (desired === 'orbit' && !this.orbitGesture);
+    if (!changed) return;
+    if (this.navMode === 'orbit') this.endOrbitGesture(allowSettle && desired === null);
+    if (desired) this.endPalmNav(false);
+    this.navMode = desired;
+    this.previousCursor = null;
+    if (desired === 'orbit' && !this.orbitGesture) {
+      this.orbit.beginOrbit(this.sketch.center());
+      this.orbitGesture = true;
+    }
+  }
+
+  private endOrbitGesture(settle: boolean): void {
+    if (this.orbitGesture) {
+      this.orbit.endOrbit(settle, this.nowMs);
+      this.orbitGesture = false;
+    }
+  }
+
+  private endPalmNav(settle: boolean): void {
+    if (this.palmNavMode === 'one' && this.orbitGesture) {
+      this.orbit.endOrbit(settle, this.nowMs);
+      this.orbitGesture = false;
+    }
+    this.palmNavMode = null;
   }
 
   private get axisLock(): Axis | null {
@@ -181,25 +292,65 @@ class App {
 
   private get mode(): Mode {
     if (this.stroke) return 'DRAWING';
-    if (this.held.has('orbit')) return 'ORBIT';
-    if (this.held.has('pan')) return 'PAN';
+    if (this.navMode === 'orbit') return 'ORBIT';
+    if (this.navMode === 'pan') return 'PAN';
     return 'READY';
+  }
+
+  private noteCursorSource(tag: 'hand' | 'mouse'): void {
+    const handChanged = tag === 'hand' && (this.cursorSourceTag !== 'hand' || this.cursor.handId !== this.lastHandId);
+    const mouseTakeover = tag === 'mouse' && this.cursorSourceTag !== 'mouse';
+    this.cursorSourceTag = tag;
+    this.lastHandId = this.cursor.handId;
+    if (handChanged || mouseTakeover) {
+      this.endPalmNav(false);
+      this.endOrbitGesture(false);
+      this.navMode = null;
+      this.previousCursor = null;
+      this.synchronizeNavigation(false);
+    }
   }
 
   private onHands(message: HandsMessage): void {
     const now = performance.now() / 1000;
     this.cursor.updateHands(message, { w: this.viewport.width, h: this.viewport.height }, now);
-    this.onCursorMoved();
+    const hasHand = this.cursor.tracking === 'hand' && !!this.cursor.hand;
+    if (hasHand) {
+      this.noteCursorSource('hand');
+      this.onCursorMoved();
+    } else if (this.cursor.isLost) {
+      this.synchronizeNavigation(false);
+    }
     this.pip.setHands(message, this.cursor.handId);
-    if (this.navAssist && message.nav && !this.held.has('draw') && !this.stroke) this.applyPalmNav(message.nav, message.frame);
+    const navAllowed =
+      this.navAssist &&
+      hasHand &&
+      !this.held.has('draw') &&
+      !this.held.has('orbit') &&
+      !this.held.has('pan') &&
+      !this.stroke &&
+      !this.help.visible &&
+      !this.measure.isOpen;
+    if (navAllowed && message.nav) this.applyPalmNav(message.nav, message.frame);
+    else if (this.palmNavMode) this.endPalmNav(navAllowed && !message.nav && this.palmNavMode === 'one');
   }
 
   private applyPalmNav(nav: NavMessage, frame: { w: number; h: number }): void {
+    if (this.navMode || this.help.visible || this.measure.isOpen) return;
     const scale = this.viewport.width / Math.max(1, frame.w);
     const dx = nav.pan[0] * scale;
     const dy = nav.pan[1] * scale;
-    if (nav.mode === 'one') this.orbit.orbit(dx * PALM_ORBIT_GAIN, dy * PALM_ORBIT_GAIN, this.sketch.center());
-    else {
+    if (nav.mode === 'one') {
+      if (this.palmNavMode !== 'one') {
+        this.endPalmNav(false);
+        this.orbit.beginOrbit(this.sketch.center());
+        this.orbitGesture = true;
+        this.palmNavMode = 'one';
+      }
+      this.orbit.orbit(dx * PALM_ORBIT_GAIN, dy * PALM_ORBIT_GAIN, this.sketch.center());
+    } else {
+      if (this.palmNavMode === 'one') this.endPalmNav(false);
+      this.palmNavMode = 'two';
       this.orbit.pan(dx, dy);
       if (nav.zoom !== 1) this.orbit.zoom(nav.zoom);
     }
@@ -208,18 +359,22 @@ class App {
   // ---------------------------------------------------------------- actions
 
   private doPress(action: PressAction): void {
+    if ((this.help.visible || this.measure.isOpen) && action !== 'help' && action !== 'cancel') return;
+    if (this.stroke && BLOCKED_WHILE_DRAWING.has(action)) return;
+    if (this.stroke && CANCEL_STROKE_FIRST.has(action)) this.cancelStroke();
     switch (action) {
       case 'viewTop':
       case 'viewFront':
       case 'viewRight': {
         const preset = action === 'viewTop' ? 'top' : action === 'viewFront' ? 'front' : 'right';
-        this.orbit.setView(preset);
+        this.orbit.setView(preset, true, this.nowMs);
         this.setPlaneKind(PLANE_FOR_VIEW[preset], false);
+        this.pinManual();
         this.toasts.show(`${preset[0].toUpperCase()}${preset.slice(1)} view · plane ${this.plane.label}`);
         break;
       }
       case 'viewIso':
-        this.orbit.setView('iso');
+        this.orbit.setView('iso', true, this.nowMs);
         this.toasts.show('Isometric view');
         break;
       case 'toggleProjection':
@@ -229,20 +384,34 @@ class App {
         this.orbit.fit(this.sketch.boundingBox());
         break;
       case 'zoomIn':
-        this.orbit.zoom(1.25, this.cursor.position ?? undefined);
+        this.zoomAtCursor(1.25, this.cursor.position ?? undefined);
         break;
       case 'zoomOut':
-        this.orbit.zoom(1 / 1.25, this.cursor.position ?? undefined);
+        this.zoomAtCursor(1 / 1.25, this.cursor.position ?? undefined);
         break;
       case 'cyclePlane':
         this.setPlaneKind(nextPlaneKind(this.plane.kind), true);
+        this.pinManual();
         break;
+      case 'toggleAutoPlane': {
+        this.planeMode = this.planeMode === 'auto' ? 'manual' : 'auto';
+        if (this.planeMode === 'manual') {
+          this.planeReason = 'manual';
+          this.toasts.show(`Plane ${this.plane.label} pinned · A returns to auto`);
+        } else {
+          this.inference.reset();
+          this.toasts.show('Automatic work plane');
+        }
+        break;
+      }
       case 'toggleGrid':
         this.gridEnabled = !this.gridEnabled;
+        this.sampleStroke();
         this.toasts.show(`Grid snap ${this.gridEnabled ? 'on' : 'off'}`);
         break;
       case 'toggleNavAssist':
         this.navAssist = !this.navAssist;
+        if (!this.navAssist) this.endPalmNav(false);
         this.toasts.show(`Palm navigation ${this.navAssist ? 'on: one open palm orbits, two palms pan/zoom' : 'off'}`);
         break;
       case 'undo': {
@@ -266,6 +435,7 @@ class App {
         const count = this.commands.clear();
         this.toasts.show(count ? `Cleared ${count} entities` : 'Sketch is already empty');
         this.plane = new WorkPlane(this.plane.kind);
+        this.inference.reset();
         break;
       }
       case 'cancel':
@@ -282,15 +452,42 @@ class App {
         this.toasts.show(this.pip.toggle() ? 'Camera preview on' : 'Camera preview off');
         break;
       case 'help':
+        this.cancelInteraction();
         this.help.toggle();
+        this.synchronizeNavigation(false);
         break;
     }
+  }
+
+  private pinManual(): void {
+    this.planeMode = 'manual';
+    this.planeReason = 'manual';
+    this.inference.reset();
   }
 
   private setPlaneKind(kind: PlaneKind, announce: boolean): void {
     if (this.stroke) return;
     this.plane = this.plane.withKind(kind);
     if (announce) this.toasts.show(`Work plane ${this.plane.label}`);
+  }
+
+  private zoomAtCursor(factor: number, point?: Vec2): void {
+    if (factor === 1 || !Number.isFinite(factor)) return;
+    if (this.stroke || this.help.visible || this.measure.isOpen) return;
+    if (!point) {
+      this.orbit.zoom(factor);
+      this.inference.reset();
+      return;
+    }
+    const snap = this.computeSnap(point);
+    if (snap.type === 'vertex' || snap.type === 'midpoint' || snap.type === 'edge') {
+      this.orbit.zoom(factor, snap.screen, snap.world);
+    } else if (snap.raw) {
+      this.orbit.zoom(factor, point, snap.raw);
+    } else {
+      this.orbit.zoom(factor, point);
+    }
+    this.inference.reset();
   }
 
   private openMeasure(): void {
@@ -300,6 +497,7 @@ class App {
       return;
     }
     const prompt = target.type === 'line' ? `Length of ${describeEntity(target)} (mm):` : `Size of ${describeEntity(target)} (W x H mm):`;
+    this.cancelInteraction();
     this.measure.open(prompt, (text) => {
       const result = this.commands.setDimension(target.id, text);
       this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'success' : 'error');
@@ -340,7 +538,7 @@ class App {
       projector: this.viewport.projector(),
       plane,
       targets: { vertices: this.sketch.vertices(), midpoints: this.sketch.midpoints(), segments: this.sketch.segments() },
-      gridStep: this.gridStep,
+      gridStep: this.stroke ? this.strokeGridStep : this.gridStep,
       gridEnabled: this.gridEnabled,
       strokeStart: this.stroke ? this.stroke.start.world : null,
       axisLock: this.stroke ? this.axisLock : null,
@@ -348,11 +546,52 @@ class App {
     });
   }
 
+  private inferenceContext(cursorPx: Vec2, snap: SnapResult) {
+    return {
+      currentPlane: this.plane,
+      projector: this.viewport.projector(),
+      cursor: cursorPx,
+      viewDirection: this.viewport.viewDirection(),
+      snap,
+      entities: this.sketch.all,
+    };
+  }
+
+  private updatePlaneInference(nowMs: number): void {
+    if (this.planeMode === 'manual') {
+      this.planeReason = 'manual';
+      return;
+    }
+    if (
+      this.mode !== 'READY' ||
+      this.orbit.transitioning ||
+      this.help.visible ||
+      this.measure.isOpen ||
+      this.cursor.isLost ||
+      !this.cursor.position ||
+      this.palmNavMode
+    ) {
+      return;
+    }
+    const snap = this.computeSnap(this.cursor.position);
+    const choice = this.inference.update(this.inferenceContext(this.cursor.position, snap), nowMs);
+    this.plane = choice.plane;
+    this.planeReason = choice.reason;
+  }
+
   private beginStroke(): void {
     if (this.stroke || !this.cursor.position) return;
-    const snap = this.computeSnap(this.cursor.position);
-    this.lastSnap = snap;
+    if (this.help.visible || this.measure.isOpen || this.cursor.isLost) return;
+    this.orbit.cancelTransition(true);
+    const position = this.cursor.position;
+    const snap = this.computeSnap(position);
     let plane = this.plane;
+    if (this.planeMode === 'auto') {
+      const choice = this.inference.update(this.inferenceContext(position, snap), this.nowMs);
+      plane = choice.plane;
+      this.plane = plane;
+      this.planeReason = choice.reason;
+    }
     let anchorMoved = false;
     if (snap.type === 'vertex' || snap.type === 'midpoint' || snap.type === 'edge') {
       // The work plane always passes through the anchor; starting on a vertex,
@@ -362,8 +601,20 @@ class App {
       plane = plane.withAnchor(snap.world);
       this.plane = plane;
     }
-    const start: SnapResult = { ...snap, plane: plane.toPlane(snap.world), onPlane: plane.contains(snap.world, 1e-6) };
+    const projector = this.viewport.projector();
+    const ray = projector.ray(position);
+    const objectStart = snap.type === 'vertex' || snap.type === 'midpoint' || snap.type === 'edge';
+    const hit = plane.intersectRay(ray.origin, ray.dir);
+    if ((!hit || Math.abs(dot(ray.dir, plane.normal)) < 0.15) && !objectStart && !this.axisLock) {
+      this.toasts.show('Plane is edge-on; A for Auto or Tab / 1 / 2 / 3', 'error');
+      return;
+    }
+    this.gridStep = adaptiveGridStep(projector, plane, objectStart ? snap.world : hit ?? plane.anchor, GRID_MIN_PX);
+    this.strokeGridStep = this.gridStep;
+    const resnap = this.computeSnap(position);
+    const start: SnapResult = { ...resnap, plane: plane.toPlane(resnap.world), onPlane: plane.contains(resnap.world, 1e-6) };
     this.stroke = new StrokeSession(plane, start, anchorMoved);
+    this.resolutionCache = null;
     this.hover = null;
     this.sketchRenderer.setHover(null);
     if (anchorMoved) this.toasts.show(`Plane ${plane.label} moved through the snapped point`);
@@ -376,6 +627,11 @@ class App {
   private onCursorMoved(): void {
     const position = this.cursor.position;
     if (!position) return;
+    if (this.cursor.isLost || this.help.visible || this.measure.isOpen) {
+      this.previousCursor = null;
+      return;
+    }
+    this.synchronizeNavigation(false);
     const mode = this.mode;
     if (mode === 'ORBIT' || mode === 'PAN') {
       if (this.previousCursor) {
@@ -396,8 +652,39 @@ class App {
     const position = this.cursor.position;
     if (!stroke || !position || this.cursor.isLost) return;
     const snap = this.computeSnap(position);
-    this.lastSnap = snap;
     stroke.add(snap, snap.raw, position);
+  }
+
+  private resolveFor(stroke: StrokeSession): StrokeResolution {
+    const cache = this.resolutionCache;
+    if (
+      cache &&
+      cache.session === stroke &&
+      cache.revision === stroke.revision &&
+      cache.sketchRev === this.sketchRevision &&
+      cache.cameraRev === this.cameraRevision &&
+      cache.gridStep === this.strokeGridStep &&
+      cache.gridEnabled === this.gridEnabled
+    ) {
+      return cache.resolution;
+    }
+    const resolution = resolveStroke(stroke, {
+      projector: this.viewport.projector(),
+      vertices: this.sketch.vertices(),
+      tolerancePx: SNAP_TOLERANCE_PX,
+      gridStep: this.gridEnabled ? this.strokeGridStep : 0,
+      entities: this.sketch.all,
+    });
+    this.resolutionCache = {
+      session: stroke,
+      revision: stroke.revision,
+      sketchRev: this.sketchRevision,
+      cameraRev: this.cameraRevision,
+      gridStep: this.strokeGridStep,
+      gridEnabled: this.gridEnabled,
+      resolution,
+    };
+    return resolution;
   }
 
   private endStroke(): void {
@@ -407,60 +694,76 @@ class App {
     this.stroke = null;
     this.sketchRenderer.setGhost(null, false, null);
     this.sketchRenderer.setInk(null);
-    if (stroke.screenExtent() < MIN_STROKE_PX) return;
-
-    const result = stroke.recognize();
-    this.lastRecognition = { reason: result.reason, points: stroke.planePoints(), screenExtent: stroke.screenExtent() };
-    if (!result.shape) {
-      this.sketchRenderer.fadeOut(stroke.worldPath());
-      this.toasts.show('Not recognized: draw a straight line or a closed rectangle', 'error');
+    if (stroke.screenExtent() < MIN_STROKE_PX) {
+      this.resolutionCache = null;
       return;
     }
-    const input = buildEntityFromStroke(stroke, result.shape, {
-      projector: this.viewport.projector(),
-      vertices: this.sketch.vertices(),
-      tolerancePx: SNAP_TOLERANCE_PX,
-      gridStep: this.gridEnabled ? this.gridStep : 0,
-    });
-    const commit = input.type === 'line' ? this.commands.addLine(input.a, input.b) : this.commands.addRect(input.corners);
+
+    const resolution = this.resolveFor(stroke);
+    this.resolutionCache = null;
+    this.lastRecognition = {
+      reason: resolution.reason,
+      points: stroke.planePoints(),
+      screenExtent: stroke.screenExtent(),
+    };
+    if (resolution.status !== 'ready') {
+      if (resolution.status === 'unrecognized') {
+        this.sketchRenderer.fadeOut(stroke.worldPath());
+        this.toasts.show('Not recognized: draw a straight line or a closed rectangle', 'error');
+      } else {
+        this.toasts.show(resolution.reason, 'info');
+      }
+      return;
+    }
+    const commit = this.commands.commitStroke(resolution.input, resolution.removeIds);
     if (!commit.ok) {
       this.toasts.show(commit.error, 'error');
       return;
     }
     this.lastCommitted = commit.entity;
     this.sketchRenderer.setLastLabel(commit.entity);
-    this.plane = this.plane.withAnchor(anchorAfterCommit(input));
+    this.plane = this.plane.withAnchor(anchorAfterCommit(resolution.input));
     this.toasts.show(commit.message, 'success');
   }
 
   private cancelStroke(): void {
     this.stroke = null;
+    this.resolutionCache = null;
     this.sketchRenderer.setGhost(null, false, null);
     this.sketchRenderer.setInk(null);
     this.toasts.show('Stroke cancelled');
+    this.synchronizeNavigation(false);
+  }
+
+  private cancelInteraction(): void {
+    if (this.stroke) this.cancelStroke();
+    this.holdSources.clear();
+    this.held.clear();
+    this.navMode = null;
+    this.mouse.releaseAll(false);
+    this.previousCursor = null;
+    this.endOrbitGesture(false);
+    this.orbit.cancelTransition(false);
+    this.endPalmNav(false);
+    this.inference.reset();
   }
 
   private updateGhost(stroke: StrokeSession): void {
-    const result = stroke.recognize();
     this.sketchRenderer.setInk(stroke.worldPath());
-    const shape = result.shape;
-    if (!shape) {
+    const resolution = this.resolveFor(stroke);
+    if (resolution.status !== 'ready') {
       this.sketchRenderer.setGhost(null, false, null);
       return;
     }
-    const plane = stroke.plane;
-    if (shape.kind === 'line') {
-      const a = stroke.start.type === 'vertex' || stroke.start.type === 'midpoint' ? stroke.start.world : plane.toWorld(shape.a);
-      const b = stroke.last.type === 'vertex' || stroke.last.type === 'midpoint' ? stroke.last.world : plane.toWorld(shape.b);
-      const length = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
-      this.sketchRenderer.setGhost([a, b], false, { text: formatMm(length), at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 } });
-      return;
-    }
-    const corners = shape.corners.map((c) => plane.toWorld(c));
-    const centre = plane.toWorld(v2((shape.corners[0].x + shape.corners[2].x) / 2, (shape.corners[0].y + shape.corners[2].y) / 2));
-    this.sketchRenderer.setGhost(corners, true, {
-      text: `${formatMm(shape.width).replace(' mm', '')} × ${formatMm(shape.height)}`,
-      at: centre,
+    const input = resolution.input;
+    const fake: Entity =
+      input.type === 'line'
+        ? { id: 'ghost', type: 'line', a: input.a, b: input.b }
+        : { id: 'ghost', type: 'rect', corners: input.corners };
+    const shared = resolution.reason === 'shared-border rectangle' || resolution.reason === 'assembled rectangle';
+    this.sketchRenderer.setGhost(entityPoints(fake), fake.type === 'rect', {
+      text: `${entityLabel(fake)}${shared ? ' · shared border' : ''}`,
+      at: entityCenter(fake),
     });
   }
 
@@ -468,16 +771,21 @@ class App {
 
   private frame(time: number): void {
     requestAnimationFrame((next) => this.frame(next));
+    this.nowMs = time;
+    this.orbit.update(time);
     const cursorPx = this.cursor.position;
     const projector = this.viewport.projector();
     const viewDirection = this.viewport.viewDirection();
     const mode = this.mode;
 
-    const reference: Vec3 = this.stroke ? this.stroke.start.world : this.lastSnap?.raw ?? this.plane.anchor;
-    this.gridStep = adaptiveGridStep(projector, this.plane, reference, GRID_MIN_PX);
+    this.updatePlaneInference(time);
+
+    const cursorRay = cursorPx ? projector.ray(cursorPx) : null;
+    const cursorHit = cursorRay ? this.plane.intersectRay(cursorRay.origin, cursorRay.dir) : null;
+    const reference: Vec3 = this.stroke ? this.stroke.start.world : cursorHit ?? this.plane.anchor;
+    this.gridStep = this.stroke ? this.strokeGridStep : adaptiveGridStep(projector, this.plane, reference, GRID_MIN_PX);
 
     const snap: SnapResult | null = cursorPx ? this.computeSnap(cursorPx) : null;
-    this.lastSnap = snap;
 
     if (this.stroke) {
       // Points are captured in onCursorMoved; the ghost follows the camera too.
@@ -495,9 +803,12 @@ class App {
     this.glyph.update(snap, cursorPx, !!this.stroke);
     this.sketchRenderer.tick(time);
 
+    const displayedPlane = this.stroke ? this.stroke.plane : this.plane;
     this.hud.update({
       mode,
-      plane: (this.stroke ? this.stroke.plane : this.plane).info,
+      plane: displayedPlane.info,
+      planeMode: this.stroke ? 'Locked' : this.planeMode === 'auto' ? 'Auto' : 'Manual',
+      planeReason: this.stroke ? 'locked' : REASON_LABELS[this.planeReason] ?? null,
       snap: snap?.type ?? null,
       snapAxis: snap?.axis ?? null,
       gridStep: this.gridStep,
@@ -550,7 +861,8 @@ class App {
           { key: key('draw'), label: 'draw' },
           { key: key('orbit'), label: 'orbit' },
           { key: key('pan'), label: 'pan' },
-          { key: key('cyclePlane'), label: 'plane' },
+          { key: key('toggleAutoPlane'), label: this.planeMode === 'auto' ? 'auto plane' : 'manual plane' },
+          { key: key('cyclePlane'), label: 'pin plane' },
           { key: '1 2 3 0', label: 'views' },
         ];
         if (this.hover) hints.push({ key: key('measure'), label: `size ${entityLabel(this.hover)}` }, { key: key('delete'), label: 'delete' });
@@ -567,13 +879,16 @@ class App {
       sketch: this.sketch,
       commands: this.commands,
       plane: () => this.plane,
+      planeMode: () => this.planeMode,
       project: (world) => this.viewport.projector().project(world),
       ray: (screen) => this.viewport.projector().ray(screen),
       press: (action) => this.doPress(action),
       hold: (action, down) => this.setHold(action, down),
       setCursor: (point) => {
-        this.cursor.updateMouse(point, performance.now() / 1000);
-        this.onCursorMoved();
+        if (this.cursor.updateMouse(point, performance.now() / 1000)) {
+          this.noteCursorSource('mouse');
+          this.onCursorMoved();
+        }
       },
       lastRecognition: () => this.lastRecognition,
     };
@@ -584,6 +899,7 @@ export interface AirCadApi {
   sketch: Sketch;
   commands: Commands;
   plane(): WorkPlane;
+  planeMode(): PlaneMode;
   project(world: Vec3): Vec2 | null;
   ray(screen: Vec2): { origin: Vec3; dir: Vec3 };
   press(action: PressAction): void;
