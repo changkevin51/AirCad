@@ -34,12 +34,15 @@ class ServerTests(AioHTTPTestCase):
         self.assertEqual(payload["camera"], "disabled")
 
     async def test_export_forwards_entities_to_the_bridge(self) -> None:
-        body = {"units": "mm", "entities": [{"type": "line", "points": [[0, 0, 0], [1, 0, 0]]}]}
+        body = {"units": "mm", "entities": [
+            {"type": "line", "points": [[0, 0, 0], [1, 0, 0]]},
+            {"type": "extrusion", "points": [[0, 0, 0], [100, 0, 0], [100, 80, 0], [0, 80, 0]], "vector": [0, 0, -250]},
+        ]}
         async with self.client.post("/api/export/freecad", json=body) as response:
             self.assertEqual(response.status, 200)
             payload = await response.json()
         self.assertEqual(payload["ok"], True)
-        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["count"], 2)
         self.assertEqual(self.sent, [body["entities"]])
 
     async def test_export_rejects_bad_payloads(self) -> None:

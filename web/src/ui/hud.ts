@@ -2,8 +2,9 @@ import type { TrackingState } from '../input/cursor';
 import type { CameraState, ConnectionState } from '../input/tracker-client';
 import type { PlaneInfo } from '../model/plane';
 import type { SnapType } from '../model/snap';
+import { formatMm } from '../model/sketch';
 
-export type Mode = 'READY' | 'DRAWING' | 'ORBIT' | 'PAN';
+export type Mode = 'READY' | 'DRAWING' | 'EXTRUDING' | 'ORBIT' | 'PAN';
 
 export interface HudState {
   mode: Mode;
@@ -19,6 +20,8 @@ export interface HudState {
   navAssist: boolean;
   edgeOn: boolean;
   entityCount: number;
+  selected: string | null;
+  extrusion: { depth: number; dragging: boolean; face: string; pulled: number } | null;
 }
 
 export interface KeyHint {
@@ -70,6 +73,7 @@ export class Hud {
     this.chips.className = 'hud';
     this.hint = document.createElement('div');
     this.hint.className = 'hint hidden';
+    this.hint.setAttribute('role', 'status');
     this.keyBar = document.createElement('div');
     this.keyBar.className = 'keybar';
     root.append(this.chips, this.hint, this.keyBar);
@@ -87,6 +91,8 @@ export class Hud {
       ['Tracking', tracking.text, tracking.tone],
     ];
     if (state.navAssist) chips.push(['Palm nav', 'on', 'ok']);
+    if (state.extrusion) chips.push(['Face', state.extrusion.face, 'ok'], ['Depth', formatMm(state.extrusion.depth), 'ok']);
+    else if (state.selected) chips.push(['Selected', state.selected, 'warn']);
     const html = chips
       .map(([name, value, tone]) => `<span class="chip ${tone}"><span class="chip__name">${name}</span><span class="chip__value">${value}</span></span>`)
       .join('');
@@ -94,7 +100,15 @@ export class Hud {
       this.lastChips = html;
       this.chips.innerHTML = html;
     }
-    const hintText = state.edgeOn ? `Work plane ${state.plane.label} is edge-on. Press Tab or 1 / 2 / 3, or orbit with Shift.` : '';
+    const hintText = state.extrusion
+      ? state.tracking === 'lost'
+        ? 'Tracking lost — depth paused. Show your hand, release the pinch, then pinch again to continue.'
+        : state.extrusion.dragging
+          ? 'Move to pull the highlighted face out, back to push in. Release to pause. Enter applies · Esc cancels.'
+          : 'Pinch thumb + index and move (or hold Space / left-drag) to pull the highlighted face. Hover another face or press Tab to switch. Enter applies · Esc cancels.'
+      : state.edgeOn ? `Work plane ${state.plane.label} is edge-on. Press Tab or 1 / 2 / 3, or orbit with Shift.` : '';
+    this.hint.style.top = `${this.chips.offsetTop + this.chips.offsetHeight + 10}px`;
+    this.hint.classList.toggle('hint--extrusion', !!state.extrusion);
     if (hintText !== this.hint.textContent) {
       this.hint.textContent = hintText;
       this.hint.classList.toggle('hidden', !hintText);

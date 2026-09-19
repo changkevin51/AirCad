@@ -15,7 +15,7 @@ const WALKTHROUGH = [
   'Hover a floor corner until the cursor becomes a square (vertex snap), hold Space and draw a rectangle upwards: the plane moves through that corner, so the wall stands on the floor.',
   'Tab to YZ Right, hover another corner and draw the side wall the same way.',
   'Roof: hover a wall top corner, hold Space and draw a straight line to the opposite wall top. Vertex snaps connect the ends exactly.',
-  'Press L to type an exact size (4000 or 4000x3000) for the hovered or last entity, E to export to FreeCAD.',
+  'Press L to type an exact size (4000 or 4000x3000) for the selected, hovered, or last entity, E to export to FreeCAD.',
 ];
 
 function escapeHtml(text: string): string {
@@ -56,10 +56,18 @@ export class HelpOverlay {
         <header><h2>AirCAD - pen sketching in 3D</h2><span>H or Esc to close</span></header>
         <p class="help__intro">
           Your index fingertip (or the mouse) is the cursor. Keys stand in for the pen buttons:
-          hold <kbd>Space</kbd> to draw a straight line or a closed rectangle on the work plane,
+          hold <kbd>Space</kbd> to draw a straight line, a closed rectangle, or a rough circle on the work plane,
           hold <kbd>Shift</kbd> to orbit and <kbd>Ctrl</kbd> to pan. Everything is in millimetres.
         </p>
         <div class="help__grid">
+          <section class="help__walkthrough"><h3>Push/pull a face</h3><ol>
+            <li>Point inside a rectangle or solid and pinch thumb + index, click, or press <kbd>S</kbd> to select it. Its outline stays highlighted.</li>
+            <li>Press <kbd>Q</kbd>. The face most facing you is highlighted — hover another face or press <kbd>Tab</kbd> to switch which side you push/pull.</li>
+            <li>Pinch and move to pull the highlighted face out, or back to push it in. Mouse: left-drag or hold <kbd>Space</kbd>.</li>
+            <li>Release to pause, then grab again to keep adjusting. <kbd>L</kbd> types an exact pull distance; negative values push in.</li>
+            <li><kbd>Enter</kbd> or <kbd>Q</kbd> applies; <kbd>Esc</kbd> cancels. Press <kbd>0</kbd> for a 3D view. Undo restores the original shape.</li>
+          </ol></section>
+          <section><h3>Draw a circle</h3><p>Hold <kbd>Space</kbd> or left-drag around most of a circle — roughly two-thirds of the way around or more. Gaps, wobble, and circular squiggles are allowed; release to fit a clean circle automatically. Select it and press <kbd>L</kbd> to set its diameter. Circle extrusion and hole cutting are not supported yet.</p></section>
           ${sections}
           <section><h3>Mouse</h3><table>${mouse}</table></section>
           <section class="help__walkthrough"><h3>Sketch a house</h3><ol>${steps}</ol></section>

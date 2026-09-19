@@ -133,6 +133,38 @@ describe('snapCursor priorities', () => {
   });
 });
 
+describe('snapCursor: circles', () => {
+  const circleSketch = () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'circle', center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 1000 });
+    return sketch;
+  };
+
+  it('offers only centre and quadrant vertices, no tessellation midpoints', () => {
+    const targets = targetsOf(circleSketch());
+    expect(targets.vertices).toHaveLength(5);
+    expect(targets.midpoints).toHaveLength(0);
+    expect(targets.segments).toHaveLength(96);
+    const centre = snapCursor(context({ cursor: screenOf(5, -5), targets }));
+    expect(centre.type).toBe('vertex');
+    expect(centre.world).toEqual(v3(0, 0, 0));
+    const quad = screenOf(1000, 0);
+    const quadrant = snapCursor(context({ cursor: v2(quad.x - 6, quad.y + 6), targets }));
+    expect(quadrant.type).toBe('vertex');
+    expect(quadrant.world).toEqual(v3(1000, 0, 0));
+  });
+
+  it('snaps edges exactly onto the analytic circle, not the tessellation chord', () => {
+    const targets = targetsOf(circleSketch());
+    const along = 1000 / Math.sqrt(2) + 20;
+    const result = snapCursor(context({ cursor: screenOf(along, along), targets }));
+    expect(result.type).toBe('edge');
+    expect(result.entityId).toBe('e1');
+    expect(Math.hypot(result.world.x, result.world.y)).toBeCloseTo(1000, 6);
+    expect(result.world.z).toBe(0);
+  });
+});
+
 describe('adaptiveGridStep', () => {
   it('picks the smallest step that is at least minPx on screen', () => {
     const plane = new WorkPlane('XY');

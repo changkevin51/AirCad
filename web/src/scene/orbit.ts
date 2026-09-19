@@ -103,6 +103,7 @@ export class OrbitController {
 
   /** Rotate around `pivot` by a screen-space drag. */
   orbit(dxPx: number, dyPx: number, pivot: Vec3): void {
+    if (dxPx === 0 && dyPx === 0) return;
     const pivotVector = new THREE.Vector3(pivot.x, pivot.y, pivot.z);
     const azimuth = -dxPx * this.options.rotateSpeed;
     let elevationDelta = -dyPx * this.options.rotateSpeed;
@@ -110,7 +111,7 @@ export class OrbitController {
     const direction = this.position.clone().sub(this.target).normalize();
     const elevation = Math.asin(THREE.MathUtils.clamp(direction.z, -1, 1));
     const limit = THREE.MathUtils.degToRad(this.options.maxElevationDeg);
-    elevationDelta = THREE.MathUtils.clamp(elevation + elevationDelta, -limit, limit) - elevation;
+    elevationDelta = elevation - THREE.MathUtils.clamp(elevation - elevationDelta, -limit, limit);
 
     const { right } = this.basis();
     const rotation = new THREE.Quaternion()
@@ -175,7 +176,8 @@ export class OrbitController {
       ? Math.max(200, new THREE.Vector3(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z).length() / 2)
       : 3500;
     const direction = this.position.clone().sub(this.target).normalize();
-    const distance = THREE.MathUtils.clamp((radius * padding) / Math.sin(HALF_FOV), this.options.minDistance, this.options.maxDistance);
+    const limitingHalfFov = Math.min(HALF_FOV, Math.atan(Math.tan(HALF_FOV) * this.viewport.aspect));
+    const distance = THREE.MathUtils.clamp((radius * padding) / Math.sin(limitingHalfFov), this.options.minDistance, this.options.maxDistance);
     this.target.copy(center);
     this.position.copy(center).addScaledVector(direction, distance);
     this.apply();

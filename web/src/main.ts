@@ -11,13 +11,16 @@ import {
 } from './input/keymap';
 import { MouseSource } from './input/mouse-source';
 import { defaultTrackerUrl, TrackerClient, type CameraState, type ConnectionState, type HandsMessage, type NavMessage } from './input/tracker-client';
-import { Commands } from './model/commands';
+import { Commands, parseDepth } from './model/commands';
+import { ExtrusionSession } from './model/extrusion';
+import { defaultFaceIndex, pickProfileFace, profileFaces } from './model/faces';
+import { pickFace } from './model/pick';
 import { nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
 import { adaptiveGridStep, snapCursor, type SnapResult } from './model/snap';
-import { describeEntity, entityMidpoints, entityVertices, formatMm, Sketch, type Entity } from './model/sketch';
+import { circlePoints, describeEntity, entityMidpoints, entityVertices, formatMm, isExtrudableProfile, Sketch, type Entity, type ExtrusionEntity } from './model/sketch';
 import { anchorAfterCommit, buildEntityFromStroke, StrokeSession } from './model/stroke';
-import { nearlyEqual, v2, type Vec2, type Vec3 } from './model/vec';
-import { entityLabel, SketchRenderer } from './render/sketch-renderer';
+import { add, length2, nearlyEqual, normalize2, scale, sub2, v2, type Vec2, type Vec3 } from './model/vec';
+import { SketchRenderer } from './render/sketch-renderer';
 import { AxisTriad, createGroundGrid } from './scene/grid';
 import { OrbitController, type ViewPreset } from './scene/orbit';
 import { Viewport } from './scene/viewport';
@@ -59,6 +62,12 @@ class App {
   private plane = new WorkPlane('XY');
   private readonly held = new Set<HoldAction>();
   private stroke: StrokeSession | null = null;
+  private extrusion: ExtrusionSession | null = null;
+  private selectedId: string | null = null;
+  private lastPinching = false;
+  private lastHandMessageAt = 0;
+  private focused = true;
+  private planeBeforeStroke: WorkPlane | null = null;
   private lastSnap: SnapResult | null = null;
   private previousCursor: Vec2 | null = null;
   private hover: Entity | null = null;
@@ -92,7 +101,13 @@ class App {
     this.help = new HelpOverlay(root, this.platform);
 
     this.sketch.onChange(() => {
-      this.sketchRenderer.setSketch(this.sketch.all);
+      this.sketchRenderer.setSketch(this.sketch.all.filter((entity) => entity.id !== this.extrusion?.profile.id));
+      if (this.selectedId && !this.sketch.get(this.selectedId)) this.selectedId = null;
+      this.sketchRenderer.setSelected(this.extrusion ? null : this.selected);
+      this.hover = null;
+      this.sketchRenderer.setHover(null);
+      // Programmatic edits must not leave a stale preview able to overwrite newer geometry.
+      if (this.extrusion && this.sketch.get(this.extrusion.profile.id) !== this.extrusion.profile) this.cancelExtrusion();
       if (this.lastCommitted && !this.sketch.get(this.lastCommitted.id)) this.lastCommitted = this.sketch.last ?? null;
       this.sketchRenderer.setLastLabel(this.lastCommitted && this.sketch.get(this.lastCommitted.id) ? this.sketch.get(this.lastCommitted.id)! : null);
     });
@@ -102,7 +117,9 @@ class App {
         if (this.cursor.updateMouse(point, performance.now() / 1000)) this.onCursorMoved();
       },
       onHold: (action, down) => this.setHold(action, down),
-      onWheel: (deltaY, point) => this.orbit.zoom(deltaY < 0 ? 1.15 : 1 / 1.15, point),
+      onWheel: (deltaY, point) => {
+        if (!this.extrusion?.dragging) this.orbit.zoom(deltaY < 0 ? 1.15 : 1 / 1.15, point);
+      },
     });
 
     this.tracker = new TrackerClient(defaultTrackerUrl(), {
@@ -118,7 +135,10 @@ class App {
       },
       onConnection: (state) => {
         this.connection = state;
-        if (state !== 'open') this.cursor.dropHand();
+        if (state !== 'open') {
+          this.cursor.dropHand();
+          this.extrusion?.pause();
+        }
         this.pip.setCameraState(this.cameraState, state === 'open');
       },
     });
@@ -126,10 +146,11 @@ class App {
 
     window.addEventListener('keydown', (event) => this.onKeyDown(event));
     window.addEventListener('keyup', (event) => this.onKeyUp(event));
-    window.addEventListener('blur', () => this.releaseAll());
+    window.addEventListener('blur', () => { this.focused = false; this.releaseAll(); });
+    window.addEventListener('focus', () => { this.focused = true; });
     viewportElement.focus();
 
-    this.toasts.show('Hold Space to draw, Shift to orbit, Ctrl to pan. H for help.', 'info', 5000);
+    this.toasts.show('Space to draw · pinch or click to select · Q to extrude · H for help', 'info', 6000);
     requestAnimationFrame((time) => this.frame(time));
   }
 
@@ -160,13 +181,19 @@ class App {
   }
 
   private releaseAll(): void {
+    this.extrusion?.pause();
     for (const action of [...this.held]) this.setHold(action, false);
     this.mouse.releaseAll();
   }
 
   private setHold(action: HoldAction, down: boolean): void {
+    if (down && (this.measure.isOpen || this.help.visible)) return;
     if (down) this.held.add(action);
     else this.held.delete(action);
+    if (this.extrusion) {
+      if (action === 'draw') this.updateExtrusion();
+      return;
+    }
     if (action === 'draw') {
       if (down) this.beginStroke();
       else this.endStroke();
@@ -180,6 +207,7 @@ class App {
   }
 
   private get mode(): Mode {
+    if (this.extrusion) return 'EXTRUDING';
     if (this.stroke) return 'DRAWING';
     if (this.held.has('orbit')) return 'ORBIT';
     if (this.held.has('pan')) return 'PAN';
@@ -188,10 +216,15 @@ class App {
 
   private onHands(message: HandsMessage): void {
     const now = performance.now() / 1000;
+    this.lastHandMessageAt = now;
     this.cursor.updateHands(message, { w: this.viewport.width, h: this.viewport.height }, now);
     this.onCursorMoved();
+    const pinching = this.cursor.hand?.pinching ?? false;
+    if (this.focused && this.cursor.hand && pinching && !this.lastPinching && this.mode === 'READY' && !this.measure.isOpen && !this.help.visible) this.selectAtCursor();
+    // Missing frames do not count as a pinch release.
+    if (this.cursor.hand) this.lastPinching = pinching;
     this.pip.setHands(message, this.cursor.handId);
-    if (this.navAssist && message.nav && !this.held.has('draw') && !this.stroke) this.applyPalmNav(message.nav, message.frame);
+    if (this.focused && this.navAssist && message.nav && !this.held.has('draw') && !this.stroke && !this.extrusion && !pinching && !this.measure.isOpen && !this.help.visible) this.applyPalmNav(message.nav, message.frame);
   }
 
   private applyPalmNav(nav: NavMessage, frame: { w: number; h: number }): void {
@@ -208,7 +241,23 @@ class App {
   // ---------------------------------------------------------------- actions
 
   private doPress(action: PressAction): void {
+    if (this.help.visible && action !== 'help' && action !== 'cancel') return;
+    if (this.extrusion && !['extrude', 'confirm', 'cancel', 'measure', 'help', 'togglePip', 'cyclePlane', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'zoomIn', 'zoomOut'].includes(action)) {
+      this.toasts.show('Finish the extrusion with Enter, or cancel with Esc');
+      return;
+    }
+    if (this.extrusion && ['viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'zoomIn', 'zoomOut'].includes(action)) this.extrusion.pause();
     switch (action) {
+      case 'select':
+        if (!this.stroke) this.selectAtCursor();
+        break;
+      case 'extrude':
+        if (this.extrusion) this.commitExtrusion();
+        else this.beginExtrusion();
+        break;
+      case 'confirm':
+        if (this.extrusion) this.commitExtrusion();
+        break;
       case 'viewTop':
       case 'viewFront':
       case 'viewRight': {
@@ -235,7 +284,13 @@ class App {
         this.orbit.zoom(1 / 1.25, this.cursor.position ?? undefined);
         break;
       case 'cyclePlane':
-        this.setPlaneKind(nextPlaneKind(this.plane.kind), true);
+        if (this.extrusion) {
+          if (this.extrusion.cycleFace()) this.toasts.show(`Extruding ${this.extrusion.face.label} face`);
+          else this.toasts.show('Release to switch faces');
+          this.sketchRenderer.setActiveFace(this.extrusion.face.quad);
+        } else {
+          this.setPlaneKind(nextPlaneKind(this.plane.kind), true);
+        }
         break;
       case 'toggleGrid':
         this.gridEnabled = !this.gridEnabled;
@@ -256,7 +311,7 @@ class App {
         break;
       }
       case 'delete': {
-        const target = this.hover ?? this.sketch.last;
+        const target = this.selected ?? this.hover ?? this.sketch.last;
         const result = target ? this.commands.deleteEntity(target.id) : this.commands.deleteLast();
         this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'info' : 'error');
         if (result.ok) this.hover = null;
@@ -269,8 +324,10 @@ class App {
         break;
       }
       case 'cancel':
-        if (this.stroke) this.cancelStroke();
-        else if (this.help.visible) this.help.hide();
+        if (this.help.visible) this.help.hide();
+        else if (this.extrusion) this.cancelExtrusion();
+        else if (this.stroke) this.cancelStroke();
+        else this.selectEntity(null);
         break;
       case 'measure':
         this.openMeasure();
@@ -282,6 +339,7 @@ class App {
         this.toasts.show(this.pip.toggle() ? 'Camera preview on' : 'Camera preview off');
         break;
       case 'help':
+        this.extrusion?.pause();
         this.help.toggle();
         break;
     }
@@ -294,12 +352,27 @@ class App {
   }
 
   private openMeasure(): void {
-    const target = this.hover ?? this.lastCommitted ?? this.sketch.last ?? null;
+    if (this.extrusion) {
+      const session = this.extrusion;
+      session.pause();
+      this.held.delete('draw');
+      this.measure.open(`Pull distance for the ${session.face.label} face (mm; negative pushes in):`, (text) => {
+        const pull = parseDepth(text);
+        if (pull === null) this.toasts.show('Enter a non-zero depth, such as 500, -250, or 2 m. Press L to retry.', 'error');
+        else if (this.extrusion === session) {
+          session.setPull(pull);
+          this.sketchRenderer.setExtrusion(session.preview);
+          this.sketchRenderer.setActiveFace(session.face.quad);
+        }
+      });
+      return;
+    }
+    const target = this.selected ?? this.hover ?? this.lastCommitted ?? this.sketch.last ?? null;
     if (!target) {
       this.toasts.show('Draw something first, then press L to set its size', 'error');
       return;
     }
-    const prompt = target.type === 'line' ? `Length of ${describeEntity(target)} (mm):` : `Size of ${describeEntity(target)} (W x H mm):`;
+    const prompt = target.type === 'line' ? `Length of ${describeEntity(target)} (mm):` : target.type === 'extrusion' ? 'Extrusion depth (mm) or base size (W x H mm):' : target.type === 'circle' ? 'Circle diameter (mm; e.g. 50 or 5 cm):' : `Size of ${describeEntity(target)} (W x H mm):`;
     this.measure.open(prompt, (text) => {
       const result = this.commands.setDimension(target.id, text);
       this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'success' : 'error');
@@ -308,6 +381,132 @@ class App {
         this.plane = this.plane.withAnchor(anchorAfterCommit(result.entity));
       }
     });
+  }
+
+  // ----------------------------------------------------------- selection / extrusion
+
+  private get selected(): Entity | null {
+    return this.selectedId ? this.sketch.get(this.selectedId) ?? null : null;
+  }
+
+  private entityAtCursor(): Entity | null {
+    const position = this.cursor.position;
+    if (!position || this.cursor.isLost) return null;
+    return this.hoveredEntity(this.computeSnap(position)) ?? pickFace(this.sketch.all, position, this.viewport.projector());
+  }
+
+  private selectEntity(entity: Entity | null): void {
+    this.selectedId = entity?.id ?? null;
+    this.sketchRenderer.setSelected(entity);
+  }
+
+  private selectAtCursor(): void {
+    const entity = this.entityAtCursor();
+    this.selectEntity(entity);
+    if (entity) this.toasts.show(`Selected ${describeEntity(entity)}${entity.type === 'circle' ? ' · L to set diameter' : entity.type !== 'line' ? ' · Q to extrude' : ''}`);
+  }
+
+  private beginExtrusion(): void {
+    if (this.stroke) {
+      this.toasts.show('Finish drawing before extruding', 'error');
+      return;
+    }
+    const target = this.selected ?? this.entityAtCursor();
+    if (!target || target.type === 'line') {
+      this.toasts.show('Select a closed rectangle: point inside it and pinch, click, or press S.', 'error', 5000);
+      return;
+    }
+    if (target.type === 'circle') {
+      this.toasts.show('Circle extrusion is not supported yet. Press L to set its diameter.', 'error');
+      return;
+    }
+    if (!isExtrudableProfile(target.corners)) {
+      this.toasts.show('This shape is not a planar rectangle. Draw a new closed rectangle to extrude.', 'error');
+      return;
+    }
+    this.selectEntity(target);
+    const faces = profileFaces(target);
+    const faceIndex = defaultFaceIndex(faces, this.viewport.viewDirection());
+    this.extrusion = new ExtrusionSession(target, this.orbit.worldPerPixel(), this.gridEnabled ? this.gridStep : 0, faceIndex);
+    this.sketchRenderer.setSketch(this.sketch.all.filter((entity) => entity.id !== target.id));
+    this.sketchRenderer.setSelected(null);
+    this.hover = null;
+    this.sketchRenderer.setHover(null);
+    this.sketchRenderer.setExtrusion(this.extrusion.preview);
+    this.sketchRenderer.setActiveFace(this.extrusion.face.quad);
+    this.updateExtrusion();
+    this.toasts.show(`Extruding ${this.extrusion.face.label} face · hover another face or Tab to switch · pinch/drag to pull`, 'info', 6000);
+  }
+
+  private updateExtrusion(): void {
+    const session = this.extrusion;
+    if (!session) return;
+    if (!this.focused || this.measure.isOpen || this.help.visible) {
+      session.pause();
+      return;
+    }
+    const projector = this.viewport.projector();
+    const hand = this.cursor.hand;
+    const source = this.cursor.isLost ? null : hand ? `hand:${hand.id}` : this.cursor.tracking === 'mouse' ? 'mouse' : null;
+    const gripping = this.held.has('draw') || !!hand?.pinching;
+    const before = { depth: session.depth, corners: session.corners, faceIndex: session.faceIndex };
+    if (!session.dragging && !gripping && this.cursor.position && source) {
+      const hovered = pickProfileFace(session.currentFaces(), this.cursor.position, projector);
+      if (hovered !== null && hovered !== session.faceIndex) session.setFace(hovered);
+    }
+    // Screen direction that pulls the active face outward: the projected normal.
+    const face = session.face;
+    const p0 = projector.project(face.center);
+    const p1 = projector.project(add(face.center, scale(face.normal, 100 * session.mmPerPixel)));
+    let along = v2(0, -1);
+    if (p0 && p1) {
+      const projected = sub2(p1, p0);
+      if (length2(projected) >= 2) along = normalize2(projected);
+    }
+    session.update(this.cursor.position, gripping, source, along);
+    if (session.depth !== before.depth || session.corners !== before.corners || session.faceIndex !== before.faceIndex) {
+      this.sketchRenderer.setExtrusion(session.preview);
+      this.sketchRenderer.setActiveFace(session.face.quad);
+    }
+  }
+
+  private commitExtrusion(): void {
+    const session = this.extrusion;
+    if (!session) return;
+    if (Math.abs(session.depth) < 1e-6) {
+      this.toasts.show('Set a non-zero depth: pinch and move up/down, or press L to type one.', 'error');
+      return;
+    }
+    if (!isExtrudableProfile(session.corners)) {
+      this.toasts.show('The preview is degenerate — pull the face back out or press Esc.', 'error');
+      return;
+    }
+    // Clear the preview transaction before the command emits its model change.
+    this.extrusion = null;
+    const result = this.commands.extrude(session.profile.id, session.depth, session.corners);
+    this.sketchRenderer.setExtrusion(null);
+    this.sketchRenderer.setActiveFace(null);
+    this.sketchRenderer.setSketch(this.sketch.all);
+    this.held.clear();
+    this.mouse.releaseAll();
+    if (result.ok) {
+      this.lastCommitted = result.entity;
+      this.selectEntity(result.entity);
+      this.sketchRenderer.setLastLabel(result.entity);
+    }
+    this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'success' : 'error');
+  }
+
+  private cancelExtrusion(): void {
+    this.extrusion = null;
+    this.sketchRenderer.setExtrusion(null);
+    this.sketchRenderer.setActiveFace(null);
+    this.sketchRenderer.setSketch(this.sketch.all);
+    this.sketchRenderer.setSelected(this.selected);
+    this.sketchRenderer.setLastLabel(this.selected);
+    this.held.clear();
+    this.mouse.releaseAll();
+    this.toasts.show('Extrusion cancelled');
   }
 
   private async exportToFreeCad(): Promise<void> {
@@ -349,9 +548,10 @@ class App {
   }
 
   private beginStroke(): void {
-    if (this.stroke || !this.cursor.position) return;
+    if (this.stroke || this.extrusion || !this.cursor.position || this.cursor.isLost) return;
     const snap = this.computeSnap(this.cursor.position);
     this.lastSnap = snap;
+    this.planeBeforeStroke = this.plane;
     let plane = this.plane;
     let anchorMoved = false;
     if (snap.type === 'vertex' || snap.type === 'midpoint' || snap.type === 'edge') {
@@ -374,6 +574,11 @@ class App {
    * deltas and stroke sampling do not depend on the render frame rate.
    */
   private onCursorMoved(): void {
+    if (!this.focused) return;
+    if (this.extrusion) {
+      this.updateExtrusion();
+      return;
+    }
     const position = this.cursor.position;
     if (!position) return;
     const mode = this.mode;
@@ -407,13 +612,19 @@ class App {
     this.stroke = null;
     this.sketchRenderer.setGhost(null, false, null);
     this.sketchRenderer.setInk(null);
-    if (stroke.screenExtent() < MIN_STROKE_PX) return;
+    if (stroke.screenExtent() < MIN_STROKE_PX) {
+      if (this.planeBeforeStroke) this.plane = this.planeBeforeStroke;
+      this.planeBeforeStroke = null;
+      this.selectAtCursor();
+      return;
+    }
+    this.planeBeforeStroke = null;
 
     const result = stroke.recognize();
     this.lastRecognition = { reason: result.reason, points: stroke.planePoints(), screenExtent: stroke.screenExtent() };
     if (!result.shape) {
       this.sketchRenderer.fadeOut(stroke.worldPath());
-      this.toasts.show('Not recognized: draw a straight line or a closed rectangle', 'error');
+      this.toasts.show('Not recognized: draw a straight line, a closed rectangle, or most of a circle', 'error');
       return;
     }
     const input = buildEntityFromStroke(stroke, result.shape, {
@@ -422,12 +633,13 @@ class App {
       tolerancePx: SNAP_TOLERANCE_PX,
       gridStep: this.gridEnabled ? this.gridStep : 0,
     });
-    const commit = input.type === 'line' ? this.commands.addLine(input.a, input.b) : this.commands.addRect(input.corners);
+    const commit = input.type === 'line' ? this.commands.addLine(input.a, input.b) : input.type === 'circle' ? this.commands.addCircle(input.center, input.normal, input.radius) : this.commands.addRect(input.corners);
     if (!commit.ok) {
       this.toasts.show(commit.error, 'error');
       return;
     }
     this.lastCommitted = commit.entity;
+    this.selectEntity(commit.entity);
     this.sketchRenderer.setLastLabel(commit.entity);
     this.plane = this.plane.withAnchor(anchorAfterCommit(input));
     this.toasts.show(commit.message, 'success');
@@ -435,6 +647,8 @@ class App {
 
   private cancelStroke(): void {
     this.stroke = null;
+    if (this.planeBeforeStroke) this.plane = this.planeBeforeStroke;
+    this.planeBeforeStroke = null;
     this.sketchRenderer.setGhost(null, false, null);
     this.sketchRenderer.setInk(null);
     this.toasts.show('Stroke cancelled');
@@ -456,6 +670,11 @@ class App {
       this.sketchRenderer.setGhost([a, b], false, { text: formatMm(length), at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 } });
       return;
     }
+    if (shape.kind === 'circle') {
+      const circle = { center: plane.toWorld(shape.center), normal: { ...plane.normal }, radius: shape.radius };
+      this.sketchRenderer.setGhost(circlePoints(circle), true, { text: `Ø ${formatMm(circle.radius * 2)}`, at: circle.center });
+      return;
+    }
     const corners = shape.corners.map((c) => plane.toWorld(c));
     const centre = plane.toWorld(v2((shape.corners[0].x + shape.corners[2].x) / 2, (shape.corners[0].y + shape.corners[2].y) / 2));
     this.sketchRenderer.setGhost(corners, true, {
@@ -468,6 +687,10 @@ class App {
 
   private frame(time: number): void {
     requestAnimationFrame((next) => this.frame(next));
+    if (this.cursor.tracking === 'hand' && performance.now() / 1000 - this.lastHandMessageAt > 0.6) {
+      this.cursor.dropHand();
+      this.extrusion?.pause();
+    }
     const cursorPx = this.cursor.position;
     const projector = this.viewport.projector();
     const viewDirection = this.viewport.viewDirection();
@@ -483,7 +706,7 @@ class App {
       // Points are captured in onCursorMoved; the ghost follows the camera too.
       this.updateGhost(this.stroke);
     } else {
-      const hovered = snap && mode === 'READY' ? this.hoveredEntity(snap) : null;
+      const hovered = snap && cursorPx && mode === 'READY' && !this.cursor.isLost ? this.hoveredEntity(snap) ?? pickFace(this.sketch.all, cursorPx, projector) : null;
       if (hovered !== this.hover) {
         this.hover = hovered;
         this.sketchRenderer.setHover(hovered);
@@ -509,6 +732,8 @@ class App {
       navAssist: this.navAssist,
       edgeOn: this.plane.isEdgeOn(viewDirection),
       entityCount: this.sketch.size,
+      selected: this.selected ? describeEntity(this.selected) : null,
+      extrusion: this.extrusion ? { depth: this.extrusion.depth, dragging: this.extrusion.dragging, face: this.extrusion.face.label, pulled: this.extrusion.pulled } : null,
     });
     this.hud.setKeys(this.keyHints(mode));
 
@@ -535,6 +760,15 @@ class App {
     const key = (action: PressAction | HoldAction) => labelForAction(action, this.platform);
     if (this.measure.isOpen) return [{ key: 'Enter', label: 'apply' }, { key: 'Esc', label: 'cancel' }];
     switch (mode) {
+      case 'EXTRUDING':
+        return [
+          { key: this.cursor.hand ? 'Pinch' : 'Drag / Space', label: 'pull face' },
+          { key: key('cyclePlane'), label: 'switch face' },
+          { key: 'Enter / Q', label: 'apply' },
+          { key: key('measure'), label: 'exact pull' },
+          { key: '0', label: '3D view' },
+          { key: key('cancel'), label: 'cancel' },
+        ];
       case 'DRAWING':
         return [
           { key: key('draw'), label: 'release to commit' },
@@ -553,7 +787,10 @@ class App {
           { key: key('cyclePlane'), label: 'plane' },
           { key: '1 2 3 0', label: 'views' },
         ];
-        if (this.hover) hints.push({ key: key('measure'), label: `size ${entityLabel(this.hover)}` }, { key: key('delete'), label: 'delete' });
+        const target = this.selected ?? this.hover;
+        if (this.hover) hints.push({ key: key('select'), label: 'select' });
+        if (target && target.type !== 'line' && target.type !== 'circle') hints.push({ key: key('extrude'), label: 'extrude' });
+        if (target) hints.push({ key: key('measure'), label: target.type === 'circle' ? 'diameter' : 'size' }, { key: key('delete'), label: 'delete' });
         else if (this.sketch.size) hints.push({ key: key('measure'), label: 'size' }, { key: key('undo'), label: 'undo' });
         hints.push({ key: key('export'), label: 'FreeCAD' }, { key: key('help'), label: 'help' });
         return hints;
@@ -576,6 +813,8 @@ class App {
         this.onCursorMoved();
       },
       lastRecognition: () => this.lastRecognition,
+      selected: () => this.selected,
+      extrusion: () => this.extrusion ? { depth: this.extrusion.depth, dragging: this.extrusion.dragging, face: this.extrusion.face.label, corners: this.extrusion.corners } : null,
     };
   }
 }
@@ -591,6 +830,8 @@ export interface AirCadApi {
   setCursor(point: Vec2): void;
   /** Reason and plane points of the most recent pen-up, for diagnostics. */
   lastRecognition(): { reason: string; points: Vec2[]; screenExtent: number } | null;
+  selected(): Entity | null;
+  extrusion(): { depth: number; dragging: boolean; face: string; corners: ExtrusionEntity['corners'] } | null;
 }
 
 declare global {

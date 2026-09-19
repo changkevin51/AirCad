@@ -139,6 +139,40 @@ class FreeCADImportTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         freecad_import.read_snapshot(snapshot)
 
+    def test_extrusion_import_builds_a_solid_with_the_exported_vector(self) -> None:
+        document = _FakeDocument()
+        view = _FakeView()
+        face = mock.Mock()
+        face.extrude.return_value = "extruded solid"
+        fake_app = types.SimpleNamespace(Vector=lambda *values: tuple(values), newDocument=lambda _name: document)
+        fake_gui = types.SimpleNamespace(activeDocument=lambda: types.SimpleNamespace(activeView=lambda: view))
+        fake_part = types.SimpleNamespace(makePolygon=lambda values: values, Face=mock.Mock(return_value=face))
+        solid = {"type": "extrusion", "points": [[0, 0, 0], [100, 0, 0], [100, 80, 0], [0, 80, 0]], "vector": [0, 0, -250]}
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "solid.json"
+            snapshot.write_text(json.dumps({"entities": [solid]}), encoding="utf-8")
+            with mock.patch.dict(sys.modules, {"FreeCAD": fake_app, "FreeCADGui": fake_gui, "Part": fake_part}):
+                freecad_import.import_drawing(snapshot)
+        face.extrude.assert_called_once_with((0.0, 0.0, -250.0))
+        self.assertEqual(len(fake_part.Face.call_args.args[0]), 5)
+        self.assertEqual(document.objects[0].Shape, "extruded solid")
+        self.assertEqual(document.objects[0].Label, "Extrusion 1")
+        self.assertEqual(document.objects[0].ViewObject.Transparency, 15)
+
+    def test_invalid_extrusions_fail_before_creating_a_document(self) -> None:
+        solid = {"type": "extrusion", "points": [[0, 0, 0], [100, 0, 0], [100, 80, 0], [0, 80, 0]], "vector": [0, 0, 250]}
+        malformed = [{**solid, "vector": value} for value in (None, [0, 0], [0, 0, 0], [100, 0, 0], [0, 0, float("nan")])]
+        malformed.append({**solid, "points": [[0, 0, 0]] * 4})
+        new_document = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "invalid.json"
+            with mock.patch.dict(sys.modules, {"FreeCAD": types.SimpleNamespace(newDocument=new_document), "FreeCADGui": types.SimpleNamespace(), "Part": types.SimpleNamespace()}):
+                for entity in malformed:
+                    snapshot.write_text(json.dumps({"entities": [entity]}), encoding="utf-8")
+                    with self.subTest(entity=entity), self.assertRaises(ValueError):
+                        freecad_import.import_drawing(snapshot)
+        new_document.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

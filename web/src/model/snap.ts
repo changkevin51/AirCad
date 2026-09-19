@@ -6,6 +6,7 @@ import {
   closestPointOnSegmentToRay,
   distance2,
   dot,
+  normalize,
   roundTo,
   scale,
   sub,
@@ -203,11 +204,12 @@ export function snapCursor(context: SnapContext): SnapResult {
     for (const segment of targets.segments) {
       if (excludeEntityId && segment.entityId === excludeEntityId) continue;
       const { point } = closestPointOnSegmentToRay(ray.origin, ray.dir, segment.a, segment.b);
-      const screen = projector.project(point);
+      const world = segment.circle ? add(segment.circle.center, scale(normalize(sub(point, segment.circle.center)), segment.circle.radius)) : point;
+      const screen = projector.project(world);
       if (!screen) continue;
       const d = distance2(screen, cursor);
       if (d <= tolerancePx && (!bestEdge || d < bestEdge.distance)) {
-        bestEdge = { world: point, screen, distance: d, entityId: segment.entityId };
+        bestEdge = { world, screen, distance: d, entityId: segment.entityId };
       }
     }
     if (bestEdge) {

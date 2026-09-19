@@ -1,0 +1,178 @@
+import { describe, expect, it } from 'vitest';
+import { ExtrusionSession } from './extrusion';
+import { defaultFaceIndex, labelForNormal, pickProfileFace, profileFaces, pushPull } from './faces';
+import { entityCenter, makeRect, type ExtrusionEntity, type RectEntity } from './sketch';
+import { topViewProjector } from './test-helpers';
+import { dot, normalize, scale, sub, v2, v3 } from './vec';
+
+const rect: RectEntity = { id: 'r', type: 'rect', corners: makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300) };
+const solid: ExtrusionEntity = { ...rect, id: 's', type: 'extrusion', depth: 300 };
+
+describe('profileFaces', () => {
+  it('returns the two coincident sides of a flat rectangle, +n first', () => {
+    const faces = profileFaces(rect);
+    expect(faces).toHaveLength(2);
+    expect(faces[0].normal).toEqual(v3(0, 0, 1));
+    expect(faces[1].normal.z).toBe(-1);
+    expect(Math.hypot(faces[1].normal.x, faces[1].normal.y)).toBe(0);
+    expect(faces[0].axis).toBe('n');
+    expect(faces.map((face) => face.sign)).toEqual([1, -1]);
+    expect(faces[0].quad).toEqual(rect.corners);
+    expect(faces[1].quad).toEqual(rect.corners);
+    expect(faces[0].label).toBe('top');
+    expect(faces[1].label).toBe('bottom');
+  });
+
+  it('returns six outward faces for a solid, one per direction', () => {
+    const faces = profileFaces(solid);
+    expect(faces).toHaveLength(6);
+    const labels = faces.map((face) => face.label).sort();
+    expect(labels).toEqual(['back', 'bottom', 'front', 'left', 'right', 'top']);
+    const center = entityCenter(solid);
+    for (const face of faces) {
+      expect(dot(face.normal, sub(face.center, center))).toBeGreaterThan(0);
+    }
+    // Canonical order: +n, -n, +u, -u, +v, -v so indices are stable.
+    expect(faces.map((face) => `${face.axis}${face.sign}`)).toEqual(['n1', 'n-1', 'u1', 'u-1', 'v1', 'v-1']);
+  });
+});
+
+describe('defaultFaceIndex', () => {
+  it('picks the face pointing at the camera', () => {
+    const faces = profileFaces(solid);
+    expect(faces[defaultFaceIndex(faces, v3(0, 0, -1))].label).toBe('top');
+    expect(faces[defaultFaceIndex(faces, v3(0, 0, 1))].label).toBe('bottom');
+  });
+
+  it('picks a visible face from the isometric view', () => {
+    const faces = profileFaces(solid);
+    // Orbit 'iso' sits at (1,-1,1), so the camera looks along (-1,1,-1).
+    const view = normalize(v3(-1, 1, -1));
+    const face = faces[defaultFaceIndex(faces, view)];
+    expect(dot(face.normal, scale(view, -1))).toBeGreaterThan(0);
+    expect(face.label).toBe('top');
+  });
+});
+
+describe('pickProfileFace', () => {
+  it('picks the camera-facing side of a flat rectangle', () => {
+    const faces = profileFaces(rect);
+    const projector = topViewProjector();
+    expect(pickProfileFace(faces, v2(420, 285), projector)).toBe(0);
+    expect(pickProfileFace(faces, v2(450, 285), projector)).toBeNull();
+  });
+
+  it('picks the nearest solid face under the cursor', () => {
+    const faces = profileFaces(solid);
+    expect(pickProfileFace(faces, v2(420, 285), topViewProjector())).toBe(0);
+  });
+});
+
+describe('pushPull', () => {
+  const faces = () => profileFaces(rect);
+  const solidFaces = () => profileFaces(solid);
+
+  it('pulls a rectangle along its normal without moving the corners', () => {
+    expect(pushPull(rect, faces()[0], 250, 10)).toEqual({ corners: rect.corners, depth: 250 });
+    expect(pushPull(rect, faces()[1], 250, 10)).toEqual({ corners: rect.corners, depth: -250 });
+    // A flat profile can cross zero: no clamp on the n axis.
+    expect(pushPull(rect, faces()[0], -100, 10).depth).toBe(-100);
+  });
+
+  it('pulls the far cap of a solid by changing only the depth', () => {
+    const result = pushPull(solid, solidFaces()[0], 100, 10);
+    expect(result.depth).toBe(400);
+    expect(result.corners).toEqual(solid.corners);
+  });
+
+  it('pulls the base cap of a solid by moving the origin', () => {
+    const result = pushPull(solid, solidFaces()[1], 100, 10);
+    expect(result.depth).toBe(400);
+    expect(result.corners[0]).toEqual(v3(0, 0, -100));
+    expect(result.corners[3]).toEqual(v3(0, 300, -100));
+  });
+
+  it('widens the box when a +u side is pulled, keeps the origin when -u clamps', () => {
+    const grown = pushPull(solid, solidFaces()[2], 50, 10);
+    expect(grown.corners[1]).toEqual(v3(450, 0, 0));
+    expect(grown.corners[0]).toEqual(v3(0, 0, 0));
+    expect(grown.depth).toBe(300);
+
+    const shifted = pushPull(solid, solidFaces()[3], 50, 10);
+    expect(shifted.corners[0]).toEqual(v3(-50, 0, 0));
+    expect(shifted.corners[1]).toEqual(v3(400, 0, 0));
+  });
+
+  it('clamps a side pushed past minSize without moving the opposite edge', () => {
+    const result = pushPull(solid, solidFaces()[3], -1000, 10);
+    expect(result.corners[0]).toEqual(v3(390, 0, 0));
+    expect(result.corners[1]).toEqual(v3(400, 0, 0));
+    expect(result.corners[2]).toEqual(v3(400, 300, 0));
+  });
+
+  it('clamps a solid cap pushed through itself to minSize with the sign kept', () => {
+    expect(pushPull(solid, solidFaces()[0], -1000, 10).depth).toBe(10);
+    const base = pushPull(solid, solidFaces()[1], -1000, 10);
+    expect(base.depth).toBe(10);
+    expect(base.corners[0]).toEqual(v3(0, 0, 290));
+  });
+});
+
+describe('ExtrusionSession faces', () => {
+  const UP = v2(0, -1);
+
+  it('pulls the default +n face of a rect like before', () => {
+    const session = new ExtrusionSession(rect, 10, 100, 0);
+    expect(session.face.label).toBe('top');
+    session.update(v2(100, 200), true, 'mouse', UP);
+    session.update(v2(500, 146), true, 'mouse', UP);
+    expect(session.depth).toBe(500);
+    expect(session.pulled).toBe(500);
+    expect(session.preview.corners).toEqual(rect.corners);
+  });
+
+  it('refuses to switch faces while dragging and wraps on cycle', () => {
+    const session = new ExtrusionSession(rect, 10, 100, 0);
+    session.update(v2(0, 300), true, 'mouse', UP);
+    expect(session.dragging).toBe(true);
+    expect(session.setFace(1)).toBe(false);
+    expect(session.cycleFace()).toBe(false);
+    session.update(v2(0, 300), false, 'mouse', UP);
+    expect(session.cycleFace()).toBe(true);
+    expect(session.faceIndex).toBe(1);
+    expect(session.face.label).toBe('bottom');
+    expect(session.cycleFace()).toBe(true);
+    expect(session.faceIndex).toBe(0);
+  });
+
+  it('keeps depth while a side face is dragged after setFace', () => {
+    const session = new ExtrusionSession(solid, 10, 100, 0);
+    expect(session.setFace(2)).toBe(true);
+    expect(session.face.label).toBe('right');
+    session.update(v2(0, 300), true, 'mouse', UP);
+    session.update(v2(0, 250), true, 'mouse', UP);
+    expect(session.depth).toBe(300);
+    expect(session.corners[1]).toEqual(v3(900, 0, 0));
+    expect(session.pulled).toBe(500);
+  });
+
+  it('sets an exact pull distance with setPull', () => {
+    const session = new ExtrusionSession(rect, 10, 100, 0);
+    session.setPull(250);
+    expect(session.depth).toBe(250);
+    expect(session.pulled).toBe(250);
+    session.setPull(-80);
+    expect(session.depth).toBe(-80);
+  });
+});
+
+describe('labelForNormal', () => {
+  it('maps the dominant world axis to a CAD label', () => {
+    expect(labelForNormal(v3(0, 0, 1))).toBe('top');
+    expect(labelForNormal(v3(0, 0, -1))).toBe('bottom');
+    expect(labelForNormal(v3(0, -1, 0))).toBe('front');
+    expect(labelForNormal(v3(0, 1, 0))).toBe('back');
+    expect(labelForNormal(v3(1, 0, 0))).toBe('right');
+    expect(labelForNormal(v3(-1, 0, 0))).toBe('left');
+  });
+});

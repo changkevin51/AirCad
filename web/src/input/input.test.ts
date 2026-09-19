@@ -25,7 +25,15 @@ describe('keymap', () => {
     expect(resolvePress(key('Backspace'), 'other')).toBe('delete');
     expect(resolvePress(key('Backspace', { ctrlKey: true }), 'other')).toBe('clear');
     expect(resolvePress(key('Backspace', { metaKey: true }), 'mac')).toBe('clear');
-    expect(resolvePress(key('KeyQ'), 'other')).toBeNull();
+    expect(resolvePress(key('KeyQ'), 'other')).toBe('extrude');
+    expect(resolvePress(key('KeyQ', { metaKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyQ', { ctrlKey: true }), 'other')).toBeNull();
+    expect(resolvePress(key('KeyS'), 'other')).toBe('select');
+    expect(resolvePress(key('KeyS', { metaKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('Enter'), 'other')).toBe('confirm');
+    expect(resolvePress(key('NumpadEnter'), 'other')).toBe('confirm');
+    expect(resolvePress(key('KeyE'), 'other')).toBe('export');
+    expect(resolvePress(key('KeyR'), 'other')).toBeNull();
   });
 
   it('keeps plain Z as an axis lock but not with the primary modifier', () => {

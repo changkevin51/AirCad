@@ -93,7 +93,15 @@ export class StrokeSession {
   }
 
   recognize(options: Partial<RecognizeOptions> = {}): RecognizeResult {
-    return recognizeStroke(this.planePoints(), options);
+    const raw = [
+      this.plane.toPlane(this.start.raw ?? this.start.world),
+      ...this.rawPlane,
+      this.plane.toPlane(this.lastSnap.raw ?? this.lastSnap.world),
+    ];
+    const result = recognizeStroke(raw, options);
+    if (result.shape?.kind === 'circle') return result;
+    const snapped = recognizeStroke(this.planePoints(), options);
+    return snapped.shape?.kind === 'circle' ? result : snapped;
   }
 }
 
@@ -202,6 +210,9 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
     const b = isObjectSnap(session.last) ? session.last.world : plane.toWorld(shape.b);
     return { type: 'line', a, b };
   }
+  if (shape.kind === 'circle') {
+    return { type: 'circle', center: plane.toWorld(shape.center), normal: { ...plane.normal }, radius: shape.radius };
+  }
   const corners2 = shape.oriented ? shape.corners : alignRectToStart(shape.corners, session.start.plane, context.gridStep ?? 0);
   const corners = pullRectCorners(corners2.map((c) => plane.toWorld(c)), plane, context);
   return { type: 'rect', corners: corners as [Vec3, Vec3, Vec3, Vec3] };
@@ -209,5 +220,6 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
 
 /** The point the work-plane anchor moves to after a commit. */
 export function anchorAfterCommit(entity: EntityInput): Vec3 {
+  if (entity.type === 'circle') return entity.center;
   return entity.type === 'line' ? entity.b : entity.corners[0];
 }

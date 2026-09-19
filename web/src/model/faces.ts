@@ -1,0 +1,184 @@
+import { triangleHit } from './pick';
+import type { Projector } from './snap';
+import {
+  entityCenter,
+  entityFaces,
+  extrusionNormal,
+  makeRect,
+  rectFrame,
+  type ExtrusionEntity,
+  type ProfileEntity,
+} from './sketch';
+import { add, dot, normalize, scale, sub, v3, type Vec2, type Vec3 } from './vec';
+
+export interface ProfileFace {
+  /** Quad corners in world space. */
+  quad: [Vec3, Vec3, Vec3, Vec3];
+  /** Unit outward normal. */
+  normal: Vec3;
+  center: Vec3;
+  /** Which box axis this face lies on, and its sign: 'u' | 'v' | 'n'. */
+  axis: 'u' | 'v' | 'n';
+  sign: 1 | -1;
+  /** Human label from the world direction of `normal`, e.g. 'top' (see labelForNormal). */
+  label: string;
+}
+
+/** CAD Z-up labels matching the 1/2/3 view keys: front looks along +Y, right along -X. */
+export function labelForNormal(normal: Vec3): string {
+  const ax = Math.abs(normal.x);
+  const ay = Math.abs(normal.y);
+  const az = Math.abs(normal.z);
+  if (az >= ax && az >= ay) return normal.z >= 0 ? 'top' : 'bottom';
+  if (ay >= ax) return normal.y >= 0 ? 'back' : 'front';
+  return normal.x >= 0 ? 'right' : 'left';
+}
+
+function quadCenter(quad: readonly Vec3[]): Vec3 {
+  let x = 0;
+  let y = 0;
+  let z = 0;
+  for (const p of quad) {
+    x += p.x;
+    y += p.y;
+    z += p.z;
+  }
+  return v3(x / quad.length, y / quad.length, z / quad.length);
+}
+
+/** Canonical index order keeps face indices stable as a preview grows from a rect into a solid. */
+const FACE_ORDER: Record<string, number> = { 'n1': 0, 'n-1': 1, 'u1': 2, 'u-1': 3, 'v1': 4, 'v-1': 5 };
+
+/** All extrudable faces of a profile: 2 for a rect (its two sides, +n and -n, same quad), 6 for a solid. */
+export function profileFaces(profile: ProfileEntity): ProfileFace[] {
+  const n = extrusionNormal(profile);
+  const depth = profile.type === 'extrusion' ? profile.depth : 0;
+  if (profile.type === 'rect' || Math.abs(depth) < 1e-9) {
+    const quad = profile.corners.map((p) => ({ ...p })) as ProfileFace['quad'];
+    const center = quadCenter(quad);
+    return [
+      { quad, normal: n, center, axis: 'n', sign: 1, label: labelForNormal(n) },
+      { quad, normal: scale(n, -1), center, axis: 'n', sign: -1, label: labelForNormal(scale(n, -1)) },
+    ];
+  }
+  const { uDir, vDir } = rectFrame(profile);
+  const center = entityCenter(profile);
+  const faces: ProfileFace[] = [];
+  for (const quad of entityFaces(profile)) {
+    const faceCenter = quadCenter(quad);
+    const normal = normalize(sub(faceCenter, center));
+    const candidates = [
+      { axis: 'u' as const, dir: uDir },
+      { axis: 'v' as const, dir: vDir },
+      { axis: 'n' as const, dir: n },
+    ];
+    let best = candidates[2];
+    for (const candidate of candidates) {
+      if (Math.abs(dot(normal, candidate.dir)) > Math.abs(dot(normal, best.dir))) best = candidate;
+    }
+    const sign = (dot(normal, best.dir) >= 0 ? 1 : -1) as 1 | -1;
+    faces.push({
+      quad: quad as ProfileFace['quad'],
+      normal,
+      center: faceCenter,
+      axis: best.axis,
+      sign,
+      label: labelForNormal(normal),
+    });
+  }
+  faces.sort((a, b) => FACE_ORDER[`${a.axis}${a.sign}`] - FACE_ORDER[`${b.axis}${b.sign}`]);
+  return faces;
+}
+
+/** Index of the face whose outward normal points most toward the camera. Ties: lowest index. */
+export function defaultFaceIndex(faces: readonly ProfileFace[], viewDirection: Vec3): number {
+  let best = 0;
+  let bestDot = -Infinity;
+  for (const [index, face] of faces.entries()) {
+    const facing = -dot(face.normal, viewDirection);
+    if (facing > bestDot) {
+      bestDot = facing;
+      best = index;
+    }
+  }
+  return best;
+}
+
+/**
+ * Nearest face under the cursor, or null.  Coincident faces (a flat rect's two
+ * sides, or faces meeting at an edge-on corner) resolve to the one whose
+ * outward normal faces the camera.
+ */
+export function pickProfileFace(faces: readonly ProfileFace[], cursor: Vec2, projector: Projector): number | null {
+  const ray = projector.ray(cursor);
+  let best: number | null = null;
+  let nearest = Infinity;
+  let bestFacing = Infinity;
+  for (const [index, face] of faces.entries()) {
+    const [a, b, c, d] = face.quad;
+    for (const triangle of [[a, b, c], [a, c, d]] as const) {
+      const t = triangleHit(ray.origin, ray.dir, triangle[0], triangle[1], triangle[2]);
+      if (t === null || !projector.project(add(ray.origin, scale(ray.dir, t)))) continue;
+      const facing = dot(face.normal, ray.dir);
+      if (t < nearest - 1e-6 || (t <= nearest + 1e-6 && facing < bestFacing)) {
+        nearest = Math.min(nearest, t);
+        bestFacing = facing;
+        best = index;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Push/pull `face` of `profile` outward by `distance` mm (negative pushes in).
+ * Returns the resulting box; the corners change for side and base faces while
+ * pulling the far cap only changes depth.
+ */
+export function pushPull(
+  profile: ProfileEntity,
+  face: ProfileFace,
+  distance: number,
+  minSize: number,
+): { corners: ExtrusionEntity['corners']; depth: number } {
+  const frame = rectFrame(profile);
+  const n = extrusionNormal(profile);
+  const depth0 = profile.type === 'extrusion' ? profile.depth : 0;
+  const solid = profile.type === 'extrusion' && Math.abs(depth0) > 1e-9;
+  let { origin, width, height } = frame;
+  const { uDir, vDir } = frame;
+  let depth = depth0;
+
+  if (face.axis === 'u' || face.axis === 'v') {
+    const dir = face.axis === 'u' ? uDir : vDir;
+    const size = face.axis === 'u' ? width : height;
+    const next = minSize > 0 ? Math.max(size + distance, minSize) : size + distance;
+    const applied = next - size;
+    if (face.sign < 0) origin = sub(origin, scale(dir, applied));
+    if (face.axis === 'u') width = next;
+    else height = next;
+  } else {
+    const s = face.sign;
+    // The face with outward normal s*n is the far cap when the profile is flat
+    // or the solid grows in direction s; otherwise it is the base cap.
+    const far = !solid || Math.sign(depth0) === s;
+    if (far) {
+      depth = depth0 + s * distance;
+      if (solid && minSize > 0) {
+        // A solid cannot be pushed through itself: keep the sign, floor |depth|.
+        depth = Math.sign(depth0) > 0 ? Math.max(depth, minSize) : Math.min(depth, -minSize);
+      }
+    } else {
+      let applied = distance;
+      let next = depth0 - s * applied;
+      if (solid && minSize > 0) {
+        const clamped = Math.sign(depth0) > 0 ? Math.max(next, minSize) : Math.min(next, -minSize);
+        applied = (depth0 - clamped) / s;
+        next = clamped;
+      }
+      depth = next;
+      origin = add(origin, scale(n, s * applied));
+    }
+  }
+  return { corners: makeRect(origin, uDir, vDir, width, height), depth };
+}

@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { WorkPlane } from './plane';
+import { WorkPlane, type PlaneKind } from './plane';
 import { snapCursor, type SnapResult } from './snap';
 import { makeRect, Sketch } from './sketch';
 import { alignRectToStart, anchorAfterCommit, buildEntityFromStroke, pullRectCorners, StrokeSession } from './stroke';
-import { rectStroke, topViewProjector } from './test-helpers';
-import { v2, v3, type Vec3 } from './vec';
+import { circleStroke, rectStroke, topViewProjector } from './test-helpers';
+import { v2, v3, type Vec2, type Vec3 } from './vec';
 
 const projector = topViewProjector(0.1, 400, 300);
 const plane = new WorkPlane('XY');
@@ -125,5 +125,59 @@ describe('buildEntityFromStroke', () => {
     const zs = entity.corners.map((c) => c.z);
     expect(Math.max(...zs)).toBeCloseTo(2500, -2);
     expect(Math.min(...zs)).toBeCloseTo(0, -2);
+  });
+});
+
+describe('StrokeSession: circles', () => {
+  it.each([
+    ['XY', 81], ['XZ', 81], ['YZ', 81],
+    ['XY', 61], ['XZ', 61], ['YZ', 61],
+  ] as [PlaneKind, number][])('recognises a raw circle on %s from %s samples despite grid-snapped endpoints', (kind, count) => {
+    const circlePlane = new WorkPlane(kind, v3(100, 200, 300));
+    const raw = circleStroke(700, 800, 250).slice(0, count);
+    const snapFor = (p: Vec2): SnapResult => ({
+      type: 'grid',
+      world: circlePlane.toWorld(v2(p.x + 100, p.y + 100)),
+      plane: v2(p.x + 100, p.y + 100),
+      screen: v2(p.x / 2, p.y / 2),
+      onPlane: true,
+      raw: circlePlane.toWorld(p),
+    });
+    const session = new StrokeSession(circlePlane, snapFor(raw[0]));
+    for (const p of raw.slice(1)) {
+      session.add(snapFor(p), circlePlane.toWorld(p), v2(p.x / 2, p.y / 2), 0);
+    }
+    const result = session.recognize();
+    expect(result.shape?.kind).toBe('circle');
+    if (result.shape?.kind !== 'circle') return;
+    expect(Math.abs(result.shape.center.x - 700)).toBeLessThan(1e-6);
+    expect(Math.abs(result.shape.center.y - 800)).toBeLessThan(1e-6);
+    expect(Math.abs(result.shape.radius - 250)).toBeLessThan(1e-6);
+    const entity = buildEntityFromStroke(session, result.shape, { projector, vertices: [], tolerancePx: 14, gridStep: 1000 });
+    expect(entity.type).toBe('circle');
+    if (entity.type !== 'circle') return;
+    const expectedCenter = circlePlane.toWorld(v2(700, 800));
+    expect(entity.center.x).toBeCloseTo(expectedCenter.x, 6);
+    expect(entity.center.y).toBeCloseTo(expectedCenter.y, 6);
+    expect(entity.center.z).toBeCloseTo(expectedCenter.z, 6);
+    expect(entity.normal).toEqual(circlePlane.normal);
+    expect(entity.radius).toBeCloseTo(250, 6);
+    expect(anchorAfterCommit(entity)).toEqual(entity.center);
+  });
+
+  it('does not turn a short arc into a circle just because the endpoints snap together', () => {
+    const points = circleStroke(700, 800, 250).slice(0, 41);
+    const workPlane = new WorkPlane('XY');
+    const snapFor = (raw: Vec2, snapped: Vec2): SnapResult => ({
+      type: 'grid', world: workPlane.toWorld(snapped), plane: snapped,
+      screen: v2(raw.x / 2, raw.y / 2), onPlane: true, raw: workPlane.toWorld(raw),
+    });
+    const session = new StrokeSession(workPlane, snapFor(points[0], points[0]));
+    points.slice(1).forEach((point, index) => {
+      const snapped = index === points.length - 2 ? points[0] : point;
+      const snap = snapFor(point, snapped);
+      session.add(snap, snap.raw, snap.screen, 0);
+    });
+    expect(session.recognize().shape?.kind).not.toBe('circle');
   });
 });
