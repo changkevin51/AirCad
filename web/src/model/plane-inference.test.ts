@@ -155,23 +155,13 @@ describe('PlaneInference dwell and switching', () => {
     return context({ projector, cursor, viewDirection: v3(0, 0, -1), entities: [floor] });
   }
 
-  it('selects a clear face interior after the dwell period', () => {
+  it('selects a clear face interior immediately', () => {
     const inference = new PlaneInference();
     const ctx = faceScenario(2500);
-    expect(inference.update(ctx, 0).reason).toBe('current');
-    expect(inference.update(ctx, 119).reason).toBe('current');
-    const choice = inference.update(ctx, 120);
+    const choice = inference.update(ctx, 0);
     expect(choice.reason).toBe('face');
     expect(choice.plane.kind).toBe('XY');
     expect(choice.plane.offset).toBeCloseTo(2500);
-  });
-
-  it('does not report a face reason while still holding the old plane', () => {
-    const inference = new PlaneInference();
-    const ctx = faceScenario(2500);
-    const held = inference.update(ctx, 50);
-    expect(held.reason).toBe('current');
-    expect(held.plane.offset).toBe(0);
   });
 
   it('prefers the nearest eligible face in front of a deeper one', () => {
@@ -181,8 +171,7 @@ describe('PlaneInference dwell and switching', () => {
     const cursor = projector.project(v3(2000, 1500, 4000))!;
     const ctx = context({ projector, cursor, viewDirection: v3(0, 0, -1), entities: [back, front] });
     const inference = new PlaneInference();
-    inference.update(ctx, 0);
-    const choice = inference.update(ctx, 200);
+    const choice = inference.update(ctx, 0);
     expect(choice.reason).toBe('face');
     expect(choice.plane.offset).toBeCloseTo(4000);
   });
@@ -194,14 +183,13 @@ describe('PlaneInference dwell and switching', () => {
     const projector = pinhole(v3(2000, -500, 1260), forward);
     const ctx = context({ projector, viewDirection: forward, entities: [nearFloor, wall] });
     const inference = new PlaneInference();
-    inference.update(ctx, 0);
-    const choice = inference.update(ctx, 200);
+    const choice = inference.update(ctx, 0);
     expect(choice.reason).toBe('face');
     expect(choice.plane.kind).toBe('XZ');
     expect(choice.plane.offset).toBeCloseTo(2000);
   });
 
-  it('restarts the dwell timer when the proposed offset jitters', () => {
+  it('selects the hovered face immediately when the cursor moves to another slab', () => {
     const inference = new PlaneInference();
     const rectA = rectEntity('e1', v3(0, 0, 2500), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000);
     const rectB = rectEntity('e2', v3(5000, 0, 3000), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000);
@@ -211,22 +199,10 @@ describe('PlaneInference dwell and switching', () => {
     const cursorB = projector.project(v3(7000, 1500, 3000))!;
     const ctxA = context({ projector, cursor: cursorA, ...base });
     const ctxB = context({ projector, cursor: cursorB, ...base });
-    expect(inference.update(ctxA, 0).reason).toBe('current');
-    expect(inference.update(ctxA, 100).reason).toBe('current');
-    expect(inference.update(ctxB, 110).reason).toBe('current');
-    expect(inference.update(ctxB, 220).reason).toBe('current');
-    const choice = inference.update(ctxB, 231);
+    expect(inference.update(ctxA, 0).plane.offset).toBeCloseTo(2500);
+    const choice = inference.update(ctxB, 10);
     expect(choice.reason).toBe('face');
     expect(choice.plane.offset).toBeCloseTo(3000);
-  });
-
-  it('waits again after reset clears the pending switch', () => {
-    const inference = new PlaneInference();
-    const ctx = faceScenario(2500);
-    inference.update(ctx, 0);
-    inference.reset();
-    expect(inference.update(ctx, 200).reason).toBe('current');
-    expect(inference.update(ctx, 321).reason).toBe('face');
   });
 
   it('does not switch without the score margin even after a long dwell', () => {

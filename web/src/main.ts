@@ -61,6 +61,15 @@ const REASON_LABELS: Record<string, string> = {
   manual: 'pinned',
 };
 
+const isObjectSnap = (snap: SnapResult): boolean =>
+  snap.type === 'vertex' || snap.type === 'midpoint' || snap.type === 'edge';
+
+/** Slide the work plane along its normal so an object snap lies on it. */
+function planeThroughSnap(plane: WorkPlane, snap: SnapResult | null): WorkPlane {
+  if (!snap || !isObjectSnap(snap)) return plane;
+  return plane.contains(snap.world, 1e-6) ? plane : plane.withAnchor(snap.world);
+}
+
 class App {
   private readonly platform = detectPlatform();
   private readonly viewport: Viewport;
@@ -467,7 +476,8 @@ class App {
 
   private setPlaneKind(kind: PlaneKind, announce: boolean): void {
     if (this.stroke) return;
-    this.plane = this.plane.withKind(kind);
+    const snap = this.cursor.position ? this.computeSnap(this.cursor.position) : null;
+    this.plane = snap && isObjectSnap(snap) ? new WorkPlane(kind, snap.world) : this.plane.withKind(kind);
     if (announce) this.toasts.show(`Work plane ${this.plane.label}`);
   }
 
@@ -575,8 +585,9 @@ class App {
     }
     const snap = this.computeSnap(this.cursor.position);
     const choice = this.inference.update(this.inferenceContext(this.cursor.position, snap), nowMs);
-    this.plane = choice.plane;
-    this.planeReason = choice.reason;
+    const through = planeThroughSnap(choice.plane, snap);
+    this.plane = through;
+    this.planeReason = through !== choice.plane ? snap.type : choice.reason;
   }
 
   private beginStroke(): void {
@@ -589,21 +600,18 @@ class App {
     if (this.planeMode === 'auto') {
       const choice = this.inference.update(this.inferenceContext(position, snap), this.nowMs);
       plane = choice.plane;
-      this.plane = plane;
       this.planeReason = choice.reason;
     }
-    let anchorMoved = false;
-    if (snap.type === 'vertex' || snap.type === 'midpoint' || snap.type === 'edge') {
-      // The work plane always passes through the anchor; starting on a vertex,
-      // midpoint or edge moves it there so a wall drawn from a floor edge
-      // stands on the floor.
-      anchorMoved = !plane.contains(snap.world, 1e-6);
-      plane = plane.withAnchor(snap.world);
-      this.plane = plane;
-    }
+    // The work plane always passes through the anchor; starting on a vertex,
+    // midpoint or edge moves it there so a wall drawn from a floor edge
+    // stands on the floor.
+    const through = planeThroughSnap(plane, snap);
+    const anchorMoved = through !== plane;
+    plane = through;
+    this.plane = plane;
     const projector = this.viewport.projector();
     const ray = projector.ray(position);
-    const objectStart = snap.type === 'vertex' || snap.type === 'midpoint' || snap.type === 'edge';
+    const objectStart = isObjectSnap(snap);
     const hit = plane.intersectRay(ray.origin, ray.dir);
     if ((!hit || Math.abs(dot(ray.dir, plane.normal)) < 0.15) && !objectStart && !this.axisLock) {
       this.toasts.show('Plane is edge-on; A for Auto or Tab / 1 / 2 / 3', 'error');
@@ -798,12 +806,17 @@ class App {
       }
     }
 
-    const focus = snap?.onPlane ? snap.plane : this.plane.toPlane(this.plane.anchor);
-    this.planeVisual.update(this.stroke ? this.stroke.plane : this.plane, this.gridStep, focus);
+    const displayedPlane = this.stroke ? this.stroke.plane : planeThroughSnap(this.plane, snap);
+    const focus =
+      snap && isObjectSnap(snap)
+        ? displayedPlane.toPlane(snap.world)
+        : snap?.onPlane
+          ? snap.plane
+          : displayedPlane.toPlane(displayedPlane.anchor);
+    this.planeVisual.update(displayedPlane, this.gridStep, focus);
     this.glyph.update(snap, cursorPx, !!this.stroke);
     this.sketchRenderer.tick(time);
 
-    const displayedPlane = this.stroke ? this.stroke.plane : this.plane;
     this.hud.update({
       mode,
       plane: displayedPlane.info,
@@ -818,7 +831,7 @@ class App {
       camera: this.cameraState,
       projection: this.viewport.ortho ? 'Ortho' : 'Persp',
       navAssist: this.navAssist,
-      edgeOn: this.plane.isEdgeOn(viewDirection),
+      edgeOn: displayedPlane.isEdgeOn(viewDirection),
       entityCount: this.sketch.size,
     });
     this.hud.setKeys(this.keyHints(mode));

@@ -569,22 +569,39 @@ describe('work plane modes', () => {
   it('lifts the plane onto a hovered face interior in auto mode', () => {
     api.commands.addRect(makeRect(v3(0, 0, 2500), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
     setCursorWorld(v3(2000, 1500, 2500));
-    tick(100);
-    expect(api.plane().offset).toBeCloseTo(0, 5);
-    tick(150);
+    tick();
     expect(api.plane().offset).toBeCloseTo(2500, 5);
     expect(api.plane().kind).toBe('XY');
-    tick();
     expect(state.hud.last?.planeMode).toBe('Auto');
     expect(state.hud.last?.planeReason).toBe('hovered face');
+  });
+
+  it('slides the highlighted plane through an off-plane vertex without waiting for dwell', () => {
+    const point = v3(2000, 1500, 2500);
+    api.commands.addLine(point, v3(3000, 1500, 2500));
+    expect(api.plane().contains(point)).toBe(false);
+    setCursorWorld(point);
+    tick();
+    expect(api.plane().contains(point)).toBe(true);
+    expect(state.planeVisual.last?.plane.offset).toBeCloseTo(api.plane().offset, 5);
+    expect(state.hud.last?.planeReason).toBe('snapped vertex');
+  });
+
+  it('keeps a Tab-cycled plane through the hovered corner', () => {
+    const corner = v3(4000, 3000, 0);
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    setCursorWorld(corner);
+    api.press('cyclePlane');
+    expect(api.plane().kind).toBe('XZ');
+    expect(api.plane().contains(corner)).toBe(true);
+    expect(api.plane().offset).toBeCloseTo(3000, 5);
   });
 
   it('uses the inferred plane for visuals in the same frame it switches', () => {
     api.commands.addRect(makeRect(v3(0, 0, 2500), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
     const px = api.project(v3(2000, 1500, 2500))!;
     setCursorWorld(v3(2000, 1500, 2500));
-    tick(100);
-    tick(150);
+    tick();
     expect(api.plane().offset).toBeCloseTo(2500, 5);
     expect(state.planeVisual.last?.plane.offset).toBeCloseTo(2500, 5);
     expect((state.hud.last?.plane as { kind: string } | undefined)?.kind).toBe('XY');

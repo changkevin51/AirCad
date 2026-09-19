@@ -45,6 +45,9 @@ const NORMAL_EPS = 1e-6;
 const isObjectSnap = (type: SnapResult['type']): type is 'vertex' | 'midpoint' | 'edge' =>
   type === 'vertex' || type === 'midpoint' || type === 'edge';
 
+const isGeometryReason = (reason: PlaneChoice['reason']): boolean =>
+  reason === 'face' || reason === 'vertex' || reason === 'midpoint' || reason === 'edge';
+
 const rayParameter = (origin: Vec3, dir: Vec3, point: Vec3): number =>
   dot(sub(point, origin), dir) / Math.max(1e-24, dot(dir, dir));
 
@@ -212,6 +215,10 @@ export class PlaneInference {
     if (best.score < currentScore + SWITCH_MARGIN) {
       this.pending = null;
       return { plane: context.currentPlane, reason: 'current', score: currentScore };
+    }
+    if (isGeometryReason(best.reason)) {
+      this.pending = null;
+      return best;
     }
     if (this.pending && this.pending.plane.equals(best.plane)) {
       if (nowMs - this.pending.since >= DWELL_MS) {
