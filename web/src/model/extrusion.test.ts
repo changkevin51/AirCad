@@ -131,6 +131,51 @@ describe('extrusion gesture transaction', () => {
     expect(session.dragging).toBe(false);
   });
 
+  it('rebases a continuing grip after camera navigation without a pull jump', () => {
+    const session = new ExtrusionSession(profile(), 10, 0, 0);
+    session.update(v2(0, 300), true, 'hand:1', UP);
+    session.update(v2(0, 250), true, 'hand:1', UP);
+    const corners = session.corners;
+    session.pause(false);
+    expect(session.dragging).toBe(false);
+    expect(session.depth).toBe(500);
+    expect(session.corners).toBe(corners);
+    session.update(v2(700, 50), true, 'hand:1', UP);
+    expect(session.depth).toBe(500);
+    expect(session.dragging).toBe(true);
+    session.update(v2(700, 40), true, 'hand:1', UP);
+    expect(session.depth).toBe(600);
+  });
+
+  it('does not clear a safety pause when camera navigation pauses the grip', () => {
+    const session = new ExtrusionSession(profile(), 10, 0, 0);
+    session.update(v2(0, 300), true, 'hand:1', UP);
+    session.update(v2(0, 250), true, 'hand:1', UP);
+    session.pause();
+    session.pause(false);
+    session.update(v2(700, 50), true, 'hand:1', UP);
+    expect(session.depth).toBe(500);
+    expect(session.dragging).toBe(false);
+    session.update(v2(700, 50), false, 'hand:1', UP);
+    session.update(v2(700, 50), true, 'hand:1', UP);
+    session.update(v2(700, 40), true, 'hand:1', UP);
+    expect(session.depth).toBe(600);
+  });
+
+  it('still requires a release when the cursor source changes after a soft pause', () => {
+    const session = new ExtrusionSession(profile(), 10, 0, 0);
+    session.update(v2(0, 300), true, 'hand:1', UP);
+    session.update(v2(0, 250), true, 'hand:1', UP);
+    session.pause(false);
+    session.update(v2(700, 50), true, 'hand:2', UP);
+    expect(session.depth).toBe(500);
+    expect(session.dragging).toBe(false);
+    session.update(v2(700, 50), false, 'hand:2', UP);
+    session.update(v2(700, 50), true, 'hand:2', UP);
+    session.update(v2(700, 40), true, 'hand:2', UP);
+    expect(session.depth).toBe(600);
+  });
+
   it('keeps previews out of history and preserves exact depths when re-editing', () => {
     const sketch = new Sketch();
     sketch.addEntity(profile());

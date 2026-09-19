@@ -111,9 +111,9 @@ export class ExtrusionSession {
   }
 
   /** Tracking loss, focus loss, and overlays freeze the preview until a fresh grip. */
-  pause(): void {
+  pause(requireRelease = true): void {
     this.grab = null;
-    this.needsRelease = true;
+    this.needsRelease ||= requireRelease;
   }
 
   /** Set the active face's total pull to an exact value (mm) relative to the base snapshot. */

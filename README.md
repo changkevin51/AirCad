@@ -80,7 +80,7 @@ Hold **Space** or left-drag around most of a circle — roughly two-thirds of th
 1. Draw a closed rectangle. New shapes are selected automatically. To select another shape, point inside it and pinch your thumb and index finger, click it, or press **S**. The selected outline stays highlighted.
 2. Press **Q** to start extrusion. The face most facing the camera is highlighted — hover another face of the same shape (while not pinching) or press **Tab** to switch which side you push/pull. **E** remains the FreeCAD export shortcut.
 3. Pinch thumb + index and move to pull the highlighted face **out**, or back to push it **in**. Pulling a cap face sets the depth; pulling a side face widens the box. Grid snapping applies to the pull distance. If tracking is lost, the preview freezes; show your hand, release, then pinch again to resume.
-4. Release the pinch to pause. Reposition your hand and pinch again to continue.
+4. Release the pinch to pause. Reposition your hand and pinch again to continue. Hold **Shift** to orbit or **Ctrl** to pan even during a pull; the preview stays fixed while you move the view. Release the navigation key to continue pulling from the current position without a depth jump.
 5. Press **Enter** or **Q** to apply, or **Esc** to cancel. **L** types an exact pull distance for the active face (`500`, `-250`, or `2 m`); **0** shows the result in isometric view. A zero-depth preview cannot be applied.
 
 Without a webcam, use **Q**, then **left-drag** (or hold **Space** while moving) along the highlighted direction. Release to pause, then **Enter** to apply. Extrusion is one undoable edit; undo restores the rectangle. Select an existing solid and press **Q** to push/pull any of its six faces. **L** on a solid edits depth with one value or base size with `width x height`.
@@ -201,7 +201,7 @@ Python tests use synthetic observations and never require a webcam. The TypeScri
 - **Browser shows “web UI is not built yet”:** run **install.bat** / **install.command**, or `npm install && npm run build` inside `web/`.
 - **Keys do nothing:** click the 3D viewport so it has focus. If a measurement field is open, finish or cancel it first.
 - **Plane is edge-on:** press **Tab** or **1 / 2 / 3**, or orbit with **Shift**.
-- **Palm navigation moves unexpectedly:** press **N** to turn it off. Drawing (**Space**) always wins over palm nav.
+- **Palm navigation moves unexpectedly:** press **N** to turn it off. Drawing (**Space**) disables automatic palm navigation; held **Shift** / **Ctrl** deliberately take priority to move the camera.
 - **FreeCAD not found:** set `FREECAD_EXECUTABLE` as above and confirm `freecad_import.py` is beside `server.py`.
 - **Missing Python packages:** run **install.bat** / **install.command**, or `pip install -r requirements.txt` in `.venv`.
 - **Missing Node packages:** run `npm install` inside `web/`.

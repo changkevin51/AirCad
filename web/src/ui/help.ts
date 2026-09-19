@@ -65,6 +65,7 @@ export class HelpOverlay {
             <li>Press <kbd>Q</kbd>. The face most facing you is highlighted — hover another face or press <kbd>Tab</kbd> to switch which side you push/pull.</li>
             <li>Pinch and move to pull the highlighted face out, or back to push it in. Mouse: left-drag or hold <kbd>Space</kbd>.</li>
             <li>Release to pause, then grab again to keep adjusting. <kbd>L</kbd> types an exact pull distance; negative values push in.</li>
+            <li>Hold <kbd>Shift</kbd> to orbit or <kbd>Ctrl</kbd> to pan while pulling. Release the key to continue the pull without changing its depth.</li>
             <li><kbd>Enter</kbd> or <kbd>Q</kbd> applies; <kbd>Esc</kbd> cancels. Press <kbd>0</kbd> for a 3D view. Undo restores the original shape.</li>
           </ol></section>
           <section><h3>Draw a circle</h3><p>Hold <kbd>Space</kbd> or left-drag around most of a circle — roughly two-thirds of the way around or more. Gaps, wobble, and circular squiggles are allowed; release to fit a clean circle automatically. Select it and press <kbd>L</kbd> to set its diameter. Circle extrusion and hole cutting are not supported yet.</p></section>

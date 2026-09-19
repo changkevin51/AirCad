@@ -69,7 +69,7 @@ class App {
   private focused = true;
   private planeBeforeStroke: WorkPlane | null = null;
   private lastSnap: SnapResult | null = null;
-  private previousCursor: Vec2 | null = null;
+  private previousCursor: { position: Vec2; source: string } | null = null;
   private hover: Entity | null = null;
   private lastCommitted: Entity | null = null;
   private gridEnabled = true;
@@ -138,6 +138,7 @@ class App {
         if (state !== 'open') {
           this.cursor.dropHand();
           this.extrusion?.pause();
+          this.previousCursor = null;
         }
         this.pip.setCameraState(this.cameraState, state === 'open');
       },
@@ -182,6 +183,7 @@ class App {
 
   private releaseAll(): void {
     this.extrusion?.pause();
+    this.previousCursor = null;
     for (const action of [...this.held]) this.setHold(action, false);
     this.mouse.releaseAll();
   }
@@ -190,6 +192,14 @@ class App {
     if (down && (this.measure.isOpen || this.help.visible)) return;
     if (down) this.held.add(action);
     else this.held.delete(action);
+    if (action === 'orbit' || action === 'pan') {
+      const position = this.cursor.position;
+      const source = this.cursorSource;
+      this.previousCursor = this.navigationMode && this.focused && position && source ? { position: { ...position }, source } : null;
+      this.extrusion?.pause(false);
+      if (!down) this.updateExtrusion();
+      return;
+    }
     if (this.extrusion) {
       if (action === 'draw') this.updateExtrusion();
       return;
@@ -198,7 +208,6 @@ class App {
       if (down) this.beginStroke();
       else this.endStroke();
     }
-    if (action === 'orbit' || action === 'pan') this.previousCursor = null;
   }
 
   private get axisLock(): Axis | null {
@@ -206,12 +215,18 @@ class App {
     return null;
   }
 
+  private get cursorSource(): string | null {
+    if (this.cursor.isLost) return null;
+    const hand = this.cursor.hand;
+    return hand ? `hand:${hand.id}` : this.cursor.tracking === 'mouse' ? 'mouse' : null;
+  }
+
+  private get navigationMode(): 'ORBIT' | 'PAN' | null {
+    return this.held.has('orbit') ? 'ORBIT' : this.held.has('pan') ? 'PAN' : null;
+  }
+
   private get mode(): Mode {
-    if (this.extrusion) return 'EXTRUDING';
-    if (this.stroke) return 'DRAWING';
-    if (this.held.has('orbit')) return 'ORBIT';
-    if (this.held.has('pan')) return 'PAN';
-    return 'READY';
+    return this.navigationMode ?? (this.extrusion ? 'EXTRUDING' : this.stroke ? 'DRAWING' : 'READY');
   }
 
   private onHands(message: HandsMessage): void {
@@ -224,7 +239,7 @@ class App {
     // Missing frames do not count as a pinch release.
     if (this.cursor.hand) this.lastPinching = pinching;
     this.pip.setHands(message, this.cursor.handId);
-    if (this.focused && this.navAssist && message.nav && !this.held.has('draw') && !this.stroke && !this.extrusion && !pinching && !this.measure.isOpen && !this.help.visible) this.applyPalmNav(message.nav, message.frame);
+    if (this.focused && this.navAssist && message.nav && !this.navigationMode && !this.held.has('draw') && !this.stroke && !this.extrusion && !pinching && !this.measure.isOpen && !this.help.visible) this.applyPalmNav(message.nav, message.frame);
   }
 
   private applyPalmNav(nav: NavMessage, frame: { w: number; h: number }): void {
@@ -445,9 +460,13 @@ class App {
       session.pause();
       return;
     }
+    if (this.navigationMode) {
+      session.pause(false);
+      return;
+    }
     const projector = this.viewport.projector();
     const hand = this.cursor.hand;
-    const source = this.cursor.isLost ? null : hand ? `hand:${hand.id}` : this.cursor.tracking === 'mouse' ? 'mouse' : null;
+    const source = this.cursorSource;
     const gripping = this.held.has('draw') || !!hand?.pinching;
     const before = { depth: session.depth, corners: session.corners, faceIndex: session.faceIndex };
     if (!session.dragging && !gripping && this.cursor.position && source) {
@@ -548,7 +567,7 @@ class App {
   }
 
   private beginStroke(): void {
-    if (this.stroke || this.extrusion || !this.cursor.position || this.cursor.isLost) return;
+    if (this.stroke || this.extrusion || this.navigationMode || !this.cursor.position || this.cursor.isLost) return;
     const snap = this.computeSnap(this.cursor.position);
     this.lastSnap = snap;
     this.planeBeforeStroke = this.plane;
@@ -574,32 +593,35 @@ class App {
    * deltas and stroke sampling do not depend on the render frame rate.
    */
   private onCursorMoved(): void {
-    if (!this.focused) return;
-    if (this.extrusion) {
-      this.updateExtrusion();
+    const position = this.cursor.position;
+    const source = this.cursorSource;
+    if (!this.focused || this.measure.isOpen || this.help.visible || !position || !source) {
+      this.previousCursor = null;
+      this.extrusion?.pause();
       return;
     }
-    const position = this.cursor.position;
-    if (!position) return;
-    const mode = this.mode;
-    if (mode === 'ORBIT' || mode === 'PAN') {
-      if (this.previousCursor) {
-        const dx = position.x - this.previousCursor.x;
-        const dy = position.y - this.previousCursor.y;
-        if (mode === 'ORBIT') this.orbit.orbit(dx, dy, this.sketch.center());
+    const navigation = this.navigationMode;
+    if (navigation) {
+      this.extrusion?.pause(false);
+      if (this.previousCursor?.source === source) {
+        const dx = position.x - this.previousCursor.position.x;
+        const dy = position.y - this.previousCursor.position.y;
+        if (navigation === 'ORBIT') this.orbit.orbit(dx, dy, this.sketch.center());
         else this.orbit.pan(dx, dy);
       }
-      this.previousCursor = { ...position };
+      this.previousCursor = { position: { ...position }, source };
       return;
     }
-    this.sampleStroke();
+    this.previousCursor = null;
+    if (this.extrusion) this.updateExtrusion();
+    else this.sampleStroke();
   }
 
   /** Capture the current cursor into the active stroke; tracking loss pauses capture. */
   private sampleStroke(): void {
     const stroke = this.stroke;
     const position = this.cursor.position;
-    if (!stroke || !position || this.cursor.isLost) return;
+    if (!stroke || !position || this.cursor.isLost || this.navigationMode) return;
     const snap = this.computeSnap(position);
     this.lastSnap = snap;
     stroke.add(snap, snap.raw, position);
@@ -690,6 +712,7 @@ class App {
     if (this.cursor.tracking === 'hand' && performance.now() / 1000 - this.lastHandMessageAt > 0.6) {
       this.cursor.dropHand();
       this.extrusion?.pause();
+      this.previousCursor = null;
     }
     const cursorPx = this.cursor.position;
     const projector = this.viewport.projector();
@@ -764,6 +787,8 @@ class App {
         return [
           { key: this.cursor.hand ? 'Pinch' : 'Drag / Space', label: 'pull face' },
           { key: key('cyclePlane'), label: 'switch face' },
+          { key: key('orbit'), label: 'orbit' },
+          { key: key('pan'), label: 'pan' },
           { key: 'Enter / Q', label: 'apply' },
           { key: key('measure'), label: 'exact pull' },
           { key: '0', label: '3D view' },

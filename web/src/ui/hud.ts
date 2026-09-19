@@ -103,9 +103,11 @@ export class Hud {
     const hintText = state.extrusion
       ? state.tracking === 'lost'
         ? 'Tracking lost — depth paused. Show your hand, release the pinch, then pinch again to continue.'
-        : state.extrusion.dragging
-          ? 'Move to pull the highlighted face out, back to push in. Release to pause. Enter applies · Esc cancels.'
-          : 'Pinch thumb + index and move (or hold Space / left-drag) to pull the highlighted face. Hover another face or press Tab to switch. Enter applies · Esc cancels.'
+        : state.mode === 'ORBIT' || state.mode === 'PAN'
+          ? 'Extrusion paused while you move the view. Release Shift / Ctrl to continue pulling. Enter applies · Esc cancels.'
+          : state.extrusion.dragging
+            ? 'Move to pull the highlighted face out, back to push in. Release to pause. Enter applies · Esc cancels.'
+            : 'Pinch thumb + index and move (or hold Space / left-drag) to pull the highlighted face. Hover another face or press Tab to switch. Enter applies · Esc cancels.'
       : state.edgeOn ? `Work plane ${state.plane.label} is edge-on. Press Tab or 1 / 2 / 3, or orbit with Shift.` : '';
     this.hint.style.top = `${this.chips.offsetTop + this.chips.offsetHeight + 10}px`;
     this.hint.classList.toggle('hint--extrusion', !!state.extrusion);
