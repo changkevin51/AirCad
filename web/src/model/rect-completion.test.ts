@@ -2,16 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { Commands } from './commands';
 import { WorkPlane } from './plane';
 import {
+  alignRectangleToBorder,
   completeLineRectangle,
   completeSharedBorder,
   sameRectangle,
   type CompletionContext,
 } from './rect-completion';
 import { makeRect, Sketch, type RectEntity } from './sketch';
-import type { SnapResult } from './snap';
+import type { Projector, SnapResult } from './snap';
 import { resolveStroke, StrokeSession } from './stroke';
 import { seededRandom, topViewProjector } from './test-helpers';
-import { add, scale, toArray, v2, v3, type Vec2, type Vec3 } from './vec';
+import { add, cross, distance, dot, length, scale, sub, toArray, v2, v3, type Vec2, type Vec3 } from './vec';
 
 const XY = new WorkPlane('XY');
 const projector = topViewProjector(0.1, 400, 300);
@@ -451,4 +452,217 @@ describe('completion through resolveStroke + commitStroke', () => {
     expect(commands.setDimension(rect!.id, '5000x2000').ok).toBe(true);
     expect(commands.deleteEntity(rect!.id).ok).toBe(true);
   });
+
+  it('aligns a three-sided stroke to the whole border and recomputes covered lines', () => {
+    const sketch = floorSketch();
+    const border = sketch.addEntity({ type: 'line', a: v3(4000, 0, 0), b: v3(4000, 3000, 0) });
+    const stray = sketch.addEntity({ type: 'line', a: v3(7700, 1000, 0), b: v3(7700, 2000, 0) });
+    const path = sideStroke([v2(4000, 500), v2(7700, 500), v2(7700, 2500), v2(4000, 2500)]);
+    const session = new StrokeSession(XY, snapOf(v3(4000, 500, 0), 'edge'));
+    for (const p of path.slice(1, -1)) {
+      const world = v3(p.x, p.y, 0);
+      session.add(snapOf(world), world, projector.project(world)!);
+    }
+    const end = snapOf(v3(4000, 2500, 0), 'edge');
+    session.add(end, end.world, end.screen);
+    const resolution = resolveStroke(session, {
+      projector,
+      vertices: sketch.vertices(),
+      entities: sketch.all,
+      tolerancePx: 22,
+    });
+    expect(resolution.status).toBe('ready');
+    if (resolution.status !== 'ready') return;
+    expect(resolution.reason).toBe('shared-border rectangle');
+    expect(resolution.input.type).toBe('rect');
+    if (resolution.input.type !== 'rect') return;
+    expect(resolution.input.corners).toEqual([
+      v3(4000, 0, 0),
+      v3(8000, 0, 0),
+      v3(8000, 3000, 0),
+      v3(4000, 3000, 0),
+    ]);
+    expect(resolution.removeIds).toEqual([border.id]);
+    expect(resolution.removeIds).not.toContain(stray.id);
+  });
 });
+
+describe('alignRectangleToBorder', () => {
+  const fitContext = (sketch: Sketch, plane: WorkPlane = XY, proj: Projector = projector, tolerancePx = 22) => ({
+    plane,
+    entities: sketch.all,
+    projector: proj,
+    tolerancePx,
+  });
+  const rough = [v3(4100, 500, 0), v3(7800, 500, 0), v3(7800, 2500, 0), v3(4100, 2500, 0)];
+  const expected = [v3(4000, 0, 0), v3(8000, 0, 0), v3(8000, 3000, 0), v3(4000, 3000, 0)];
+
+  it('fits a rough same-size neighbour onto the whole shared border', () => {
+    const result = alignRectangleToBorder(rough, fitContext(floorSketch()));
+    expect(result).not.toBeNull();
+    expect(result!.corners).toEqual(expected);
+    expect(result!.removeIds).toEqual([]);
+  });
+
+  it('fits cyclically reordered and reversed corner orders identically', () => {
+    for (const corners of [[rough[2], rough[3], rough[0], rough[1]], [rough[0], rough[3], rough[2], rough[1]]]) {
+      const result = alignRectangleToBorder(corners, fitContext(floorSketch()));
+      expect(result).not.toBeNull();
+      expect(sameRectangle(result!.corners, expected)).toBe(true);
+      const shared = result!.corners.filter((c) => c.x === 4000);
+      expect(shared).toHaveLength(2);
+      expect(shared).toEqual(expect.arrayContaining([v3(4000, 0, 0), v3(4000, 3000, 0)]));
+    }
+  });
+
+  it('extends a two-thirds-height neighbour to the full border', () => {
+    const corners = [v3(4000, 0, 0), v3(7700, 0, 0), v3(7700, 2000, 0), v3(4000, 2000, 0)];
+    const result = alignRectangleToBorder(corners, fitContext(floorSketch()));
+    expect(result).not.toBeNull();
+    expect(result!.corners).toEqual(expected);
+  });
+
+  it('keeps a clearly smaller attachment on its own partial span', () => {
+    const corners = [v3(4000, 750, 0), v3(5000, 750, 0), v3(5000, 2250, 0), v3(4000, 2250, 0)];
+    const result = alignRectangleToBorder(corners, fitContext(floorSketch()));
+    expect(result).not.toBeNull();
+    expect(result!.corners).toEqual(corners);
+  });
+
+  it('moves a near-border baseline onto the border without skewing the rectangle', () => {
+    const corners = [v3(4100, 750, 0), v3(5000, 750, 0), v3(5000, 2250, 0), v3(4100, 2250, 0)];
+    const result = alignRectangleToBorder(corners, fitContext(floorSketch()));
+    expect(result).not.toBeNull();
+    expect(result!.corners).toEqual([v3(4000, 750, 0), v3(4900, 750, 0), v3(4900, 2250, 0), v3(4000, 2250, 0)]);
+  });
+
+  it('declines when the draft is too far from any border', () => {
+    const corners = [v3(4500, 500, 0), v3(8200, 500, 0), v3(8200, 2500, 0), v3(4500, 2500, 0)];
+    expect(alignRectangleToBorder(corners, fitContext(floorSketch()))).toBeNull();
+  });
+
+  it('ignores off-plane entities, empty sketches, duplicates and degenerate input', () => {
+    const offPlane = new Sketch();
+    offPlane.addEntity({ type: 'rect', corners: makeRect(v3(0, 0, 500), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000) });
+    expect(alignRectangleToBorder(rough, fitContext(offPlane))).toBeNull();
+    expect(alignRectangleToBorder(rough, fitContext(new Sketch()))).toBeNull();
+    const floor = floorSketch();
+    const rect = floor.all[0];
+    expect(rect.type).toBe('rect');
+    if (rect.type === 'rect') expect(alignRectangleToBorder(rect.corners, fitContext(floor))).toBeNull();
+    const flat = [v3(4000, 0, 0), v3(4000, 0, 0), v3(4000, 1000, 0), v3(4000, 1000, 0)];
+    expect(alignRectangleToBorder(flat, fitContext(floorSketch()))).toBeNull();
+    const lifted = [v3(4100, 500, 0), v3(7800, 500, 0), v3(7800, 2500, 500), v3(4100, 2500, 0)];
+    expect(alignRectangleToBorder(lifted, fitContext(floorSketch()))).toBeNull();
+  });
+
+  it('follows a rotated border and stays rectangular', () => {
+    const angle = Math.PI / 6;
+    const rw = (x: number, y: number): Vec3 => v3(x * Math.cos(angle) - y * Math.sin(angle), x * Math.sin(angle) + y * Math.cos(angle), 0);
+    const sketch = new Sketch();
+    const floor = sketch.addEntity({ type: 'rect', corners: [rw(0, 0), rw(4000, 0), rw(4000, 3000), rw(0, 3000)] });
+    const floorCorners = floor.type === 'rect' ? floor.corners.map((c) => ({ ...c })) : [];
+    const mid = rw(4000, 1000);
+    const extra = Math.PI / 30;
+    const tilt = (x: number, y: number): Vec3 => {
+      const c = Math.cos(angle + extra);
+      const s = Math.sin(angle + extra);
+      return v3(mid.x + (x - 4000) * c - (y - 1000) * s, mid.y + (x - 4000) * s + (y - 1000) * c, 0);
+    };
+    const draft = [tilt(4000, 0), tilt(7700, 0), tilt(7700, 2000), tilt(4000, 2000)];
+    const original = draft.map((p) => ({ ...p }));
+    const result = alignRectangleToBorder(draft, fitContext(sketch));
+    expect(result).not.toBeNull();
+    expect(sameRectangle(result!.corners, [rw(4000, 0), rw(8000, 0), rw(8000, 3000), rw(4000, 3000)])).toBe(true);
+    const shared = result!.corners.filter((c) => distance(c, rw(4000, 0)) < 1e-6 || distance(c, rw(4000, 3000)) < 1e-6);
+    expect(shared).toHaveLength(2);
+    expect(shared).toEqual(expect.arrayContaining([rw(4000, 0), rw(4000, 3000)]));
+    const dirs = result!.corners.map((c, i) => sub(result!.corners[(i + 1) % 4], c));
+    for (let i = 0; i < 4; i++) {
+      const next = dirs[(i + 1) % 4];
+      const opposite = dirs[(i + 2) % 4];
+      expect(Math.abs(dot(dirs[i], next)) / (length(dirs[i]) * length(next))).toBeLessThan(1e-9);
+      expect(length(cross(dirs[i], opposite)) / (length(dirs[i]) * length(opposite))).toBeLessThan(1e-9);
+    }
+    expect(draft).toEqual(original);
+    if (floor.type === 'rect') expect(floor.corners).toEqual(floorCorners);
+  });
+
+  it('does not copy the depth of a non-coplanar neighbour', () => {
+    const sketch = floorSketch();
+    const wall = new WorkPlane('XZ');
+    const draft = [v3(500, 0, 0), v3(3500, 0, 0), v3(3500, 0, 2800), v3(500, 0, 2800)];
+    const result = alignRectangleToBorder(draft, fitContext(sketch, wall, planeProjector(wall)));
+    expect(result).not.toBeNull();
+    expect(result!.corners).toEqual([v3(0, 0, 0), v3(4000, 0, 0), v3(4000, 0, 2800), v3(0, 0, 2800)]);
+  });
+
+  it('treats a line duplicating a rectangle edge as the same border', () => {
+    const draft = [v3(4100, 500, 0), v3(7800, 500, 0), v3(7800, 2500, 0), v3(4100, 2500, 0)];
+    for (const flip of [false, true]) {
+      const sketch = new Sketch();
+      const rectInput = { type: 'rect' as const, corners: makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000) };
+      const lineInput = { type: 'line' as const, a: v3(4000, 0, 0), b: v3(4000, 3000, 0) };
+      sketch.addEntity(flip ? lineInput : rectInput);
+      sketch.addEntity(flip ? rectInput : lineInput);
+      const result = alignRectangleToBorder(draft, fitContext(sketch));
+      expect(result).not.toBeNull();
+      expect(result!.corners).toEqual(expected);
+    }
+  });
+
+  it('declines when two parallel borders fit equally well', () => {
+    const draft = [v3(4000, 0, 0), v3(8000, 0, 0), v3(8000, 3000, 0), v3(4000, 3000, 0)];
+    for (const flip of [false, true]) {
+      const sketch = new Sketch();
+      const first = { type: 'line' as const, a: v3(3900, 0, 0), b: v3(3900, 3000, 0) };
+      const second = { type: 'line' as const, a: v3(4100, 0, 0), b: v3(4100, 3000, 0) };
+      sketch.addEntity(flip ? second : first);
+      sketch.addEntity(flip ? first : second);
+      expect(alignRectangleToBorder(draft, fitContext(sketch))).toBeNull();
+    }
+  });
+
+  it('still fits when the same border is drawn twice', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(4000, 0, 0), b: v3(4000, 3000, 0) });
+    sketch.addEntity({ type: 'line', a: v3(4000, 0, 0), b: v3(4000, 3000, 0) });
+    const draft = [v3(4000, 0, 0), v3(8000, 0, 0), v3(8000, 3000, 0), v3(4000, 3000, 0)];
+    const result = alignRectangleToBorder(draft, fitContext(sketch));
+    expect(result).not.toBeNull();
+    expect(result!.corners).toEqual(draft);
+  });
+});
+
+describe.each(['XZ', 'YZ'] as const)('alignRectangleToBorder on the %s plane', (kind) => {
+  const plane = new WorkPlane(kind, kind === 'XZ' ? v3(0, 500, 0) : v3(500, 0, 0));
+  const w = (x: number, y: number): Vec3 => plane.toWorld(v2(x, y));
+
+  it('fits the rough neighbour in plane coordinates', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'rect', corners: [w(0, 0), w(4000, 0), w(4000, 3000), w(0, 3000)] });
+    const draft = [w(4100, 500), w(7800, 500), w(7800, 2500), w(4100, 2500)];
+    const result = alignRectangleToBorder(draft, {
+      plane,
+      entities: sketch.all,
+      projector: planeProjector(plane),
+      tolerancePx: 22,
+    });
+    expect(result).not.toBeNull();
+    expect(sameRectangle(result!.corners, [w(4000, 0), w(8000, 0), w(8000, 3000), w(4000, 3000)])).toBe(true);
+    for (const corner of result!.corners) expect(plane.contains(corner, 1e-6)).toBe(true);
+  });
+});
+
+function planeProjector(plane: WorkPlane): Projector {
+  return {
+    project: (p) => projector.project(v3(plane.toPlane(p).x, plane.toPlane(p).y, 0)),
+    ray: (s) => {
+      const q = projector.ray(s);
+      return {
+        origin: add(plane.toWorld(v2(q.origin.x, q.origin.y)), scale(plane.normal, 100000)),
+        dir: scale(plane.normal, -1),
+      };
+    },
+  };
+}

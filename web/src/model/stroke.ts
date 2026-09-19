@@ -1,6 +1,6 @@
 import type { WorkPlane } from './plane';
 import { recognizeStroke, type RecognizeOptions, type RecognizeResult, type RecognizedShape } from './recognize';
-import { completeLineRectangle, completeSharedBorder, sameRectangle } from './rect-completion';
+import { alignRectangleToBorder, completeLineRectangle, completeSharedBorder, sameRectangle } from './rect-completion';
 import type { Projector, SnapResult } from './snap';
 import type { Entity, EntityInput, Vertex } from './sketch';
 import { add, distance2, dot, nearlyEqual, normalize, roundTo, scale, sub, type Vec2, type Vec3 } from './vec';
@@ -126,6 +126,7 @@ export interface CommitContext {
   tolerancePx: number;
   /** Grid step in mm for rounding the far rectangle corner; 0/undefined disables it. */
   gridStep?: number;
+  entities?: readonly Entity[];
 }
 
 /**
@@ -225,7 +226,16 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
     return { type: 'line', a, b };
   }
   const corners2 = shape.oriented ? shape.corners : alignRectToStart(shape.corners, session.start.plane, context.gridStep ?? 0);
-  const corners = pullRectCorners(corners2.map((c) => plane.toWorld(c)), plane, context);
+  const rawCorners = corners2.map((c) => plane.toWorld(c));
+  const aligned = context.entities
+    ? alignRectangleToBorder(rawCorners, {
+        plane,
+        entities: context.entities,
+        projector: context.projector,
+        tolerancePx: context.tolerancePx,
+      })
+    : null;
+  const corners = aligned?.corners ?? pullRectCorners(rawCorners, plane, context);
   return { type: 'rect', corners: corners as [Vec3, Vec3, Vec3, Vec3] };
 }
 
@@ -281,13 +291,19 @@ export function resolveStroke(
   if (isBorderSnap(session.start) && isBorderSnap(session.last)) {
     const completion = completeSharedBorder(session.planePoints(), session.start.world, session.last.world, completionContext);
     if (completion) {
-      if (isDuplicateRectangle(completion.corners, context.entities)) {
+      const aligned =
+        alignRectangleToBorder(completion.corners, {
+          ...completionContext,
+          projector: context.projector,
+          tolerancePx: context.tolerancePx,
+        }) ?? completion;
+      if (isDuplicateRectangle(aligned.corners, context.entities)) {
         return { status: 'duplicate', input: null, removeIds: [], reason: 'rectangle already exists' };
       }
       return {
         status: 'ready',
-        input: { type: 'rect', corners: completion.corners },
-        removeIds: completion.removeIds,
+        input: { type: 'rect', corners: aligned.corners },
+        removeIds: aligned.removeIds,
         reason: 'shared-border rectangle',
       };
     }

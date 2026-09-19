@@ -1,5 +1,6 @@
 import type { WorkPlane } from './plane';
 import { pathLength, polygonArea, recognizeStroke } from './recognize';
+import type { Projector } from './snap';
 import { entitySegments, type Entity, type EntityInput, type Segment } from './sketch';
 import {
   add,
@@ -95,6 +96,105 @@ export function sameRectangle(a: readonly Vec3[], b: readonly Vec3[]): boolean {
     if (forward || backward) return true;
   }
   return false;
+}
+
+export function alignRectangleToBorder(
+  corners: readonly Vec3[],
+  context: CompletionContext & { projector: Projector; tolerancePx: number },
+): RectangleCompletion | null {
+  const { plane, projector, tolerancePx } = context;
+  const eps = geomEps(magnitudeOf(corners));
+  if (corners.length !== 4 || !(tolerancePx > 0) || corners.some((p) => !plane.contains(p, eps))) return null;
+  if (context.entities.some((e) => e.type === 'rect' && sameRectangle(e.corners, corners))) return null;
+  const candidates: {
+    corners: [Vec3, Vec3, Vec3, Vec3];
+    score: number;
+    border: [Vec3, Vec3];
+    coplanarFace: boolean;
+  }[] = [];
+  for (const entity of context.entities) {
+    for (const segment of entitySegments(entity)) {
+      if (!plane.contains(segment.a, eps) || !plane.contains(segment.b, eps)) continue;
+      const len = distance(segment.a, segment.b);
+      if (!(len > eps)) continue;
+      const sa = projector.project(segment.a);
+      const sb = projector.project(segment.b);
+      if (!sa || !sb || distance2(sa, sb) < Math.max(4, tolerancePx)) continue;
+      const ray = projector.ray(lerp2(sa, sb, 0.5));
+      if (Math.abs(dot(ray.dir, plane.normal)) < 0.15 * length(ray.dir)) continue;
+      for (let i = 0; i < 4; i++) {
+        const j = (i + 1) % 4;
+        const k = (i + 2) % 4;
+        const m = (i + 3) % 4;
+        const edge = sub(corners[j], corners[i]);
+        const edgeLength = length(edge);
+        if (!(edgeLength > eps)) continue;
+        const forward = dot(edge, sub(segment.b, segment.a)) >= 0;
+        const a = forward ? segment.a : segment.b;
+        const b = forward ? segment.b : segment.a;
+        const u = scale(sub(b, a), 1 / len);
+        const cosine = dot(edge, u) / edgeLength;
+        if (cosine < Math.cos((12 * Math.PI) / 180)) continue;
+        const v = cross(plane.normal, u);
+        const lo = dot(sub(corners[i], a), u);
+        const hi = dot(sub(corners[j], a), u);
+        const span = hi - lo;
+        const h0 = dot(sub(corners[m], corners[i]), v);
+        const h1 = dot(sub(corners[k], corners[j]), v);
+        let h = (h0 + h1) / 2;
+        if (!(span > eps) || Math.abs(h) <= eps || h0 * h1 <= 0) continue;
+        const nearA = add(a, scale(u, lo));
+        const nearB = add(a, scale(u, hi));
+        const p0 = projector.project(corners[i]);
+        const p1 = projector.project(corners[j]);
+        const q0 = projector.project(nearA);
+        const q1 = projector.project(nearB);
+        if (!p0 || !p1 || !q0 || !q1) continue;
+        const gap = Math.max(distance2(p0, q0), distance2(p1, q1));
+        if (gap > tolerancePx) continue;
+        const coplanarFace = entity.type === 'rect' && entity.corners.every((p) => plane.contains(p, eps));
+        let neighborDepth = 0;
+        if (coplanarFace && entity.type === 'rect') {
+          const offsets = entity.corners.map((p) => dot(sub(p, a), v));
+          const inside = offsets.reduce((sum, value) => sum + value, 0) / 4;
+          if (inside * h >= -eps * Math.abs(h)) continue;
+          neighborDepth = Math.max(...offsets.map(Math.abs));
+        }
+        const full = span >= 0.65 * len && span <= 1.35 * len && Math.abs(lo) <= 0.35 * len && Math.abs(hi - len) <= 0.35 * len;
+        if (!full && (lo < -eps || hi > len + eps)) continue;
+        if (full && neighborDepth > eps && Math.abs(h) >= 0.75 * neighborDepth && Math.abs(h) <= 1.25 * neighborDepth) {
+          h = Math.sign(h) * neighborDepth;
+        }
+        const start = full ? clone(a) : nearA;
+        const end = full ? clone(b) : nearB;
+        const rise = scale(v, h);
+        const fitted = corners.map(clone) as [Vec3, Vec3, Vec3, Vec3];
+        fitted[i] = start;
+        fitted[j] = end;
+        fitted[m] = add(start, rise);
+        fitted[k] = add(end, rise);
+        if (fitted.some((p) => !projector.project(p))) continue;
+        const score = gap / tolerancePx + (full ? (Math.abs(lo) + Math.abs(hi - len)) / len : 1) + (1 - cosine);
+        candidates.push({ corners: fitted, score, border: [a, b], coplanarFace });
+      }
+    }
+  }
+  const preferred = candidates.filter(
+    (candidate) =>
+      candidate.coplanarFace ||
+      !candidates.some(
+        (other) =>
+          other.coplanarFace &&
+          other.score <= candidate.score + 0.1 &&
+          ((nearlyEqual(candidate.border[0], other.border[0], eps) && nearlyEqual(candidate.border[1], other.border[1], eps)) ||
+            (nearlyEqual(candidate.border[0], other.border[1], eps) && nearlyEqual(candidate.border[1], other.border[0], eps))),
+      ),
+  );
+  preferred.sort((a, b) => a.score - b.score);
+  const best = preferred[0];
+  if (!best) return null;
+  if (preferred.some((other) => other.score <= best.score + 0.1 && !sameRectangle(other.corners, best.corners))) return null;
+  return { corners: best.corners, removeIds: coveredLineIds(context.entities, best.corners) };
 }
 
 export function completeSharedBorder(

@@ -106,7 +106,9 @@ Views glide smoothly into place, and releasing an orbit within about 6° of a vi
 | **G** | Grid snap on / off |
 | **N** | Off-hand palm navigation on / off (one open palm orbits, two palms pan/zoom) |
 
-Snapping priority while drawing: vertex → midpoint → axis-align to the stroke start (±8°) → edge → grid (1 / 10 / 100 / 1000 mm) → free. Starting on a vertex, midpoint, or edge moves the work plane through that point so the next wall connects to the last shape.
+Nearby vertices, midpoints, and edges attract the cursor before the grid. A soft axis alignment (±8°) uses an exact edge intersection when possible, but will not keep a stroke floating beside a nearby line. X / Y / Z remain hard axis locks. Starting on an object snap moves the work plane through that point.
+
+Roughly matching adjacent rectangles align along the entire shared border, with matching dimensions when the new size is close. This works for closed outlines and continuous three-sided strokes; the preview shows the exact result before release. Clearly smaller attachments keep their partial border, and existing rectangles are never resized. Use L afterward for exact dimensions.
 
 ### Editing and tools
 

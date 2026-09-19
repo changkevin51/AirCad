@@ -14,7 +14,7 @@ import { defaultTrackerUrl, TrackerClient, type CameraState, type ConnectionStat
 import { Commands } from './model/commands';
 import { nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
 import { PlaneInference, type PlaneMode } from './model/plane-inference';
-import { adaptiveGridStep, snapCursor, type SnapResult } from './model/snap';
+import { adaptiveGridStep, DEFAULT_SNAP_TOLERANCE_PX, snapCursor, type SnapResult } from './model/snap';
 import { describeEntity, entityCenter, entityMidpoints, entityPoints, entityVertices, Sketch, type Entity } from './model/sketch';
 import { anchorAfterCommit, resolveStroke, StrokeSession, type StrokeResolution } from './model/stroke';
 import { dot, nearlyEqual, type Vec2, type Vec3 } from './model/vec';
@@ -30,7 +30,7 @@ import { MeasureInput } from './ui/measure-input';
 import { CameraPip } from './ui/pip';
 import { Toasts } from './ui/toast';
 
-const SNAP_TOLERANCE_PX = 14;
+const SNAP_TOLERANCE_PX = DEFAULT_SNAP_TOLERANCE_PX;
 const MIN_STROKE_PX = 6;
 /** Smallest on-screen grid cell before the grid coarsens to the next step (1 / 10 / 100 / 1000 mm). */
 const GRID_MIN_PX = 8;

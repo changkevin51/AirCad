@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { WorkPlane } from './plane';
 import { snapCursor, type SnapResult } from './snap';
+import { sameRectangle } from './rect-completion';
 import { makeRect, Sketch } from './sketch';
 import {
   alignRectToStart,
@@ -278,6 +279,30 @@ describe('resolveStroke', () => {
     expect(resolution.status).toBe('ready');
     if (resolution.status !== 'ready') return;
     expect(resolution.input).toEqual({ type: 'line', a: v3(0, 0, 0), b: v3(0, 0, 2500) });
+  });
+
+  it('aligns a rough same-size adjacent rectangle to the whole shared border', () => {
+    const sketch = floorSketch();
+    const start: SnapResult = { type: 'free', world: v3(4100, 500, 0), plane: v2(4100, 500), screen: projector.project(v3(4100, 500, 0))!, onPlane: true, raw: v3(4100, 500, 0) };
+    const session = new StrokeSession(plane, start);
+    for (const p of rectStroke(4100, 500, 3700, 2000, { pointsPerSide: 25 }).slice(1)) {
+      const world = v3(p.x, p.y, 0);
+      const snap: SnapResult = { type: 'free', world, plane: p, screen: projector.project(world)!, onPlane: true, raw: world };
+      session.add(snap, world, snap.screen);
+    }
+    const pathBefore = session.planePoints();
+    const resolution = resolveStroke(session, { ...commitContext(sketch), tolerancePx: 22 });
+    expect(resolution.status).toBe('ready');
+    if (resolution.status !== 'ready') return;
+    expect(resolution.input.type).toBe('rect');
+    if (resolution.input.type !== 'rect') return;
+    const expected = [v3(4000, 0, 0), v3(8000, 0, 0), v3(8000, 3000, 0), v3(4000, 3000, 0)];
+    expect(sameRectangle(resolution.input.corners, expected)).toBe(true);
+    expect(resolution.input.corners).toEqual(expected);
+    expect(session.planePoints()).toEqual(pathBefore);
+    const floor = sketch.all[0];
+    expect(floor.type).toBe('rect');
+    if (floor.type === 'rect') expect(floor.corners).toEqual(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
   });
 
   it('reports unrecognized strokes without a completion', () => {

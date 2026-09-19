@@ -496,6 +496,56 @@ describe('app stroke flows', () => {
     expect(api.sketch.size).toBe(0);
     expect(api.commands.undo()).toBeNull();
   });
+
+  it('aligns a rough adjacent rectangle to the whole shared border in preview and commit', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    api.press('viewTop');
+    finishTransitions();
+    setGrid(false);
+    setCursorWorld(v3(4000, 500, 0));
+    api.hold('draw', true);
+    for (const point of [v3(7700, 500, 0), v3(7700, 1500, 0), v3(7700, 2500, 0), v3(4000, 2500, 0)]) setCursorWorld(point);
+    tick();
+    const ghost = state.renderer.ghost;
+    expect(ghost).not.toBeNull();
+    const expected = [v3(4000, 0, 0), v3(8000, 0, 0), v3(8000, 3000, 0), v3(4000, 3000, 0)];
+    for (const corner of expected) {
+      expect(ghost!.points.some((point: Vec3) => Math.hypot(point.x - corner.x, point.y - corner.y, point.z - corner.z) < 1e-3)).toBe(true);
+    }
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(2);
+    const floor = api.sketch.all[0];
+    if (floor.type === 'rect') {
+      expect(floor.corners).toEqual(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    }
+    const committed = api.sketch.all[1];
+    expect(committed.type).toBe('rect');
+    if (committed.type !== 'rect') throw new Error('expected a committed rectangle');
+    expect(committed.corners).toEqual(expected);
+    api.commands.undo();
+    expect(api.sketch.size).toBe(1);
+    api.commands.redo();
+    expect(api.sketch.size).toBe(2);
+    const restored = api.sketch.all[1];
+    expect(restored.id).toBe(committed.id);
+    if (restored.type === 'rect') expect(restored.corners).toEqual(committed.corners);
+
+    const secondLoop = [v3(11800, 500, 0), v3(11800, 2500, 0), v3(8100, 2500, 0), v3(8100, 500, 0), v3(11800, 500, 0)];
+    strokeThrough(secondLoop);
+    expect(api.lastRecognition()?.reason).toBe('rectangle');
+    expect(api.sketch.size).toBe(3);
+    const second = api.sketch.all[2];
+    if (second.type !== 'rect') throw new Error('expected the aligned outline to commit');
+    expect(second.corners).toHaveLength(4);
+    for (const corner of [v3(8000, 0, 0), v3(12000, 0, 0), v3(12000, 3000, 0), v3(8000, 3000, 0)]) {
+      expect(second.corners.some((point) => Math.hypot(point.x - corner.x, point.y - corner.y, point.z - corner.z) < 1e-3)).toBe(true);
+    }
+    strokeThrough(secondLoop);
+    expect(api.lastRecognition()?.reason).toBe('rectangle already exists');
+    expect(api.sketch.size).toBe(3);
+    api.commands.undo();
+    expect(api.sketch.size).toBe(2);
+  });
 });
 
 describe('work plane modes', () => {

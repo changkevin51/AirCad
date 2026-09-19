@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { WorkPlane } from './plane';
 import { adaptiveGridStep, snapCursor, type SnapContext, type SnapTargets } from './snap';
-import { makeRect, Sketch } from './sketch';
+import { makeRect, Sketch, type Vertex } from './sketch';
 import { frontViewProjector, topViewProjector } from './test-helpers';
-import { v2, v3 } from './vec';
+import { v2, v3, type Vec2 } from './vec';
 
 function targetsOf(sketch: Sketch): SnapTargets {
   return { vertices: sketch.vertices(), midpoints: sketch.midpoints(), segments: sketch.segments() };
@@ -221,6 +221,58 @@ describe('axis-aligned edge snaps', () => {
     expect(result.type).toBe('axis');
     expect(result.world).toEqual(v3(800, 1000, 0));
   });
+});
+
+describe('lenient edge snapping', () => {
+  it('lets a nearby edge win over the soft axis fallback', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(0, 1100, 0), b: v3(4000, 1100, 0) });
+    const result = snapCursor(
+      context({ cursor: screenOf(1000, 1080), strokeStart: v3(0, 1000, 0), targets: targetsOf(sketch), gridEnabled: false }),
+    );
+    expect(result.type).toBe('edge');
+    expect(result.world).toEqual(v3(1000, 1100, 0));
+  });
+
+  it('reaches an edge within the wider default tolerance', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(0, 0, 0), b: v3(4000, 0, 0) });
+    const targets = targetsOf(sketch);
+    const base = { targets, gridEnabled: false };
+    const edge = snapCursor(context({ ...base, cursor: screenOf(1000, 180) }));
+    expect(edge.type).toBe('edge');
+    expect(edge.world).toEqual(v3(1000, 0, 0));
+    expect(snapCursor(context({ ...base, cursor: screenOf(1000, 180), tolerancePx: 14 })).type).toBe('free');
+    expect(snapCursor(context({ ...base, cursor: screenOf(1000, 230) })).type).toBe('free');
+    expect(snapCursor(context({ ...base, cursor: screenOf(1000, 180), disableObjectSnaps: true })).type).toBe('free');
+    expect(snapCursor(context({ ...base, cursor: screenOf(1000, 180), excludeEntityId: 'e1' })).type).toBe('free');
+    const locked = snapCursor(
+      context({ ...base, cursor: screenOf(1000, 180), strokeStart: v3(0, 500, 0), axisLock: 'x' }),
+    );
+    expect(locked.type).toBe('lock');
+    expect(locked.world.x).toBeCloseTo(1000);
+    expect(locked.world.y).toBeCloseTo(500);
+  });
+
+  it.each(['vertex', 'midpoint'] as const)(
+    'keeps an off-plane %s behind a closer on-plane edge during a stroke',
+    (kind) => {
+      const offPlane: Vertex = { entityId: 'other', point: v3(1000, 175, 500), index: 0 };
+      const targets: SnapTargets = {
+        vertices: kind === 'vertex' ? [offPlane] : [],
+        midpoints: kind === 'midpoint' ? [offPlane] : [],
+        segments: [{ entityId: 'border', a: v3(0, 0, 0), b: v3(4000, 0, 0), index: 0 }],
+      };
+      const snap = (cursor: Vec2) =>
+        snapCursor(context({ cursor, targets, gridEnabled: false, strokeStart: v3(1000, 1000, 0) }));
+      const near = snap(screenOf(1000, 0));
+      expect(near.type).toBe('edge');
+      expect(near.world).toEqual(v3(1000, 0, 0));
+      const exact = snap(screenOf(1000, 175));
+      expect(exact.type).toBe(kind);
+      expect(exact.world).toEqual(v3(1000, 175, 500));
+    },
+  );
 });
 
 describe('snap tie-breaking', () => {

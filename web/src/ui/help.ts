@@ -14,6 +14,7 @@ const WALKTHROUGH = [
   'Press 0 for the isometric view, then Tab until the plane preview shows XZ Front.',
   'Hold Space starting on a floor border and draw the other three sides of the wall upwards: one continuous stroke completes against the shared border. Or draw the three sides as three separately committed straight strokes; the third one assembles the wall.',
   'Tab until YZ Right and repeat on the side borders to raise the other walls, then snap a roof line between wall-top vertices.',
+  'Draw roughly the same-sized rectangle beside an existing one to align the whole shared border and nearby dimensions; the preview shows the snapped result. Clearly smaller attachments stay partial.',
   'A switches to optional Auto mode: the work plane follows the view and what you hover (a face interior, an edge, or a vertex). Check the plane preview and use Tab or 1 / 2 / 3 when the choice is ambiguous; the plane locks while you draw and never moves mid-stroke.',
   'Views 1 / 2 / 3 / 0 glide smoothly, and releasing an orbit within 6 degrees of a view settles onto it.',
   'Press L to type an exact size (4000 or 4000x3000) for the hovered or last entity, E to export to FreeCAD.',
