@@ -80,6 +80,20 @@ describe('Commands.setDimension', () => {
     expect(commands.deleteLast().ok).toBe(false);
     expect(commands.addLine(v3(1, 1, 1), v3(1, 1, 1)).ok).toBe(false);
   });
+
+  it('keeps an arbitrary XYZ line through undo and export', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const added = commands.commitStroke({ type: 'line', a: v3(12, 34, 56), b: v3(78, 90, 123) });
+    expect(added.ok).toBe(true);
+    expect(commands.exportPayload().entities[0].points).toEqual([[12, 34, 56], [78, 90, 123]]);
+    expect(commands.undo()).toMatch(/line/i);
+    expect(sketch.size).toBe(0);
+    expect(commands.redo()).toMatch(/line/i);
+    const line = sketch.last as LineEntity;
+    expect(line.a).toEqual(v3(12, 34, 56));
+    expect(line.b).toEqual(v3(78, 90, 123));
+  });
 });
 
 describe('Commands.commitStroke', () => {

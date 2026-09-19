@@ -10,28 +10,82 @@ import {
   type PressAction,
 } from './input/keymap';
 import { MouseSource } from './input/mouse-source';
-import { defaultTrackerUrl, TrackerClient, type CameraState, type ConnectionState, type HandsMessage, type NavMessage } from './input/tracker-client';
+import { CALIBRATION_MIN_SAMPLES, SCALE_PRESETS, SpatialCursorSource, type ScalePreset } from './input/spatial-cursor';
+import {
+  ClockSync,
+  defaultTrackerUrl,
+  postTrackerConfig,
+  TrackerClient,
+  type CameraState,
+  type ConnectionState,
+  type HandsMessage,
+  type NavMessage,
+  type SpatialMessage,
+  type TrackerConfigJson,
+  type TrackerSource,
+} from './input/tracker-client';
 import { Commands } from './model/commands';
 import { nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
 import { PlaneInference, type PlaneMode } from './model/plane-inference';
 import { adaptiveGridStep, DEFAULT_SNAP_TOLERANCE_PX, snapCursor, type SnapResult } from './model/snap';
+import { joinEndpoints } from './model/spatial-join';
+import { alignLineToWorldAxis, preferKindsFromEntity } from './model/spatial-plane-fit';
+import {
+  gridStepForScale,
+  hybridRadius,
+  objectRadius,
+  SpatialSnapper,
+  SPATIAL_MAGNET,
+  SPATIAL_SCREEN_TOLERANCE_PX,
+  type SpatialSnapResult,
+} from './model/spatial-snap';
+import { SpatialStrokeSession } from './model/spatial-stroke';
 import { describeEntity, entityCenter, entityMidpoints, entityPoints, entityVertices, Sketch, type Entity } from './model/sketch';
 import { anchorAfterCommit, resolveStroke, StrokeSession, type StrokeResolution } from './model/stroke';
 import { dot, nearlyEqual, type Vec2, type Vec3 } from './model/vec';
 import { entityLabel, SketchRenderer } from './render/sketch-renderer';
 import { AxisTriad, createGroundGrid } from './scene/grid';
 import { OrbitController, type ViewPreset } from './scene/orbit';
+import { SpatialCursorVisual } from './scene/spatial-cursor-visual';
 import { Viewport } from './scene/viewport';
 import { WorkPlaneVisual } from './scene/workplane-visual';
 import { CursorGlyph } from './ui/cursor-glyph';
 import { HelpOverlay } from './ui/help';
 import { Hud, type KeyHint, type Mode } from './ui/hud';
+import { InputPanel, type DrawingSpace } from './ui/input-panel';
 import { MeasureInput } from './ui/measure-input';
 import { CameraPip } from './ui/pip';
 import { Toasts } from './ui/toast';
 
 const SNAP_TOLERANCE_PX = DEFAULT_SNAP_TOLERANCE_PX;
 const MIN_STROKE_PX = 6;
+const SPATIAL_STALL_MS = 300;
+const WORKSPACE_CUBE_MM = 400;
+const DEPTH_SCALE_STORAGE_KEY = 'aircad.depthScale';
+const DEFAULT_DEPTH_SCALE = 10;
+const SPATIAL_FIT_EXTENT_MM = 60;
+
+function loadStoredDepthScale(): number {
+  try {
+    const raw = globalThis.localStorage?.getItem(DEPTH_SCALE_STORAGE_KEY);
+    const value = raw == null ? Number.NaN : Number(raw);
+    if (SCALE_PRESETS.includes(value as ScalePreset)) return value;
+  } catch {
+    /* node tests have no localStorage */
+  }
+  return DEFAULT_DEPTH_SCALE;
+}
+
+function persistDepthScale(scale: number): void {
+  try {
+    globalThis.localStorage?.setItem(DEPTH_SCALE_STORAGE_KEY, String(scale));
+  } catch {
+    /* ignore */
+  }
+}
+
+const isSpatialObjectSnap = (snap: SpatialSnapResult): boolean =>
+  snap.type === 'vertex' || snap.type === 'midpoint' || snap.type === 'edge';
 /** Smallest on-screen grid cell before the grid coarsens to the next step (1 / 10 / 100 / 1000 mm). */
 const GRID_MIN_PX = 8;
 const PALM_ORBIT_GAIN = 1.0;
@@ -88,6 +142,12 @@ class App {
   private readonly pip: CameraPip;
   private readonly measure: MeasureInput;
   private readonly glyph: CursorGlyph;
+  private readonly panel: InputPanel;
+  private readonly viewportElement: HTMLElement;
+  private readonly spatialVisual = new SpatialCursorVisual();
+  private readonly spatialSnapper = new SpatialSnapper();
+  private readonly clockSync: ClockSync;
+  private readonly spatial: SpatialCursorSource;
   private readonly inference = new PlaneInference();
 
   private plane = new WorkPlane('XY');
@@ -99,6 +159,21 @@ class App {
   private orbitGesture = false;
   private palmNavMode: 'one' | 'two' | null = null;
   private stroke: StrokeSession | null = null;
+  private spatialStroke: SpatialStrokeSession | null = null;
+  private spatialPreview: SpatialSnapResult | null = null;
+  private drawingSpace: DrawingSpace = 'free3d';
+  private trackerConfig: TrackerConfigJson = {
+    source: 'webcam',
+    cameraIndex: 0,
+    target: 'finger',
+    colorPreset: 'green',
+    colorTolerance: 1,
+  };
+  private depthaiInstalled = false;
+  private applyingTracker = false;
+  private lastSpatialAt = 0;
+  private pixelNavLast: [number, number] | null = null;
+  private fittedWorkspace = false;
   private strokeGridStep = 100;
   private resolutionCache: {
     session: StrokeSession;
@@ -117,6 +192,7 @@ class App {
   private hover: Entity | null = null;
   private lastCommitted: Entity | null = null;
   private gridEnabled = true;
+  private depthGridEnabled = false;
   private gridStep = 100;
   private navAssist = false;
   private connection: ConnectionState = 'closed';
@@ -124,12 +200,15 @@ class App {
   private reportedCameraError = false;
   private lastRecognition: { reason: string; points: Vec2[]; screenExtent: number } | null = null;
   private nowMs = 0;
+  private depthScaleApplied = false;
+  private fittedPlaneLabel: string | null = null;
 
   constructor(root: HTMLElement) {
     const viewportElement = document.createElement('div');
     viewportElement.className = 'viewport';
     viewportElement.tabIndex = 0;
     root.appendChild(viewportElement);
+    this.viewportElement = viewportElement;
 
     this.viewport = new Viewport(viewportElement);
     this.orbit = new OrbitController(this.viewport, {
@@ -141,15 +220,33 @@ class App {
     });
     this.viewport.scene.add(createGroundGrid());
     this.viewport.scene.add(this.planeVisual.group);
+    this.viewport.scene.add(this.spatialVisual.group);
     this.sketchRenderer = new SketchRenderer(this.viewport);
     this.orbit.fit(null);
 
+    this.clockSync = new ClockSync();
+    this.spatial = new SpatialCursorSource(this.clockSync);
     this.hud = new Hud(root);
     this.glyph = new CursorGlyph(root);
     this.toasts = new Toasts(root);
     this.pip = new CameraPip(root);
     this.measure = new MeasureInput(root);
     this.help = new HelpOverlay(root, this.platform);
+    this.panel = new InputPanel(root, {
+      onSource: (source) => void this.applyTracker({ ...this.trackerConfig, source }),
+      onTarget: (target) => void this.applyTracker({ ...this.trackerConfig, target }),
+      onColorPreset: (colorPreset) => void this.applyTracker({ ...this.trackerConfig, colorPreset }),
+      onColorTolerance: (colorTolerance) => void this.applyTracker({ ...this.trackerConfig, colorTolerance }),
+      onDrawingSpace: (space) => this.setDrawingSpace(space),
+      onScale: (scale) => this.changeScale(scale),
+      onSetOrigin: () => this.beginCalibration('origin'),
+      onRecenter: () => this.beginCalibration('recenter'),
+      onFitWorkspace: () => this.fitWorkspace(),
+      onRetry: () => void this.retryTracker(),
+      onCancelInteraction: () => this.cancelInteraction(),
+      onReleaseFocus: () => this.focusViewport(),
+    });
+    this.refreshPanel();
 
     this.sketch.onChange(() => {
       this.sketchRevision++;
@@ -173,13 +270,27 @@ class App {
     this.tracker = new TrackerClient(defaultTrackerUrl(), {
       onHands: (message) => this.onHands(message),
       onThumb: (message) => this.pip.setThumb(message),
+      onSpatial: (message) => this.onSpatial(message),
       onStatus: (message) => {
         this.cameraState = message.camera;
         this.pip.setCameraState(this.cameraState, this.connection === 'open');
+        if (message.managed?.config) this.trackerConfig = { ...this.trackerConfig, ...message.managed.config };
+        this.refreshPanel();
         if (message.camera === 'error' && !this.reportedCameraError) {
           this.reportedCameraError = true;
-          this.toasts.show(`Camera unavailable: ${message.message}. Using the mouse.`, 'error', 6000);
+          const extra = this.isDepthSource() ? '' : ' Using the mouse.';
+          this.toasts.show(`Camera unavailable: ${message.message}.${extra}`, 'error', 6000);
         }
+        if (message.camera === 'ready') this.reportedCameraError = false;
+      },
+      onSessionReset: (streamId, sourceRunId) => {
+        this.cancelUnfinished();
+        this.spatial.resetContinuity();
+        this.spatial.mapping.invalidateRun(sourceRunId);
+        this.spatialSnapper.reset();
+        this.pixelNavLast = null;
+        this.pip.setStream(streamId);
+        this.refreshPanel();
       },
       onConnection: (state) => {
         this.connection = state;
@@ -187,6 +298,8 @@ class App {
           this.cursor.dropHand();
           this.endPalmNav(false);
           this.synchronizeNavigation(false);
+          this.cancelUnfinished();
+          this.clockSync.reset();
         }
         this.pip.setCameraState(this.cameraState, state === 'open');
       },
@@ -196,6 +309,9 @@ class App {
     window.addEventListener('keydown', (event) => this.onKeyDown(event));
     window.addEventListener('keyup', (event) => this.onKeyUp(event));
     window.addEventListener('blur', () => this.cancelInteraction());
+    globalThis.document?.addEventListener?.('visibilitychange', () => {
+      if (globalThis.document.hidden) this.cancelInteraction();
+    });
     viewportElement.focus();
 
     this.toasts.show('Hold Space to draw, Shift to orbit, Ctrl to pan. H for help.', 'info', 5000);
@@ -206,7 +322,37 @@ class App {
 
   private isTypingTarget(event: KeyboardEvent): boolean {
     const target = event.target as HTMLElement | null;
-    return !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+    return (
+      !!target &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        target.isContentEditable)
+    );
+  }
+
+  private focusViewport(): void {
+    this.viewportElement.focus?.();
+  }
+
+  /** Wire-fresh tracked point, or a clock-synced fresh sample. */
+  private spatialReady(now = this.nowMs || performance.now()): boolean {
+    const message = this.spatial.last;
+    if (this.spatial.world && message?.state === 'tracked' && message.fresh && message.cameraMm) return true;
+    return !!this.spatial.world && this.spatial.isFresh(now);
+  }
+
+  private isDrawing(): boolean {
+    return !!this.stroke || !!this.spatialStroke;
+  }
+
+  private isDepthSource(): boolean {
+    return this.trackerConfig.source === 'oak';
+  }
+
+  private cancelUnfinished(): void {
+    if (this.spatialStroke) this.cancelSpatialStroke('Stroke cancelled');
+    if (this.stroke) this.cancelStroke();
   }
 
   private onKeyDown(event: KeyboardEvent): void {
@@ -239,33 +385,48 @@ class App {
     this.held.clear();
     for (const heldAction of this.holdSources.values()) this.held.add(heldAction);
     const is = this.held.has(action);
-    if (is && !was) this.beginHold(action);
+    if (is && !was) this.beginHold(action, source);
     else if (!is && was) this.endHold(action);
-    if (was !== is && this.stroke && (action === 'lockX' || action === 'lockY' || action === 'lockZ')) this.sampleStroke();
+    if (was !== is && this.isDrawing() && (action === 'lockX' || action === 'lockY' || action === 'lockZ')) {
+      this.sampleStroke();
+      this.sampleSpatialStroke();
+    }
   }
 
-  private beginHold(action: HoldAction): void {
+  private beginHold(action: HoldAction, source = `api:${action}`): void {
     if (action === 'draw') {
       this.endPalmNav(false);
       this.synchronizeNavigation(false);
-      this.beginStroke();
+      if (this.isDepthSource()) {
+        if (source.startsWith('mouse:')) return;
+        this.beginDepthStroke();
+      } else {
+        this.beginStroke();
+      }
       return;
     }
+    this.pixelNavLast = null;
     this.synchronizeNavigation(false);
   }
 
   private endHold(action: HoldAction): void {
     if (action === 'draw') {
-      this.endStroke();
+      if (this.spatialStroke) this.endSpatialStroke();
+      else this.endStroke();
       this.synchronizeNavigation(false);
       return;
     }
+    this.pixelNavLast = null;
     this.synchronizeNavigation(action === 'orbit');
   }
 
   private synchronizeNavigation(allowSettle = false): void {
     const blocked =
-      !!this.stroke || this.held.has('draw') || this.help.visible || this.measure.isOpen || this.cursor.isLost;
+      this.isDrawing() ||
+      this.held.has('draw') ||
+      this.help.visible ||
+      this.measure.isOpen ||
+      (!this.isDepthSource() && this.cursor.isLost);
     const desired: 'orbit' | 'pan' | null = blocked ? null : this.held.has('orbit') ? 'orbit' : this.held.has('pan') ? 'pan' : null;
     const changed = desired !== this.navMode || (desired === 'orbit' && !this.orbitGesture);
     if (!changed) return;
@@ -300,7 +461,7 @@ class App {
   }
 
   private get mode(): Mode {
-    if (this.stroke) return 'DRAWING';
+    if (this.isDrawing()) return 'DRAWING';
     if (this.navMode === 'orbit') return 'ORBIT';
     if (this.navMode === 'pan') return 'PAN';
     return 'READY';
@@ -337,7 +498,7 @@ class App {
       !this.held.has('draw') &&
       !this.held.has('orbit') &&
       !this.held.has('pan') &&
-      !this.stroke &&
+      !this.isDrawing() &&
       !this.help.visible &&
       !this.measure.isOpen;
     if (navAllowed && message.nav) this.applyPalmNav(message.nav, message.frame);
@@ -369,17 +530,21 @@ class App {
 
   private doPress(action: PressAction): void {
     if ((this.help.visible || this.measure.isOpen) && action !== 'help' && action !== 'cancel') return;
-    if (this.stroke && BLOCKED_WHILE_DRAWING.has(action)) return;
-    if (this.stroke && CANCEL_STROKE_FIRST.has(action)) this.cancelStroke();
+    if (this.isDrawing() && BLOCKED_WHILE_DRAWING.has(action)) return;
+    if (this.isDrawing() && CANCEL_STROKE_FIRST.has(action)) this.cancelUnfinished();
     switch (action) {
       case 'viewTop':
       case 'viewFront':
       case 'viewRight': {
         const preset = action === 'viewTop' ? 'top' : action === 'viewFront' ? 'front' : 'right';
         this.orbit.setView(preset, true, this.nowMs);
-        this.setPlaneKind(PLANE_FOR_VIEW[preset], false);
-        this.pinManual();
-        this.toasts.show(`${preset[0].toUpperCase()}${preset.slice(1)} view · plane ${this.plane.label}`);
+        if (!this.isDepthSource() || this.drawingSpace === 'planar') {
+          this.setPlaneKind(PLANE_FOR_VIEW[preset], false);
+          this.pinManual();
+          this.toasts.show(`${preset[0].toUpperCase()}${preset.slice(1)} view · plane ${this.plane.label}`);
+        } else {
+          this.toasts.show(`${preset[0].toUpperCase()}${preset.slice(1)} view`);
+        }
         break;
       }
       case 'viewIso':
@@ -390,7 +555,8 @@ class App {
         this.toasts.show(this.orbit.toggleProjection() ? 'Orthographic' : 'Perspective');
         break;
       case 'fitAll':
-        this.orbit.fit(this.sketch.boundingBox());
+        if (this.isDepthSource()) this.fitWorkspace();
+        else this.orbit.fit(this.sketch.boundingBox());
         break;
       case 'zoomIn':
         this.zoomAtCursor(1.25, this.cursor.position ?? undefined);
@@ -399,10 +565,18 @@ class App {
         this.zoomAtCursor(1 / 1.25, this.cursor.position ?? undefined);
         break;
       case 'cyclePlane':
+        if (this.isDepthSource() && this.drawingSpace === 'free3d') {
+          this.toasts.show('Choose Planar in the input panel before changing the work plane');
+          break;
+        }
         this.setPlaneKind(nextPlaneKind(this.plane.kind), true);
         this.pinManual();
         break;
       case 'toggleAutoPlane': {
+        if (this.isDepthSource() && this.drawingSpace === 'free3d') {
+          this.toasts.show('Choose Planar in the input panel before using Auto plane');
+          break;
+        }
         this.planeMode = this.planeMode === 'auto' ? 'manual' : 'auto';
         if (this.planeMode === 'manual') {
           this.planeReason = 'manual';
@@ -414,14 +588,29 @@ class App {
         break;
       }
       case 'toggleGrid':
-        this.gridEnabled = !this.gridEnabled;
-        this.sampleStroke();
-        this.toasts.show(`Grid snap ${this.gridEnabled ? 'on' : 'off'}`);
+        if (this.isDepthSource()) {
+          this.depthGridEnabled = !this.depthGridEnabled;
+          this.toasts.show(`Depth grid snap ${this.depthGridEnabled ? 'on' : 'off'}`);
+        } else {
+          this.gridEnabled = !this.gridEnabled;
+          this.sampleStroke();
+          this.toasts.show(`Grid snap ${this.gridEnabled ? 'on' : 'off'}`);
+        }
         break;
       case 'toggleNavAssist':
+        if (this.isDepthSource()) {
+          this.toasts.show('Palm navigation is not available with the depth camera');
+          break;
+        }
         this.navAssist = !this.navAssist;
         if (!this.navAssist) this.endPalmNav(false);
         this.toasts.show(`Palm navigation ${this.navAssist ? 'on: one open palm orbits, two palms pan/zoom' : 'off'}`);
+        break;
+      case 'setOrigin':
+        this.beginCalibration('origin');
+        break;
+      case 'recenter':
+        this.beginCalibration('recenter');
         break;
       case 'undo': {
         const label = this.commands.undo();
@@ -448,7 +637,7 @@ class App {
         break;
       }
       case 'cancel':
-        if (this.stroke) this.cancelStroke();
+        if (this.isDrawing()) this.cancelUnfinished();
         else if (this.help.visible) this.help.hide();
         break;
       case 'measure':
@@ -475,7 +664,7 @@ class App {
   }
 
   private setPlaneKind(kind: PlaneKind, announce: boolean): void {
-    if (this.stroke) return;
+    if (this.isDrawing()) return;
     const snap = this.cursor.position ? this.computeSnap(this.cursor.position) : null;
     this.plane = snap && isObjectSnap(snap) ? new WorkPlane(kind, snap.world) : this.plane.withKind(kind);
     if (announce) this.toasts.show(`Work plane ${this.plane.label}`);
@@ -483,7 +672,7 @@ class App {
 
   private zoomAtCursor(factor: number, point?: Vec2): void {
     if (factor === 1 || !Number.isFinite(factor)) return;
-    if (this.stroke || this.help.visible || this.measure.isOpen) return;
+    if (this.isDrawing() || this.help.visible || this.measure.isOpen) return;
     if (!point) {
       this.orbit.zoom(factor);
       this.inference.reset();
@@ -539,6 +728,412 @@ class App {
     }
   }
 
+  private onSpatial(message: SpatialMessage): void {
+    this.lastSpatialAt = this.nowMs || performance.now();
+    const trackerClock = this.tracker.clock;
+    if (trackerClock?.synced) {
+      this.clockSync.offsetLower = trackerClock.offsetLower;
+      this.clockSync.rttMs = trackerClock.rttMs;
+    }
+    this.spatial.apply(message, this.lastSpatialAt);
+    this.pip.setSpatial(message);
+    if (this.spatial.calibration.phase === 'done') this.finishCalibration();
+    else if (this.spatial.calibration.phase === 'timeout') {
+      if (this.spatial.cameraMm) {
+        this.spatial.calibration.samples = [this.spatial.cameraMm];
+        this.finishCalibration();
+        return;
+      }
+      this.spatial.calibration.cancel();
+      this.toasts.show('Origin capture timed out. Keep the tracked tip still and try again.', 'error');
+    }
+    if (this.mode === 'ORBIT' || this.mode === 'PAN') this.applyNavigationDelta(this.cursor.position ?? { x: 0, y: 0 });
+    if (this.drawingSpace === 'planar') this.samplePlanarDepthStroke();
+    else this.sampleSpatialStroke();
+    this.refreshPanel();
+  }
+
+  private beginDepthStroke(): void {
+    if (this.isDrawing()) return;
+    if (this.drawingSpace === 'planar') {
+      this.beginPlanarDepthStroke();
+      return;
+    }
+    const identity = this.spatial.identity();
+    if (!this.spatial.mapping.calibrated) {
+      this.toasts.show('Set the origin (O) before drawing', 'error');
+      return;
+    }
+    if (!identity || !this.spatial.world || !this.spatialReady()) {
+      this.toasts.show('Wait for a tracked point before drawing', 'error');
+      return;
+    }
+    this.orbit.cancelTransition(true);
+    const snap = this.computeSpatialSnap(this.spatial.world, { magnet: SPATIAL_MAGNET });
+    this.spatialStroke = new SpatialStrokeSession(snap, identity, this.nowMs || performance.now());
+    this.spatialPreview = snap;
+    this.hover = null;
+    this.sketchRenderer.setHover(null);
+  }
+
+  private lastEndpoint(): Vec3 | null {
+    const entity = this.lastCommitted;
+    if (!entity) return null;
+    return entity.type === 'line' ? entity.b : entity.corners[0];
+  }
+
+  private spatialWorldPerPixel(world: Vec3): number {
+    return this.viewport.worldPerPixel(world);
+  }
+
+  private spatialRadius(world: Vec3, magnet = 1): number {
+    return hybridRadius(this.spatial.mapping.scale, this.spatialWorldPerPixel(world), SPATIAL_SCREEN_TOLERANCE_PX, magnet);
+  }
+
+  private computeSpatialSnap(world: Vec3, options: { magnet?: number } = {}): SpatialSnapResult {
+    return this.spatialSnapper.snap({
+      raw: world,
+      targets: { vertices: this.sketch.vertices(), midpoints: this.sketch.midpoints(), segments: this.sketch.segments() },
+      scale: this.spatial.mapping.scale,
+      gridEnabled: this.depthGridEnabled,
+      start: this.spatialStroke?.start.world ?? null,
+      axisLock: this.spatialStroke ? this.axisLock : null,
+      project: (point) => this.viewport.projector().project(point),
+      worldPerPixel: this.spatialWorldPerPixel(world),
+      magnet: options.magnet ?? 1,
+      prefer: this.lastEndpoint(),
+    });
+  }
+
+  private resolveSpatial(session: StrokeSession): StrokeResolution {
+    const scale = this.spatial.mapping.scale;
+    const world = this.spatialStroke?.current.world ?? session.last.world;
+    const wpp = this.spatialWorldPerPixel(world);
+    const radius = this.spatialRadius(world, SPATIAL_MAGNET);
+    const tolerancePx = wpp > 0 ? Math.max(SNAP_TOLERANCE_PX, radius / wpp) : SNAP_TOLERANCE_PX;
+    return resolveStroke(session, {
+      projector: this.viewport.projector(),
+      vertices: this.sketch.vertices(),
+      tolerancePx,
+      gridStep: this.depthGridEnabled ? gridStepForScale(scale) : 0,
+      entities: this.sketch.all,
+    });
+  }
+
+  private preferFitKinds(): PlaneKind[] {
+    return this.lastCommitted ? preferKindsFromEntity(this.lastCommitted) : [];
+  }
+
+  private applyDepthScalePreset(): void {
+    if (this.trackerConfig.source !== 'oak' || this.depthScaleApplied) return;
+    this.spatial.mapping.setScale(loadStoredDepthScale(), this.spatial.cameraMm);
+    this.depthScaleApplied = true;
+  }
+
+  private sampleSpatialStroke(): void {
+    const session = this.spatialStroke;
+    if (!session) return;
+    const now = this.nowMs || performance.now();
+    const identity = this.spatial.identity();
+    const fresh = !!identity && this.spatialReady(now) && !!this.spatial.world;
+    if (!fresh || !identity || !this.spatial.world) {
+      session.pause(now);
+      if (session.isDead(now)) this.cancelSpatialStroke('Tracking lost; stroke cancelled');
+      return;
+    }
+    const snap = this.computeSpatialSnap(this.spatial.world);
+    if (!session.update(snap, identity, true, now, this.spatial.mapping.scale)) {
+      if (session.isDead(now)) this.cancelSpatialStroke('Tracking jumped; stroke cancelled');
+      return;
+    }
+    this.spatialPreview = snap;
+  }
+
+  private endSpatialStroke(): void {
+    const session = this.spatialStroke;
+    if (!session) return;
+    const now = this.nowMs || performance.now();
+    this.sampleSpatialStroke();
+    const identity = this.spatial.identity();
+    if (this.spatial.world && identity) {
+      const magnet = this.computeSpatialSnap(this.spatial.world, { magnet: SPATIAL_MAGNET });
+      session.update(magnet, identity, true, now, this.spatial.mapping.scale);
+    }
+    session.closeLoop(this.spatialRadius(session.current.world, SPATIAL_MAGNET));
+    this.spatialStroke = null;
+    this.fittedPlaneLabel = null;
+    this.sketchRenderer.setGhost(null, false, null);
+    this.sketchRenderer.setInk(null);
+    if (session.status !== 'active' || session.paused || !this.spatialReady(now)) {
+      this.toasts.show('Stroke cancelled: tracking was not fresh', 'error');
+      return;
+    }
+    if (!session.canCommit(this.spatial.mapping.scale)) return;
+
+    const fitted = session.fitted(this.preferFitKinds());
+    const targets = { vertices: this.sketch.vertices(), segments: this.sketch.segments() };
+    const joinRadius = objectRadius(this.spatial.mapping.scale) * SPATIAL_MAGNET;
+
+    if (fitted.straight && !fitted.planar) {
+      const bothObject = isSpatialObjectSnap(session.start) && isSpatialObjectSnap(session.current);
+      const aligned = bothObject
+        ? { a: session.start.world, b: session.current.world, axis: null as 'x' | 'y' | 'z' | null }
+        : alignLineToWorldAxis(session.start.world, session.current.world);
+      const input = joinEndpoints({ type: 'line', a: aligned.a, b: aligned.b }, targets, joinRadius);
+      this.lastRecognition = {
+        reason: aligned.axis ? 'axis-aligned line' : 'line',
+        points: fitted.session.planePoints(),
+        screenExtent: fitted.session.screenExtent(),
+      };
+      const commit = this.commands.commitStroke(input);
+      if (!commit.ok) {
+        this.toasts.show(commit.error, 'error');
+        return;
+      }
+      this.lastCommitted = commit.entity;
+      this.sketchRenderer.setLastLabel(commit.entity);
+      this.toasts.show(commit.message, 'success');
+      return;
+    }
+
+    const resolution = this.resolveSpatial(fitted.session);
+    if (resolution.status !== 'ready') {
+      this.lastRecognition = {
+        reason: resolution.reason,
+        points: fitted.session.planePoints(),
+        screenExtent: fitted.session.screenExtent(),
+      };
+      if (resolution.status === 'unrecognized') {
+        this.sketchRenderer.fadeOut(session.polyline());
+        this.toasts.show('Not recognized: draw a straight line or a closed rectangle', 'error');
+      } else {
+        this.toasts.show(resolution.reason, 'info');
+      }
+      return;
+    }
+    let input = resolution.input;
+    let reason = resolution.reason;
+    if (input.type === 'line') {
+      const bothObject = isSpatialObjectSnap(session.start) && isSpatialObjectSnap(session.current);
+      if (!bothObject) {
+        const aligned = alignLineToWorldAxis(input.a, input.b);
+        if (aligned.axis) {
+          input = { type: 'line', a: aligned.a, b: aligned.b };
+          reason = 'axis-aligned line';
+        }
+      }
+    }
+    input = joinEndpoints(input, targets, joinRadius);
+    this.lastRecognition = {
+      reason,
+      points: fitted.session.planePoints(),
+      screenExtent: fitted.session.screenExtent(),
+    };
+    const commit = this.commands.commitStroke(input, resolution.removeIds);
+    if (!commit.ok) {
+      this.toasts.show(commit.error, 'error');
+      return;
+    }
+    this.lastCommitted = commit.entity;
+    this.sketchRenderer.setLastLabel(commit.entity);
+    this.plane = this.plane.withAnchor(anchorAfterCommit(input));
+    this.toasts.show(commit.message, 'success');
+  }
+
+  private cancelSpatialStroke(message = 'Stroke cancelled'): void {
+    this.spatialStroke = null;
+    this.spatialPreview = null;
+    this.fittedPlaneLabel = null;
+    this.sketchRenderer.setGhost(null, false, null);
+    this.sketchRenderer.setInk(null);
+    this.toasts.show(message);
+    this.synchronizeNavigation(false);
+  }
+
+  private beginPlanarDepthStroke(): void {
+    if (this.stroke || !this.spatial.mapping.calibrated || !this.spatial.world || !this.spatialReady()) {
+      this.toasts.show('Need a calibrated, tracked point to draw on the plane', 'error');
+      return;
+    }
+    this.orbit.cancelTransition(true);
+    const world = this.spatial.world;
+    let plane = this.plane;
+    const object = this.computeSpatialSnap(world);
+    if (object.type === 'vertex' || object.type === 'midpoint' || object.type === 'edge') {
+      plane = plane.contains(object.world, 1e-6) ? plane : plane.withAnchor(object.world);
+    }
+    this.plane = plane;
+    const snap = this.planarDepthSnap(world, plane);
+    this.strokeGridStep = this.spatial.mapping.scale * 5;
+    this.stroke = new StrokeSession(plane, snap, false);
+    this.resolutionCache = null;
+    if (plane.isEdgeOn(this.viewport.viewDirection())) {
+      this.toasts.show(`Work plane ${plane.label} is edge-on in this view`, 'info');
+    }
+  }
+
+  /** Project the measured world point onto the locked plane; never a screen-region ray. */
+  private planarDepthSnap(world: Vec3, plane: WorkPlane): SnapResult {
+    const object = this.computeSpatialSnap(world);
+    const projected = plane.project(world);
+    const useObject = object.type === 'vertex' || object.type === 'midpoint' || object.type === 'edge' || object.type === 'lock';
+    const point = useObject ? object.world : projected;
+    const screen = this.viewport.projector().project(point) ?? { x: 0, y: 0 };
+    return {
+      type: object.type === 'lock' ? 'lock' : object.type,
+      world: point,
+      plane: plane.toPlane(point),
+      screen,
+      onPlane: plane.contains(point, 1e-6),
+      raw: projected,
+      entityId: object.entityId,
+      axis: object.axis,
+    };
+  }
+
+  private samplePlanarDepthStroke(): void {
+    const stroke = this.stroke;
+    if (!stroke || !this.isDepthSource() || this.drawingSpace !== 'planar') return;
+    if (!this.spatial.world || !this.spatialReady()) return;
+    const snap = this.planarDepthSnap(this.spatial.world, stroke.plane);
+    stroke.add(snap, snap.raw, snap.screen, 2, Math.max(1, this.spatial.mapping.scale));
+  }
+
+  private beginCalibration(kind: 'origin' | 'recenter'): void {
+    if (!this.isDepthSource()) {
+      this.toasts.show('Select Depth camera before setting the origin', 'error');
+      return;
+    }
+    this.cancelUnfinished();
+    void this.tracker.syncClock?.();
+    this.spatial.calibration.start(this.nowMs || performance.now());
+    this.focusViewport();
+    this.toasts.show(kind === 'origin' ? 'Hold the tracked tip still to set the origin…' : 'Hold still to recenter…');
+    (this as { calibrationKind?: 'origin' | 'recenter' }).calibrationKind = kind;
+    this.refreshPanel();
+  }
+
+  private finishCalibration(): void {
+    const median = this.spatial.calibration.median();
+    this.spatial.calibration.cancel();
+    if (!median) return;
+    const kind = (this as { calibrationKind?: 'origin' | 'recenter' }).calibrationKind ?? 'origin';
+    if (kind === 'origin') {
+      this.spatial.mapping.setOrigin(median);
+      this.toasts.show('Origin set', 'success');
+      if (!this.sketch.size && !this.fittedWorkspace) {
+        this.orbit.setView('iso', false, this.nowMs);
+        this.fitWorkspace();
+        this.fittedWorkspace = true;
+      }
+    } else {
+      const world = this.lastCommitted ? anchorAfterCommit(this.lastCommitted) : { x: 0, y: 0, z: 0 };
+      this.spatial.mapping.recenter(median, world);
+      this.toasts.show('Recentered on the last endpoint', 'success');
+    }
+    this.cancelUnfinished();
+    this.refreshPanel();
+  }
+
+  private changeScale(scale: number): void {
+    this.cancelUnfinished();
+    this.spatial.mapping.setScale(scale, this.spatial.cameraMm);
+    persistDepthScale(scale);
+    this.depthScaleApplied = true;
+    this.refreshPanel();
+  }
+
+  private setDrawingSpace(space: DrawingSpace): void {
+    this.cancelUnfinished();
+    this.drawingSpace = space;
+    this.refreshPanel();
+  }
+
+  private fitWorkspace(): void {
+    const scale = this.spatial.mapping.scale;
+    const half = (WORKSPACE_CUBE_MM * scale) / 2;
+    const box = this.sketch.size
+      ? this.sketch.boundingBox()
+      : { min: { x: -half, y: -half, z: -half }, max: { x: half, y: half, z: half } };
+    this.orbit.fit(box);
+  }
+
+  private async applyTracker(config: TrackerConfigJson): Promise<void> {
+    const streamId = this.tracker.lastSnapshot?.streamId ?? this.spatial.streamId;
+    if (!streamId) {
+      this.toasts.show('Tracker is not ready yet', 'error');
+      return;
+    }
+    this.applyingTracker = true;
+    this.refreshPanel();
+    this.cancelUnfinished();
+    const result = await postTrackerConfig({ expectedStreamId: streamId, config });
+    this.applyingTracker = false;
+    if (!result.ok) {
+      this.toasts.show(result.error, 'error');
+      this.refreshPanel();
+      return;
+    }
+    this.tracker.lastSnapshot = result.snapshot;
+    this.trackerConfig = result.snapshot.config;
+    this.depthaiInstalled = result.snapshot.capabilities.depthaiInstalled;
+    this.clockSync.observe(performance.now(), performance.now(), result.snapshot.serverTimeMs);
+    this.applyDepthScalePreset();
+    this.refreshPanel();
+  }
+
+  private async retryTracker(): Promise<void> {
+    const streamId = this.tracker.lastSnapshot?.streamId ?? this.spatial.streamId;
+    if (!streamId) return;
+    this.cancelUnfinished();
+    const result = await postTrackerConfig({ expectedStreamId: streamId, retry: true });
+    if (!result.ok) this.toasts.show(result.error, 'error');
+    else {
+      this.tracker.lastSnapshot = result.snapshot;
+      this.trackerConfig = result.snapshot.config;
+    }
+    this.refreshPanel();
+  }
+
+  private refreshPanel(): void {
+    const hud = this.spatial.hudState(this.nowMs || performance.now());
+    const capturing = this.spatial.calibration.phase === 'collecting';
+    const labels: Record<string, string> = {
+      origin: 'Origin needed',
+      tracked: 'Tracking',
+      held: this.spatial.reason ? `Paused (${this.spatial.reason})` : 'Paused',
+      lost: 'Lost',
+      acquiring: 'Acquiring',
+    };
+    const captureStatus = capturing
+      ? `Hold still… ${this.spatial.calibration.samples.length}/${CALIBRATION_MIN_SAMPLES}`
+      : this.cameraState === 'error'
+        ? this.tracker.lastStatus?.message ?? 'Camera error'
+        : labels[hud] ?? hud;
+    this.panel.update({
+      source: this.trackerConfig.source,
+      target: this.trackerConfig.target,
+      colorPreset: this.trackerConfig.colorPreset,
+      colorTolerance: this.trackerConfig.colorTolerance,
+      drawingSpace: this.drawingSpace,
+      scale: this.spatial.mapping.scale,
+      calibrated: this.spatial.mapping.calibrated,
+      depthaiInstalled: this.depthaiInstalled,
+      status: captureStatus,
+      applying: this.applyingTracker,
+    });
+  }
+
+  private spatialHudLabel(): string {
+    if (this.cameraState === 'error') return 'Camera error';
+    const state = this.spatial.hudState(this.nowMs || performance.now());
+    if (state === 'origin') return 'Origin needed';
+    if (state === 'tracked') return 'Tracking';
+    if (state === 'held') return 'Paused';
+    if (state === 'lost') return 'Lost';
+    return 'Acquiring';
+  }
+
   // ---------------------------------------------------------------- strokes
 
   private computeSnap(cursorPx: Vec2): SnapResult {
@@ -579,7 +1174,8 @@ class App {
       this.measure.isOpen ||
       this.cursor.isLost ||
       !this.cursor.position ||
-      this.palmNavMode
+      this.palmNavMode ||
+      (this.isDepthSource() && this.drawingSpace === 'free3d')
     ) {
       return;
     }
@@ -642,25 +1238,57 @@ class App {
     this.synchronizeNavigation(false);
     const mode = this.mode;
     if (mode === 'ORBIT' || mode === 'PAN') {
-      if (this.previousCursor) {
-        const dx = position.x - this.previousCursor.x;
-        const dy = position.y - this.previousCursor.y;
-        if (mode === 'ORBIT') this.orbit.orbit(dx, dy, this.sketch.center());
-        else this.orbit.pan(dx, dy);
-      }
-      this.previousCursor = { ...position };
+      this.applyNavigationDelta(position);
       return;
     }
     this.sampleStroke();
   }
 
+  private applyNavigationDelta(position: Vec2): void {
+    const mode = this.mode;
+    if (mode !== 'ORBIT' && mode !== 'PAN') return;
+    if (
+      this.isDepthSource() &&
+      this.cursorSourceTag !== 'mouse' &&
+      !this.holdSources.has('mouse:orbit') &&
+      !this.holdSources.has('mouse:pan')
+    ) {
+      const pixel = this.spatial.pixel;
+      if (!pixel) {
+        this.pixelNavLast = null;
+        return;
+      }
+      if (this.pixelNavLast) {
+        const dx = pixel[0] - this.pixelNavLast[0];
+        const dy = pixel[1] - this.pixelNavLast[1];
+        if (mode === 'ORBIT') this.orbit.orbit(dx, dy, this.sketch.center());
+        else this.orbit.pan(dx, dy);
+      }
+      this.pixelNavLast = [pixel[0], pixel[1]];
+      return;
+    }
+    if (this.previousCursor) {
+      const dx = position.x - this.previousCursor.x;
+      const dy = position.y - this.previousCursor.y;
+      if (mode === 'ORBIT') this.orbit.orbit(dx, dy, this.sketch.center());
+      else this.orbit.pan(dx, dy);
+    }
+    this.previousCursor = { ...position };
+  }
+
   /** Capture the current cursor into the active stroke; tracking loss pauses capture. */
   private sampleStroke(): void {
+    if (this.isDepthSource() && this.drawingSpace === 'planar') {
+      this.samplePlanarDepthStroke();
+      return;
+    }
     const stroke = this.stroke;
     const position = this.cursor.position;
     if (!stroke || !position || this.cursor.isLost) return;
     const snap = this.computeSnap(position);
-    stroke.add(snap, snap.raw, position);
+    const minWorld =
+      this.isDepthSource() && this.drawingSpace === 'planar' ? Math.max(1, this.spatial.mapping.scale) : undefined;
+    stroke.add(snap, snap.raw, position, 2, minWorld);
   }
 
   private resolveFor(stroke: StrokeSession): StrokeResolution {
@@ -702,7 +1330,9 @@ class App {
     this.stroke = null;
     this.sketchRenderer.setGhost(null, false, null);
     this.sketchRenderer.setInk(null);
-    if (stroke.screenExtent() < MIN_STROKE_PX) {
+    const minExtent = this.isDepthSource() ? 5 * this.spatial.mapping.scale : MIN_STROKE_PX;
+    const extent = this.isDepthSource() ? stroke.worldExtent() : stroke.screenExtent();
+    if (extent < minExtent) {
       this.resolutionCache = null;
       return;
     }
@@ -744,7 +1374,7 @@ class App {
   }
 
   private cancelInteraction(): void {
-    if (this.stroke) this.cancelStroke();
+    this.cancelUnfinished();
     this.holdSources.clear();
     this.held.clear();
     this.navMode = null;
@@ -756,9 +1386,7 @@ class App {
     this.inference.reset();
   }
 
-  private updateGhost(stroke: StrokeSession): void {
-    this.sketchRenderer.setInk(stroke.worldPath());
-    const resolution = this.resolveFor(stroke);
+  private applyGhost(resolution: StrokeResolution): void {
     if (resolution.status !== 'ready') {
       this.sketchRenderer.setGhost(null, false, null);
       return;
@@ -775,6 +1403,11 @@ class App {
     });
   }
 
+  private updateGhost(stroke: StrokeSession): void {
+    this.sketchRenderer.setInk(stroke.worldPath());
+    this.applyGhost(this.resolveFor(stroke));
+  }
+
   // ---------------------------------------------------------------- frame loop
 
   private frame(time: number): void {
@@ -786,6 +1419,11 @@ class App {
     const viewDirection = this.viewport.viewDirection();
     const mode = this.mode;
 
+    if (this.isDepthSource() && this.lastSpatialAt && time - this.lastSpatialAt > SPATIAL_STALL_MS) {
+      if (this.spatialStroke) this.spatialStroke.pause(time);
+      if (this.spatialStroke?.isDead(time)) this.cancelSpatialStroke('Tracking stalled; stroke cancelled');
+    }
+
     this.updatePlaneInference(time);
 
     const cursorRay = cursorPx ? projector.ray(cursorPx) : null;
@@ -795,7 +1433,37 @@ class App {
 
     const snap: SnapResult | null = cursorPx ? this.computeSnap(cursorPx) : null;
 
-    if (this.stroke) {
+    if (this.spatialStroke) {
+      const points = this.spatialStroke.polyline();
+      this.sketchRenderer.setInk(points);
+      const scale = this.spatial.mapping.scale;
+      if (this.spatialStroke.worldExtent() >= SPATIAL_FIT_EXTENT_MM * scale) {
+        const fitted = this.spatialStroke.fitted(this.preferFitKinds());
+        this.fittedPlaneLabel = fitted.plane.label;
+        if (fitted.straight && !fitted.planar) {
+          const bothObject = isSpatialObjectSnap(this.spatialStroke.start) && isSpatialObjectSnap(this.spatialStroke.current);
+          const aligned = bothObject
+            ? this.spatialStroke.preview()
+            : alignLineToWorldAxis(this.spatialStroke.start.world, this.spatialStroke.current.world);
+          const { a, b } = aligned;
+          this.sketchRenderer.setGhost([a, b], false, {
+            text: `${Math.round(this.spatialStroke.length())} mm`,
+            at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 },
+          });
+        } else {
+          this.applyGhost(this.resolveSpatial(fitted.session));
+          this.sketchRenderer.setInk(points);
+        }
+      } else {
+        this.fittedPlaneLabel = null;
+        const { a, b } = this.spatialStroke.preview();
+        const delta = this.spatialStroke.delta();
+        this.sketchRenderer.setGhost([a, b], false, {
+          text: `${Math.round(this.spatialStroke.length())} mm  Δ ${Math.round(delta.x)} ${Math.round(delta.y)} ${Math.round(delta.z)}`,
+          at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 },
+        });
+      }
+    } else if (this.stroke) {
       // Points are captured in onCursorMoved; the ghost follows the camera too.
       this.updateGhost(this.stroke);
     } else {
@@ -806,26 +1474,58 @@ class App {
       }
     }
 
-    const displayedPlane = this.stroke ? this.stroke.plane : planeThroughSnap(this.plane, snap);
+    const fittedLive = this.spatialStroke && this.fittedPlaneLabel ? this.spatialStroke.fitted(this.preferFitKinds()) : null;
+    const displayedPlane = this.stroke
+      ? this.stroke.plane
+      : fittedLive
+        ? fittedLive.plane
+        : planeThroughSnap(this.plane, snap);
     const focus =
       snap && isObjectSnap(snap)
         ? displayedPlane.toPlane(snap.world)
         : snap?.onPlane
           ? snap.plane
           : displayedPlane.toPlane(displayedPlane.anchor);
-    this.planeVisual.update(displayedPlane, this.gridStep, focus);
-    this.glyph.update(snap, cursorPx, !!this.stroke);
+    const hidePlane = this.isDepthSource() && this.drawingSpace === 'free3d' && !this.stroke && !fittedLive;
+    this.planeVisual.setVisible(!hidePlane);
+    if (!hidePlane) this.planeVisual.update(displayedPlane, this.gridStep, focus);
+    const spatialWorld = this.isDepthSource() ? this.spatial.world : null;
+    const spatialScreen = spatialWorld ? projector.project(spatialWorld) : null;
+    if (this.isDepthSource()) {
+      const preview = this.spatialPreview;
+      const cursorWorld = preview?.world ?? spatialWorld;
+      this.spatialVisual.update(cursorWorld, !!spatialWorld && !!spatialScreen, {
+        workspace: WORKSPACE_CUBE_MM * this.spatial.mapping.scale,
+        radius: cursorWorld ? this.spatialRadius(cursorWorld, this.spatialStroke ? 1 : SPATIAL_MAGNET) : 4,
+        snapType: preview?.type ?? 'free',
+        target: preview && isSpatialObjectSnap(preview) ? preview.world : null,
+      });
+      const glyphSnap = spatialWorld
+        ? {
+            type: (this.spatialPreview?.type ?? 'free') as SnapResult['type'],
+            world: this.spatialPreview?.world ?? spatialWorld,
+            plane: displayedPlane.toPlane(this.spatialPreview?.world ?? spatialWorld),
+            screen: spatialScreen ?? cursorPx ?? { x: 0, y: 0 },
+            onPlane: displayedPlane.contains(this.spatialPreview?.world ?? spatialWorld, 1e-6),
+            raw: spatialWorld,
+          }
+        : null;
+      this.glyph.update(spatialScreen ? glyphSnap : null, spatialScreen, this.isDrawing());
+    } else {
+      this.spatialVisual.update(null, false);
+      this.glyph.update(snap, cursorPx, !!this.stroke);
+    }
     this.sketchRenderer.tick(time);
 
     this.hud.update({
       mode,
       plane: displayedPlane.info,
-      planeMode: this.stroke ? 'Locked' : this.planeMode === 'auto' ? 'Auto' : 'Manual',
+      planeMode: this.stroke ? 'Locked' : this.isDepthSource() && this.drawingSpace === 'free3d' ? 'Manual' : this.planeMode === 'auto' ? 'Auto' : 'Manual',
       planeReason: this.stroke ? 'locked' : REASON_LABELS[this.planeReason] ?? null,
-      snap: snap?.type ?? null,
-      snapAxis: snap?.axis ?? null,
-      gridStep: this.gridStep,
-      gridEnabled: this.gridEnabled,
+      snap: (this.isDepthSource() ? this.spatialPreview?.type ?? null : snap?.type) ?? null,
+      snapAxis: this.isDepthSource() ? this.spatialPreview?.axis ?? null : snap?.axis ?? null,
+      gridStep: this.isDepthSource() ? this.spatial.mapping.scale * 5 : this.gridStep,
+      gridEnabled: this.isDepthSource() ? this.depthGridEnabled : this.gridEnabled,
       tracking: this.cursor.tracking,
       connection: this.connection,
       camera: this.cameraState,
@@ -833,6 +1533,12 @@ class App {
       navAssist: this.navAssist,
       edgeOn: displayedPlane.isEdgeOn(viewDirection),
       entityCount: this.sketch.size,
+      depthMode: this.isDepthSource(),
+      drawingSpace: this.isDepthSource() ? this.drawingSpace : null,
+      spatialLabel: this.isDepthSource() ? this.spatialHudLabel() : null,
+      scale: this.isDepthSource() ? this.spatial.mapping.scale : null,
+      trackingAgeMs: this.isDepthSource() && this.spatial.last?.ageMs !== undefined ? this.spatial.last.ageMs : null,
+      fittedPlane: this.spatialStroke ? this.fittedPlaneLabel : null,
     });
     this.hud.setKeys(this.keyHints(mode));
 
@@ -904,6 +1610,20 @@ class App {
         }
       },
       lastRecognition: () => this.lastRecognition,
+      setDrawingSpace: (space) => this.setDrawingSpace(space),
+      setTrackerSource: (source) => {
+        this.trackerConfig = { ...this.trackerConfig, source };
+        if (source === 'oak') this.applyDepthScalePreset();
+        else this.depthScaleApplied = false;
+        this.refreshPanel();
+      },
+      setSpatialOrigin: (cameraMm) => {
+        this.spatial.mapping.setOrigin(cameraMm);
+        this.refreshPanel();
+      },
+      setDepthScale: (scale) => this.changeScale(scale),
+      mappingScale: () => this.spatial.mapping.scale,
+      pushSpatial: (message) => this.onSpatial(message),
     };
   }
 }
@@ -920,6 +1640,12 @@ export interface AirCadApi {
   setCursor(point: Vec2): void;
   /** Reason and plane points of the most recent pen-up, for diagnostics. */
   lastRecognition(): { reason: string; points: Vec2[]; screenExtent: number } | null;
+  setDrawingSpace(space: DrawingSpace): void;
+  setTrackerSource(source: TrackerSource): void;
+  setSpatialOrigin(cameraMm: Vec3): void;
+  setDepthScale(scale: number): void;
+  mappingScale(): number;
+  pushSpatial(message: SpatialMessage): void;
 }
 
 declare global {

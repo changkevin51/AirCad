@@ -21,6 +21,12 @@ export interface HudState {
   navAssist: boolean;
   edgeOn: boolean;
   entityCount: number;
+  depthMode?: boolean;
+  drawingSpace?: 'free3d' | 'planar' | null;
+  spatialLabel?: string | null;
+  scale?: number | null;
+  trackingAgeMs?: number | null;
+  fittedPlane?: string | null;
 }
 
 export interface KeyHint {
@@ -45,8 +51,15 @@ export function formatGridStep(step: number): string {
 export function trackingLabel(state: HudState): { text: string; tone: string } {
   if (state.connection !== 'open') return { text: 'Tracker offline · mouse', tone: 'warn' };
   if (state.camera === 'disabled') return { text: 'Mouse (no camera)', tone: 'muted' };
-  if (state.camera === 'error' || state.camera === 'stopped') return { text: 'Camera error · mouse', tone: 'warn' };
+  if (state.camera === 'error' || state.camera === 'stopped') {
+    return { text: state.depthMode ? 'Camera error' : 'Camera error · mouse', tone: 'warn' };
+  }
   if (state.camera === 'starting') return { text: 'Camera starting', tone: 'muted' };
+  if (state.depthMode) {
+    const label = state.spatialLabel ?? 'Acquiring';
+    const tone = label === 'Tracking' ? 'ok' : label === 'Paused' || label === 'Lost' || label === 'Origin needed' ? 'warn' : 'muted';
+    return { text: label, tone };
+  }
   switch (state.tracking) {
     case 'hand':
       return { text: 'Hand', tone: 'ok' };
@@ -82,12 +95,25 @@ export class Hud {
     const snapText = state.snap ? `${SNAP_NAMES[state.snap]}${state.snapAxis ? ` ${state.snapAxis.toUpperCase()}` : ''}` : '–';
     const chips: [string, string, string][] = [
       ['Mode', state.mode, `mode-${state.mode.toLowerCase()}`],
-      ['Plane', `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` · ${state.planeReason}` : ''}`, `axis-${state.plane.normalAxis}`],
+      [
+        'Plane',
+        state.fittedPlane
+          ? `Fitting ${state.fittedPlane}`
+          : `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` · ${state.planeReason}` : ''}`,
+        `axis-${state.plane.normalAxis}`,
+      ],
       ['Snap', snapText, state.snap && state.snap !== 'free' ? `snap-${state.snap}` : 'muted'],
       ['Grid', state.gridEnabled ? formatGridStep(state.gridStep) : 'off', state.gridEnabled ? '' : 'muted'],
       ['View', state.projection, ''],
       ['Tracking', tracking.text, tracking.tone],
     ];
+    if (state.depthMode) {
+      chips.push(['Space', state.drawingSpace === 'planar' ? 'Planar' : 'Free 3D', '']);
+      if (state.scale) chips.push(['Scale', `${state.scale}×`, '']);
+      if (state.trackingAgeMs !== null && state.trackingAgeMs !== undefined) {
+        chips.push(['Age', `${Math.round(state.trackingAgeMs)} ms`, state.trackingAgeMs > 200 ? 'warn' : 'muted']);
+      }
+    }
     if (state.navAssist) chips.push(['Palm nav', 'on', 'ok']);
     const html = chips
       .map(([name, value, tone]) => `<span class="chip ${tone}"><span class="chip__name">${name}</span><span class="chip__value">${value}</span></span>`)

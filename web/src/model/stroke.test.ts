@@ -55,6 +55,17 @@ describe('StrokeSession', () => {
     expect(session.screenExtent()).toBeGreaterThan(200);
   });
 
+  it('uses an optional world-distance threshold without changing the screen default', () => {
+    const sketch = floorSketch();
+    const start = snapAt(v3(500, 500, 0), sketch);
+    const session = new StrokeSession(plane, start);
+    const near = snapAt(v3(502, 500, 0), sketch);
+    expect(session.add(near, near.raw, projector.project(v3(502, 500, 0))!, 2, 10)).toBe(false);
+    const far = snapAt(v3(530, 500, 0), sketch);
+    expect(session.add(far, far.raw, projector.project(v3(530, 500, 0))!, 2, 10)).toBe(true);
+    expect(session.worldExtent()).toBeGreaterThan(20);
+  });
+
   it('drops samples that barely moved on screen', () => {
     const sketch = floorSketch();
     const start = snapAt(v3(500, 500, 0), sketch);

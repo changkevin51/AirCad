@@ -1,5 +1,5 @@
 import { regionRect } from '../input/cursor';
-import type { CameraState, HandsMessage, ThumbMessage } from '../input/tracker-client';
+import type { CameraState, HandsMessage, SpatialMessage, ThumbMessage } from '../input/tracker-client';
 
 /** Camera picture-in-picture with the fingertip and the active mapping region. */
 export class CameraPip {
@@ -8,8 +8,10 @@ export class CameraPip {
   private readonly canvas = document.createElement('canvas');
   private readonly caption = document.createElement('div');
   private hands: HandsMessage | null = null;
+  private spatial: SpatialMessage | null = null;
   private cursorHandId: number | null = null;
   private imageSize = { w: 192, h: 144 };
+  private streamId: string | null = null;
   visible = true;
 
   constructor(root: HTMLElement) {
@@ -32,8 +34,25 @@ export class CameraPip {
 
   setHands(message: HandsMessage, cursorHandId: number | null): void {
     this.hands = message;
+    this.spatial = null;
     this.cursorHandId = cursorHandId;
     this.draw();
+  }
+
+  setSpatial(message: SpatialMessage | null): void {
+    if (message && this.streamId && message.streamId !== this.streamId) this.spatial = null;
+    this.spatial = message;
+    if (message) this.streamId = message.streamId;
+    this.hands = null;
+    this.draw();
+  }
+
+  setStream(streamId: string | null): void {
+    if (streamId !== this.streamId) {
+      this.spatial = null;
+      this.hands = null;
+    }
+    this.streamId = streamId;
   }
 
   setCameraState(state: CameraState | null, connected: boolean): void {
@@ -41,7 +60,10 @@ export class CameraPip {
     else if (state === 'disabled') this.caption.textContent = 'Camera disabled (--no-camera)';
     else if (state === 'error') this.caption.textContent = 'Camera error - see terminal';
     else if (state === 'starting') this.caption.textContent = 'Camera starting...';
-    else this.caption.textContent = 'Camera - stay inside the box';
+    else if (this.spatial) {
+      const health = this.spatial.fresh ? 'depth ok' : this.spatial.reason ?? this.spatial.state;
+      this.caption.textContent = `${this.spatial.target === 'color' ? 'LED / Colour' : 'Finger'} · ${health}`;
+    } else this.caption.textContent = 'Camera - stay inside the box';
     this.element.classList.toggle('pip--inactive', !connected || state !== 'ready');
   }
 
@@ -61,6 +83,18 @@ export class CameraPip {
     const context = this.canvas.getContext('2d');
     if (!context) return;
     context.clearRect(0, 0, w, h);
+    const spatial = this.spatial;
+    if (spatial) {
+      const scaleX = w / spatial.frame.w;
+      const scaleY = h / spatial.frame.h;
+      if (spatial.pixel) {
+        context.beginPath();
+        context.arc(spatial.pixel[0] * scaleX, spatial.pixel[1] * scaleY, 5, 0, Math.PI * 2);
+        context.fillStyle = spatial.fresh ? '#6fe3b4' : '#ffc857';
+        context.fill();
+      }
+      return;
+    }
     const hands = this.hands;
     if (!hands) return;
     const scaleX = w / hands.frame.w;

@@ -7,6 +7,7 @@ A spatial CAD sketching app: draw lines and rectangles in millimetres on a 3D wo
 - **Python 3.10, 3.11, or 3.12** (MediaPipe 0.10.35 has no wheels for 3.13+)
 - **Node.js 18+** (to install and build the web UI)
 - A webcam is optional. Without one, run with `--no-camera` and draw with the mouse.
+- An **OAK-D S2** is optional. Depth tracking needs the extra package in `requirements-depth.txt` (`depthai==2.30.0.0`). The default install does not install DepthAI.
 
 ## Install
 
@@ -37,6 +38,18 @@ cd web && npm install && npm run build && cd ..
 
 A macOS `.venv` copied onto Windows will not work; `install.bat` replaces it. Keep separate checkouts if you need both at once.
 
+Optional OAK-D support (does not replace the base install):
+
+```bash
+.venv/bin/python -m pip install -r requirements-depth.txt
+```
+
+```bat
+.venv\Scripts\python.exe -m pip install -r requirements-depth.txt
+```
+
+`install.bat` / `install.command` accept `--depth` to do that in one step. Do not install DepthAI 3.x; this project uses the v2 API.
+
 ## Run
 
 Double-click **Start AirCAD.bat** (Windows) or **Start AirCAD.command** (macOS). The server opens http://127.0.0.1:8765/ in your browser.
@@ -56,6 +69,8 @@ Useful flags:
 - `--no-camera` — skip the webcam; the mouse drives the cursor
 - `--no-browser` — do not open a browser tab
 - `--camera 1` — another webcam index
+- `--source oak` — start with the OAK-D depth camera (`--target finger|color`, `--color green|red|blue`)
+- `--tracking-debug` — write bounded JSONL diagnostics to `.runtime/depth-tracking.jsonl`
 - `--port 8765` — HTTP port
 
 If Windows or macOS asked for camera access on first launch, allow it and start the app again.
@@ -124,6 +139,24 @@ Roughly matching adjacent rectangles align along the entire shared border, with 
 | **P** | Camera picture-in-picture |
 | **H** | Help overlay |
 
+### Depth camera (OAK-D S2)
+
+Keep the camera **fixed, upright, and approximately level**. The browser maps camera millimetres after you set an origin; rotating the 3D view does not change that mapping.
+
+| Control | Action |
+| --- | --- |
+| Input panel | Webcam / Depth camera / Mouse, Finger or LED/Colour, Free 3D or Planar, scale |
+| **O** | Set origin from a 400 ms stable capture (maps that pose to world 0,0,0) |
+| **R** | Recenter mapping on the last committed endpoint |
+| **F** | Fit a local workspace cube (about 400 mm physical × scale) |
+| **Space** | Freehand stroke: fit XY / XZ / YZ from the path, then line / rectangle / assembled / shared-border (Free 3D) |
+| **G** | Optional XYZ grid (off by default in depth mode) |
+| **X / Y / Z** | Hard axis lock in millimetres |
+
+Free 3D records a polyline while Space is held, fits the nearest world plane (or a 3D line if the path is straight and not planar), then reuses the webcam recogniser. Snapping uses the larger of 40 mm × scale and ~22 screen pixels, with a 1.5× magnet at pen-down and pen-up so endpoints join. Default scale is 10 (1 physical mm = 10 model mm) and is remembered. A short tracking gap can resume the same stroke; a long loss, a distant re-lock, or release while paused cancels without adding history. Colour tracking prefers a textured/opaque tip — a bare LED often has no measurable stereo surface.
+
+If you move or unplug the camera, press **Retry** and set the origin again. Calibration is not saved.
+
 ### Mouse (no webcam)
 
 Move the pointer to drive the cursor. Left drag draws, right drag orbits, middle drag pans, wheel zooms toward the cursor (faster spin zooms faster).
@@ -190,6 +223,8 @@ Python tests use synthetic observations and never require a webcam. The TypeScri
 - **Plane is edge-on:** press **A** for auto, **Tab** or **1 / 2 / 3**, or orbit with **Shift**.
 - **Palm navigation moves unexpectedly:** press **N** to turn it off. Drawing (**Space**) always wins over palm nav.
 - **FreeCAD not found:** set `FREECAD_EXECUTABLE` as above and confirm `freecad_import.py` is beside `server.py`.
+- **Depth camera will not start:** install `pip install -r requirements-depth.txt` (DepthAI 2.30.0.0), use USB3, and close `track-finger.py` if it still has the device.
+- **Origin needed:** press **O** and hold still for about half a second. Unplugging the OAK invalidates calibration.
 - **Missing Python packages:** run **install.bat** / **install.command**, or `pip install -r requirements.txt` in `.venv`.
 - **Missing Node packages:** run `npm install` inside `web/`.
 

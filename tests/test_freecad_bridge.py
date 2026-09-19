@@ -168,5 +168,18 @@ class FreeCADBridgeTests(unittest.TestCase):
             temporary_directory.cleanup()
 
 
+    def test_spatial_xyz_endpoints_are_preserved_exactly(self) -> None:
+        temporary_directory, patches = self._isolated_paths()
+        try:
+            Path(temporary_directory.name, "freecad_import.py").write_text("", encoding="utf-8")
+            spatial = {"type": "line", "points": [[12, 34, 56], [78, 90, 123]]}
+            with patches, mock.patch.object(freecad_bridge, "_launch_freecad"):
+                returned = freecad_bridge.send_to_freecad([spatial])
+            payload = json.loads(returned.read_text(encoding="utf-8"))
+            self.assertEqual(payload["entities"][0]["points"], [[12, 34, 56], [78, 90, 123]])
+        finally:
+            temporary_directory.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

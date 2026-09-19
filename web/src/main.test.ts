@@ -4,7 +4,7 @@ import type { AirCadApi } from './main';
 import { adaptiveGridStep } from './model/snap';
 import { makeRect } from './model/sketch';
 import { v2, v3, type Vec2, type Vec3 } from './model/vec';
-import type { HandsMessage, TrackedHandMessage } from './input/tracker-client';
+import type { HandsMessage, SpatialMessage, TrackedHandMessage } from './input/tracker-client';
 
 const state = vi.hoisted(() => ({
   renderer: null as any,
@@ -69,11 +69,22 @@ vi.mock('./scene/viewport', async () => {
       const { origin, direction } = raycaster.ray;
       return { origin: v3(origin.x, origin.y, origin.z), dir: v3(direction.x, direction.y, direction.z) };
     }
+    worldPerPixel(world: Vec3): number {
+      const camera = this.syncCamera();
+      if (this.ortho) {
+        return (this.orthographic.top - this.orthographic.bottom) / Math.max(1, this.height);
+      }
+      const pos = camera.position;
+      const dist = Math.hypot(world.x - pos.x, world.y - pos.y, world.z - pos.z);
+      const fov = (45 * Math.PI) / 180;
+      return (2 * Math.max(1, dist) * Math.tan(fov / 2)) / Math.max(1, this.height);
+    }
     projector() {
       this.syncCamera();
       return {
         project: (world: Vec3) => this.project(world),
         ray: (screen: Vec2) => this.ray(screen),
+        worldPerPixel: (world: Vec3) => this.worldPerPixel(world),
       };
     }
     private syncCamera() {
@@ -103,6 +114,7 @@ vi.mock('./scene/workplane-visual', () => {
     update(plane: { kind: string; offset: number }, step: number) {
       this.last = { plane, step };
     }
+    setVisible() {}
   }
   return { WorkPlaneVisual };
 });
@@ -206,6 +218,8 @@ vi.mock('./ui/pip', () => {
     setThumb() {}
     setCameraState() {}
     setHands() {}
+    setSpatial() {}
+    setStream() {}
     toggle() {
       return false;
     }
@@ -220,9 +234,27 @@ vi.mock('./ui/cursor-glyph', () => {
   return { CursorGlyph };
 });
 
+vi.mock('./ui/input-panel', () => {
+  class InputPanel {
+    update() {}
+  }
+  return { InputPanel };
+});
+
+vi.mock('./scene/spatial-cursor-visual', () => {
+  class SpatialCursorVisual {
+    readonly group = { name: 'spatial-cursor' };
+    update() {}
+  }
+  return { SpatialCursorVisual };
+});
+
 vi.mock('./input/tracker-client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./input/tracker-client')>();
   class MockTracker {
+    clock = { synced: true, offsetLower: 0, rttMs: 1 };
+    lastSnapshot = null;
+    lastStatus = null;
     constructor(_url: string, handlers: unknown) {
       state.tracker = handlers;
     }
@@ -374,6 +406,8 @@ beforeEach(() => {
   if (state.help) state.help.visible = false;
   if (state.measure) state.measure.isOpen = false;
   dispatchWindow('blur', {});
+  api.setTrackerSource('webcam');
+  api.setDrawingSpace('free3d');
   state.tracker?.onConnection('closed');
   api.sketch.load({ version: 1, units: 'mm', entities: [] });
   api.press('clear');
@@ -832,6 +866,16 @@ describe('stroke guards', () => {
     }
   });
 
+  it('treats a focused panel button as CAD input, not a typing field', () => {
+    setCursorWorld(v3(0, 0, 0));
+    dispatchWindow('keydown', keyEvent('Space', { target: { tagName: 'BUTTON' } }));
+    tick();
+    expect(state.hud.last?.mode).toBe('DRAWING');
+    setCursorWorld(v3(4000, 0, 0));
+    dispatchWindow('keyup', keyEvent('Space', { target: { tagName: 'BUTTON' } }));
+    expect(api.sketch.size).toBe(1);
+  });
+
   it('keeps the stroke alive while any hold source is still down', () => {
     setCursorWorld(v3(0, 0, 0));
     dispatchWindow('keydown', keyEvent('Space'));
@@ -1028,5 +1072,210 @@ describe('stroke resolution caching', () => {
     tick();
     expect(state.resolveCalls).toBeGreaterThan(calls);
     api.hold('draw', false);
+  });
+});
+
+const ORIGIN_CAM = v3(0, 0, 500);
+
+function worldToCamera(world: Vec3, origin = ORIGIN_CAM): [number, number, number] {
+  return [-world.x + origin.x, world.z + origin.y, world.y + origin.z];
+}
+
+let spatialSeq = 1;
+
+function spatialAt(world: Vec3, over: Partial<SpatialMessage> = {}): SpatialMessage {
+  const now = frameTime || 1000;
+  return {
+    type: 'spatial',
+    v: 2,
+    streamId: 's1',
+    sourceRunId: 'r1',
+    seq: spatialSeq++,
+    t: now,
+    sampleTimeMs: now,
+    ageMs: 0,
+    target: 'color',
+    trackingEpoch: 0,
+    frame: { w: 100, h: 80, mirrored: true },
+    pixel: [40, 40],
+    cameraMm: worldToCamera(world),
+    state: 'tracked',
+    fresh: true,
+    reason: null,
+    quality: { validPixels: 12, roiCount: 3, spreadMm: 2, pairSkewMs: 1 },
+    ...over,
+  };
+}
+
+function enablePlanarDepth(): void {
+  api.setTrackerSource('oak');
+  api.setDepthScale(1);
+  api.setDrawingSpace('planar');
+  api.setSpatialOrigin(ORIGIN_CAM);
+}
+
+function enableFree3dDepth(): void {
+  api.setTrackerSource('oak');
+  api.setDepthScale(1);
+  api.setDrawingSpace('free3d');
+  api.setSpatialOrigin(ORIGIN_CAM);
+}
+
+function strokeThroughSpatial(worldPoints: Vec3[]): void {
+  tick();
+  api.pushSpatial(spatialAt(worldPoints[0]));
+  api.hold('draw', true);
+  for (const point of worldPoints.slice(1)) {
+    tick();
+    api.pushSpatial(spatialAt(point));
+  }
+  api.hold('draw', false);
+}
+
+describe('depth planar strokes', () => {
+  it('projects measured points onto the work plane and completes a rectangle', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([
+      v3(0, 0, 80),
+      v3(4000, 0, 40),
+      v3(4000, 3000, 90),
+      v3(0, 3000, 20),
+      v3(0, 0, 10),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('rectangle');
+    expect(api.sketch.size).toBe(1);
+    const entity = api.sketch.all[0];
+    expect(entity.type).toBe('rect');
+    if (entity.type === 'rect') {
+      const expected = [v3(0, 0, 0), v3(4000, 0, 0), v3(4000, 3000, 0), v3(0, 3000, 0)];
+      for (const corner of expected) {
+        expect(entity.corners.some((point) => Math.hypot(point.x - corner.x, point.y - corner.y, point.z - corner.z) < 1e-3)).toBe(true);
+      }
+    }
+  });
+
+  it('completes a shared-border wall from projected depth points', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    api.press('viewRight');
+    finishTransitions();
+    enablePlanarDepth();
+    strokeThroughSpatial([
+      v3(4000, 1500, 0),
+      v3(4000, 1500, 1200),
+      v3(4000, 1500, 2500),
+      v3(4000, 2000, 2500),
+      v3(4000, 2500, 2500),
+      v3(4000, 2500, 1200),
+      v3(4000, 2500, 0),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('shared-border rectangle');
+    expect(api.sketch.size).toBe(2);
+    expect(api.sketch.all[1].type).toBe('rect');
+    api.commands.undo();
+    expect(api.sketch.size).toBe(1);
+  });
+
+  it('starts a planar stroke on an edge-on plane with a view warning', () => {
+    api.press('viewFront');
+    finishTransitions();
+    api.press('cyclePlane');
+    expect(api.plane().kind).toBe('YZ');
+    enablePlanarDepth();
+    tick();
+    api.pushSpatial(spatialAt(v3(80, 400, 200)));
+    api.hold('draw', true);
+    expect(state.toasts.some((message) => message.includes('edge-on'))).toBe(true);
+    tick();
+    api.pushSpatial(spatialAt(v3(120, 800, 900)));
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.all[0].type).toBe('line');
+  });
+});
+
+describe('depth Free 3D strokes', () => {
+  it('defaults depth scale to 10 when entering depth mode', () => {
+    try {
+      globalThis.localStorage?.removeItem('aircad.depthScale');
+    } catch {
+      /* node */
+    }
+    api.setTrackerSource('oak');
+    expect(api.mappingScale()).toBe(10);
+  });
+
+  it('recognizes a jittered loop as a rectangle', () => {
+    enableFree3dDepth();
+    strokeThroughSpatial([
+      v3(0, 0, 12),
+      v3(2000, 20, -8),
+      v3(4000, -10, 15),
+      v3(3980, 1500, -6),
+      v3(4010, 3000, 14),
+      v3(2000, 2985, -11),
+      v3(10, 3010, 8),
+      v3(-8, 1500, -4),
+      v3(18, 12, 6),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('rectangle');
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.all[0].type).toBe('rect');
+  });
+
+  it('assembles four chained strokes into a rectangle', () => {
+    enableFree3dDepth();
+    strokeThroughSpatial([v3(0, 0, 0), v3(2000, 0, 8), v3(4000, 0, 0)]);
+    expect(api.sketch.size).toBe(1);
+    strokeThroughSpatial([v3(4000, 0, 0), v3(4000, 1500, -6), v3(4000, 3000, 0)]);
+    expect(api.sketch.size).toBe(2);
+    strokeThroughSpatial([v3(4000, 3000, 0), v3(2000, 3000, 10), v3(0, 3000, 0)]);
+    expect(api.sketch.size).toBe(3);
+    strokeThroughSpatial([v3(0, 3000, 0), v3(0, 1500, -5), v3(0, 0, 0)]);
+    expect(api.lastRecognition()?.reason).toBe('assembled rectangle');
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.all[0].type).toBe('rect');
+  });
+
+  it('completes a shared-border wall from a floor edge', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    enableFree3dDepth();
+    strokeThroughSpatial([
+      v3(4000, 1500, 0),
+      v3(4000, 1500, 1200),
+      v3(4000, 1500, 2500),
+      v3(4000, 2000, 2500),
+      v3(4000, 2500, 2500),
+      v3(4000, 2500, 1200),
+      v3(4000, 2500, 0),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('shared-border rectangle');
+    expect(api.sketch.size).toBe(2);
+    expect(api.sketch.all[1].type).toBe('rect');
+  });
+
+  it('joins an endpoint 35 mm off a vertex', () => {
+    api.commands.addLine(v3(0, 0, 0), v3(500, 0, 0));
+    enableFree3dDepth();
+    strokeThroughSpatial([v3(2000, 0, 0), v3(1000, 0, 4), v3(35, 0, 0)]);
+    expect(api.sketch.size).toBe(2);
+    const line = api.sketch.all[1];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b).toEqual(v3(0, 0, 0));
+    }
+  });
+
+  it('commits a near-axis stroke as an axis-aligned line', () => {
+    enableFree3dDepth();
+    strokeThroughSpatial([v3(0, 0, 0), v3(500, 20, 8), v3(1000, 80, 40)]);
+    expect(api.lastRecognition()?.reason).toBe('axis-aligned line');
+    expect(api.sketch.size).toBe(1);
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.a).toEqual(v3(0, 0, 0));
+      expect(line.b.y).toBeCloseTo(0, 5);
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
   });
 });

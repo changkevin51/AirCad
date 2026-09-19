@@ -29,7 +29,9 @@ export type PressAction =
   | 'measure'
   | 'export'
   | 'togglePip'
-  | 'help';
+  | 'help'
+  | 'setOrigin'
+  | 'recenter';
 
 export type BindingGroup = 'pen' | 'view' | 'plane' | 'edit' | 'tools';
 
@@ -84,6 +86,8 @@ export const PRESS_BINDINGS: readonly KeyBinding<PressAction>[] = [
   { action: 'toggleNavAssist', codes: ['KeyN'], label: 'N', help: 'Off-hand palm navigation on / off', group: 'tools' },
   { action: 'togglePip', codes: ['KeyP'], label: 'P', help: 'Camera picture-in-picture', group: 'tools' },
   { action: 'help', codes: ['KeyH', 'F1'], label: 'H', help: 'Help overlay', group: 'tools' },
+  { action: 'setOrigin', codes: ['KeyO'], label: 'O', help: 'Set the depth-camera origin (depth mode)', group: 'tools' },
+  { action: 'recenter', codes: ['KeyR'], label: 'R', help: 'Recenter mapping on the last endpoint (depth mode)', group: 'tools' },
 ];
 
 export type Platform = 'mac' | 'other';

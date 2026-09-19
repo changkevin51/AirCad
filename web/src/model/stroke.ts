@@ -3,7 +3,7 @@ import { recognizeStroke, type RecognizeOptions, type RecognizeResult, type Reco
 import { alignRectangleToBorder, completeLineRectangle, completeSharedBorder, sameRectangle } from './rect-completion';
 import type { Projector, SnapResult } from './snap';
 import type { Entity, EntityInput, Vertex } from './sketch';
-import { add, distance2, dot, nearlyEqual, normalize, roundTo, scale, sub, type Vec2, type Vec3 } from './vec';
+import { add, distance, distance2, dot, nearlyEqual, normalize, roundTo, scale, sub, type Vec2, type Vec3 } from './vec';
 
 const OBJECT_SNAPS = new Set(['vertex', 'midpoint', 'edge', 'lock']);
 
@@ -53,7 +53,13 @@ export class StrokeSession {
   }
 
   /** Add a cursor sample.  Returns false when it was too close to the last one. */
-  add(snap: SnapResult, rawWorld: Vec3 | null, cursorScreen: Vec2, minScreenDistance = 2): boolean {
+  add(
+    snap: SnapResult,
+    rawWorld: Vec3 | null,
+    cursorScreen: Vec2,
+    minScreenDistance = 2,
+    minWorldDistance?: number,
+  ): boolean {
     const previous = this.lastSnap;
     if (
       snap.type !== previous.type ||
@@ -67,9 +73,14 @@ export class StrokeSession {
       this.revisionCount++;
     }
     this.lastSnap = snap;
-    if (distance2(cursorScreen, this.lastScreen) < minScreenDistance) return false;
-    this.lastScreen = cursorScreen;
     const raw = rawWorld ?? snap.world;
+    const tooClose =
+      minWorldDistance !== undefined && minWorldDistance > 0
+        ? distance(raw, this.rawPlane.length ? this.plane.toWorld(this.rawPlane[this.rawPlane.length - 1]) : this.start.world) <
+          minWorldDistance
+        : distance2(cursorScreen, this.lastScreen) < minScreenDistance;
+    if (tooClose) return false;
+    this.lastScreen = cursorScreen;
     this.rawPlane.push(this.plane.toPlane(raw));
     this.rawScreen.push(cursorScreen);
     this.revisionCount++;
@@ -112,6 +123,26 @@ export class StrokeSession {
       maxY = Math.max(maxY, p.y);
     }
     return Math.hypot(maxX - minX, maxY - minY);
+  }
+
+  /** Diagonal of the stroke's world-space bounding box in millimetres. */
+  worldExtent(): number {
+    const points = this.worldPath();
+    let minX = Infinity;
+    let minY = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let maxZ = -Infinity;
+    for (const p of points) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      minZ = Math.min(minZ, p.z);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+      maxZ = Math.max(maxZ, p.z);
+    }
+    return Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
   }
 
   recognize(options: Partial<RecognizeOptions> = {}): RecognizeResult {

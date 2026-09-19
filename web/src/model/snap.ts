@@ -38,6 +38,8 @@ export interface Projector {
   project(world: Vec3): Vec2 | null;
   /** Screen pixels → world ray. */
   ray(screen: Vec2): { origin: Vec3; dir: Vec3 };
+  /** World millimetres per screen pixel at `world`, when the viewport can report it. */
+  worldPerPixel?(world: Vec3): number;
 }
 
 export interface SnapTargets {
