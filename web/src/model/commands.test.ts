@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Commands, parseDimensionSpec } from './commands';
-import { makeRect, Sketch, type CircleEntity, type LineEntity, type RectEntity } from './sketch';
+import { makeRect, Sketch, type CircleEntity, type LineEntity, type RectEntity, type SolidEntity } from './sketch';
 import { v3 } from './vec';
 
 describe('parseDimensionSpec', () => {
@@ -131,18 +131,94 @@ describe('Commands: circles', () => {
     expect(restored.last).toEqual({ id: 'e3', type: 'circle', center: v3(100, 200, 300), normal: v3(0, 1, 0), radius: 50 });
   });
 
-  it('refuses to extrude a circle and validates circle inputs', () => {
+  it('extrudes a circle and validates circle inputs', () => {
     const sketch = new Sketch();
     const commands = new Commands(sketch);
     const added = commands.addCircle(v3(100, 200, 300), v3(0, 1, 0), 50);
     const id = added.ok ? added.entity.id : '';
-    expect(commands.extrude(id, 100).ok).toBe(false);
+    expect(commands.extrude(id, 100).ok).toBe(true);
+    expect(sketch.get(id)?.type).toBe('cylinder');
+    expect((sketch.get(id) as { radius: number }).radius).toBe(50);
+    expect(commands.undo()).toMatch(/extrude/);
     expect((sketch.get(id) as CircleEntity).radius).toBe(50);
+    expect(commands.redo()).toMatch(/extrude/);
+    expect(sketch.get(id)?.type).toBe('cylinder');
     expect(commands.deleteEntity(id).ok).toBe(true);
     expect(sketch.size).toBe(0);
     commands.undo();
     expect(sketch.size).toBe(1);
     expect(commands.addCircle(v3(0, 0, 0), v3(0, 0, 0), 10).ok).toBe(false);
     expect(commands.addCircle(v3(0, 0, 0), v3(0, 0, 1), -5).ok).toBe(false);
+  });
+});
+
+describe('Commands.extrudeMany', () => {
+  function setup() {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const corners = makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300);
+    const a = sketch.addEntity({ type: 'rect', corners });
+    const b = sketch.addEntity({ type: 'circle', center: v3(700, 200, 0), normal: v3(0, 0, 1), radius: 50 });
+    const previews: SolidEntity[] = [
+      { id: a.id, type: 'extrusion', corners, depth: 100 },
+      { id: b.id, type: 'cylinder', center: v3(700, 200, 0), normal: v3(0, 0, 1), radius: 50, depth: -200 },
+    ];
+    return { sketch, commands, previews };
+  }
+
+  it('applies mixed box and cylinder previews atomically and undoes both together', () => {
+    const { sketch, commands, previews } = setup();
+    const before = sketch.serialize();
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+    const result = commands.extrudeMany(previews);
+    expect(result.ok).toBe(true);
+    expect(sketch.all).toEqual(previews);
+    expect(reasons).toEqual(['extrude 2 shapes']);
+    const after = sketch.serialize();
+    expect(commands.undo()).toBe('extrude 2 shapes');
+    expect(sketch.serialize()).toBe(before);
+    expect(commands.redo()).toBe('extrude 2 shapes');
+    expect(sketch.serialize()).toBe(after);
+  });
+
+  it('validates every preview and rejects duplicates before any mutation', () => {
+    const { sketch, commands, previews } = setup();
+    const [box, cylinder] = previews;
+    if (cylinder.type !== 'cylinder') throw new Error('expected cylinder fixture');
+    const before = sketch.serialize();
+    const invalid: SolidEntity[][] = [
+      [box, { ...cylinder, depth: 0 }],
+      [box, { ...cylinder, depth: NaN }],
+      [box, { ...cylinder, radius: 0 }],
+      [box, { ...cylinder, normal: v3(0, 0, 0) }],
+      [box, { ...cylinder, id: 'missing' }],
+      [box, box],
+      [{ ...cylinder, id: box.id }],
+      [{ ...box, id: cylinder.id }],
+    ];
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+    for (const inputs of invalid) {
+      expect(commands.extrudeMany(inputs).ok).toBe(false);
+      expect(sketch.serialize()).toBe(before);
+    }
+    expect(reasons).toEqual([]);
+    expect(commands.undo()).toBe('add circle');
+  });
+
+  it('keeps single-shape undo labels and does not record empty or unchanged batches', () => {
+    const { sketch, commands, previews } = setup();
+    expect(commands.extrudeMany([previews[0]]).ok).toBe(true);
+    expect(commands.undo()).toBe('extrude 100 mm');
+    commands.redo();
+    const before = sketch.serialize();
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+    expect(commands.extrudeMany([])).toMatchObject({ ok: true, entities: [] });
+    expect(commands.extrudeMany([previews[0]])).toMatchObject({ ok: true, entities: [] });
+    expect(sketch.serialize()).toBe(before);
+    expect(reasons).toEqual([]);
+    expect(commands.undo()).toBe('extrude 100 mm');
   });
 });

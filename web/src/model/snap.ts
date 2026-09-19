@@ -204,7 +204,14 @@ export function snapCursor(context: SnapContext): SnapResult {
     for (const segment of targets.segments) {
       if (excludeEntityId && segment.entityId === excludeEntityId) continue;
       const { point } = closestPointOnSegmentToRay(ray.origin, ray.dir, segment.a, segment.b);
-      const world = segment.circle ? add(segment.circle.center, scale(normalize(sub(point, segment.circle.center)), segment.circle.radius)) : point;
+      const world = segment.circle
+        ? (() => {
+            const radial = sub(point, segment.circle.center);
+            const normal = normalize(segment.circle.normal);
+            const planar = sub(radial, scale(normal, dot(radial, normal)));
+            return add(segment.circle.center, scale(normalize(planar), segment.circle.radius));
+          })()
+        : point;
       const screen = projector.project(world);
       if (!screen) continue;
       const d = distance2(screen, cursor);

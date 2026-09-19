@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { recognizeStroke, simplifyRdp, type RecognizedRect } from './recognize';
 import { circleStroke, lineStroke, rectStroke, rotatePoints, scribbleStroke, seededRandom } from './test-helpers';
-import { v2 } from './vec';
+import { v2, type Vec2 } from './vec';
 
 function expectRectClose(rect: RecognizedRect, x0: number, y0: number, w: number, h: number, tolerance: number): void {
   const xs = rect.corners.map((c) => c.x);
@@ -10,6 +10,60 @@ function expectRectClose(rect: RecognizedRect, x0: number, y0: number, w: number
   expect(Math.max(...xs)).toBeCloseTo(x0 + w, -Math.log10(tolerance));
   expect(Math.min(...ys)).toBeCloseTo(y0, -Math.log10(tolerance));
   expect(Math.max(...ys)).toBeCloseTo(y0 + h, -Math.log10(tolerance));
+}
+
+function roughBowedRectStroke(x0: number, y0: number, width: number, height: number): Vec2[] {
+  const corners = [v2(x0, y0), v2(x0 + width, y0), v2(x0 + width, y0 + height), v2(x0, y0 + height)];
+  const sideSamples = [17, 11, 23, 14];
+  const cornerSamples = 4;
+  const cornerRadius = Math.min(width, height) * 0.07;
+  const bow = Math.min(width, height) * 0.045;
+  const jitter = Math.min(width, height) * 0.018;
+  const center = v2(x0 + width / 2, y0 + height / 2);
+  const rand = seededRandom(23);
+  const angle = 27 * Math.PI / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const rotateAroundCenter = (point: Vec2): Vec2 => {
+    const dx = point.x - center.x;
+    const dy = point.y - center.y;
+    return v2(center.x + dx * cos - dy * sin, center.y + dx * sin + dy * cos);
+  };
+  const points: Vec2[] = [];
+  for (let side = 0; side < corners.length; side++) {
+    const corner = corners[side];
+    const nextCorner = corners[(side + 1) % corners.length];
+    const dx = nextCorner.x - corner.x;
+    const dy = nextCorner.y - corner.y;
+    const length = Math.hypot(dx, dy);
+    const ux = dx / length;
+    const uy = dy / length;
+    const start = v2(corner.x + ux * cornerRadius, corner.y + uy * cornerRadius);
+    const end = v2(nextCorner.x - ux * cornerRadius, nextCorner.y - uy * cornerRadius);
+    for (let i = 0; i < sideSamples[side]; i++) {
+      const t = i / (sideSamples[side] - 1);
+      const sideOffset = bow * Math.sin(Math.PI * t);
+      const point = v2(
+        start.x + (end.x - start.x) * t - uy * sideOffset + (rand() - 0.5) * jitter,
+        start.y + (end.y - start.y) * t + ux * sideOffset + (rand() - 0.5) * jitter,
+      );
+      points.push(rotateAroundCenter(point));
+    }
+    const nextDx = corners[(side + 2) % corners.length].x - nextCorner.x;
+    const nextDy = corners[(side + 2) % corners.length].y - nextCorner.y;
+    const nextLength = Math.hypot(nextDx, nextDy);
+    const nextStart = v2(nextCorner.x + nextDx / nextLength * cornerRadius, nextCorner.y + nextDy / nextLength * cornerRadius);
+    for (let i = 1; i < cornerSamples; i++) {
+      const t = i / cornerSamples;
+      const oneMinusT = 1 - t;
+      const point = v2(
+        oneMinusT * oneMinusT * end.x + 2 * oneMinusT * t * nextCorner.x + t * t * nextStart.x + (rand() - 0.5) * jitter,
+        oneMinusT * oneMinusT * end.y + 2 * oneMinusT * t * nextCorner.y + t * t * nextStart.y + (rand() - 0.5) * jitter,
+      );
+      points.push(rotateAroundCenter(point));
+    }
+  }
+  return points;
 }
 
 describe('recognizeStroke: lines', () => {
@@ -57,6 +111,22 @@ describe('recognizeStroke: lines', () => {
 });
 
 describe('recognizeStroke: rectangles', () => {
+  it('keeps jittered, bowed, softened and rotated rectangles out of circle correction', () => {
+    const strokes = [
+      rectStroke(0, 0, 1000, 1000, { pointsPerSide: 12, jitter: 80 }),
+      rectStroke(0, 0, 1000, 1000, { pointsPerSide: 8, jitter: 120, overshoot: 0.04 }),
+      rotatePoints(rectStroke(0, 0, 1000, 1000, { pointsPerSide: 12, jitter: 80 }), 0.35, v2(500, 500)),
+      rectStroke(0, 0, 1400, 800, { pointsPerSide: 12, jitter: 90, gapFraction: 0.005 }),
+      roughBowedRectStroke(0, 0, 1000, 700),
+    ];
+    for (const stroke of strokes) expect(recognizeStroke(stroke).shape?.kind).toBe('rect');
+  });
+
+  it('does not correct an open three-sided angular stroke into a circle', () => {
+    const stroke = rectStroke(0, 0, 1000, 1000, { pointsPerSide: 12, jitter: 70, gapFraction: 0.2 });
+    expect(recognizeStroke(stroke).shape?.kind).not.toBe('circle');
+  });
+
   it('recognises a clean axis-aligned rectangle', () => {
     const result = recognizeStroke(rectStroke(0, 0, 4000, 3000));
     expect(result.shape?.kind).toBe('rect');

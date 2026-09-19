@@ -194,4 +194,38 @@ describe('extrusion gesture transaction', () => {
     edit.update(v2(0, 100), true, 'mouse', UP);
     expect(edit.depth).toBe(-251);
   });
+
+  it('reports geometry changes without treating face selection as an edit', () => {
+    const session = new ExtrusionSession(profile(), 1, 0, 0);
+    expect(session.changed).toBe(false);
+    session.setPull(100);
+    expect(session.changed).toBe(true);
+    session.setPull(0);
+    expect(session.changed).toBe(false);
+    session.setFace(1);
+    expect(session.changed).toBe(false);
+    const box = new ExtrusionSession({ ...profile(), type: 'extrusion', depth: 300 }, 1, 0, 0);
+    expect(box.changed).toBe(false);
+    box.setFace(2);
+    expect(box.changed).toBe(false);
+    box.setPull(50);
+    expect(box.depth).toBe(300);
+    expect(box.changed).toBe(true);
+  });
+
+  it('reports circle and cylinder cap changes without editing their sources', () => {
+    const profile = { id: 'c', type: 'circle' as const, center: v3(100, 200, 0), normal: v3(0, 0, 1), radius: 50 };
+    const circle = new ExtrusionSession(profile, 1, 0, 0);
+    expect(circle.changed).toBe(false);
+    circle.setPull(100);
+    expect(circle.changed).toBe(true);
+    circle.setPull(0);
+    expect(circle.changed).toBe(false);
+    const cylinder = new ExtrusionSession({ ...profile, type: 'cylinder', depth: 300 }, 1, 0, 0);
+    expect(cylinder.changed).toBe(false);
+    cylinder.setFace(1);
+    cylinder.setPull(50);
+    expect(cylinder.changed).toBe(true);
+    expect(profile.center).toEqual(v3(100, 200, 0));
+  });
 });

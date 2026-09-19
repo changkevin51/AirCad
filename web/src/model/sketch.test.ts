@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { circlePoints, entityTriangles, makeRect, rectFrame, Sketch } from './sketch';
+import { circlePoints, entityTriangles, makeRect, rectFrame, Sketch, type EntityInput } from './sketch';
 import { distance, dot, normalize, sub, v3 } from './vec';
 
 const floor = (): [ReturnType<typeof v3>, ReturnType<typeof v3>, ReturnType<typeof v3>, ReturnType<typeof v3>] =>
@@ -160,5 +160,50 @@ describe('Sketch: circles', () => {
     }
     expect(sketch.size).toBe(0);
     expect(sketch.canUndo).toBe(false);
+  });
+});
+
+describe('Sketch.replaceEntities', () => {
+  it('replaces multiple entities with stable IDs in one event and undo step', () => {
+    const sketch = new Sketch();
+    const a = sketch.addEntity({ type: 'rect', corners: floor() });
+    const b = sketch.addEntity({ type: 'circle', center: v3(6000, 0, 0), normal: v3(0, 0, 1), radius: 50 });
+    const untouched = sketch.addEntity({ type: 'line', a: v3(0, 0, 0), b: v3(0, 0, 20) });
+    const before = sketch.serialize();
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+    const inputs: (EntityInput & { id: string })[] = [
+      { id: a.id, type: 'extrusion', corners: floor(), depth: 100 },
+      { id: b.id, type: 'cylinder', center: v3(6000, 0, 0), normal: v3(0, 0, 1), radius: 50, depth: -200 },
+    ];
+    expect(sketch.replaceEntities(inputs, 'extrude 2 shapes')).toHaveLength(2);
+    expect(reasons).toEqual(['extrude 2 shapes']);
+    expect(sketch.all.map((entity) => entity.id)).toEqual([a.id, b.id, untouched.id]);
+    expect(sketch.get(untouched.id)).toBe(untouched);
+    const after = sketch.serialize();
+    expect(sketch.undo()).toBe('extrude 2 shapes');
+    expect(sketch.serialize()).toBe(before);
+    expect(sketch.redo()).toBe('extrude 2 shapes');
+    expect(sketch.serialize()).toBe(after);
+    if (inputs[0].type === 'extrusion') inputs[0].corners[0].x = 999;
+    expect(sketch.serialize()).toBe(after);
+  });
+
+  it('rejects missing, duplicate, and invalid replacements without partial edits or history', () => {
+    const sketch = new Sketch();
+    const a = sketch.addEntity({ type: 'rect', corners: floor() });
+    const b = sketch.addEntity({ type: 'rect', corners: floor() });
+    const before = sketch.serialize();
+    const first = { id: a.id, type: 'extrusion' as const, corners: floor(), depth: 100 };
+    const second = { ...first, id: b.id };
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+    expect(sketch.replaceEntities([first, { ...second, id: 'missing' }])).toBeNull();
+    expect(sketch.replaceEntities([first, first])).toBeNull();
+    expect(() => sketch.replaceEntities([first, { ...second, depth: NaN }])).toThrow();
+    expect(sketch.replaceEntities([])).toEqual([]);
+    expect(sketch.serialize()).toBe(before);
+    expect(reasons).toEqual([]);
+    expect(sketch.undo()).toBe('add rect');
   });
 });

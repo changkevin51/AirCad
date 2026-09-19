@@ -36,6 +36,18 @@ export interface ExtrusionEntity {
   depth: number;
 }
 
+/** A closed circular profile swept along its stored unit normal by a signed depth in mm. */
+export interface CylinderEntity {
+  id: string;
+  type: 'cylinder';
+  /** Centre of the base circle. The far cap is `center + normal * depth`. */
+  center: Vec3;
+  /** Unit axis. A negative depth still uses this same stored axis. */
+  normal: Vec3;
+  radius: number;
+  depth: number;
+}
+
 export interface CircleEntity {
   id: string;
   type: 'circle';
@@ -46,13 +58,16 @@ export interface CircleEntity {
 
 export type CircleGeometry = Pick<CircleEntity, 'center' | 'normal' | 'radius'>;
 
-export type ProfileEntity = RectEntity | ExtrusionEntity;
+export type RectProfileEntity = RectEntity | ExtrusionEntity;
+export type SolidEntity = ExtrusionEntity | CylinderEntity;
+export type ProfileEntity = RectProfileEntity | CircleEntity | CylinderEntity;
 export type Entity = LineEntity | ProfileEntity | CircleEntity;
 export type EntityInput =
   | { type: 'line'; a: Vec3; b: Vec3 }
   | { type: 'rect'; corners: RectEntity['corners'] }
   | { type: 'extrusion'; corners: RectEntity['corners']; depth: number }
-  | { type: 'circle'; center: Vec3; normal: Vec3; radius: number };
+  | { type: 'circle'; center: Vec3; normal: Vec3; radius: number }
+  | { type: 'cylinder'; center: Vec3; normal: Vec3; radius: number; depth: number };
 
 export interface Vertex {
   entityId: string;
@@ -66,7 +81,8 @@ export interface Segment {
   a: Vec3;
   b: Vec3;
   index: number;
-  circle?: CircleEntity;
+  /** Analytic circle supporting this segment, used to project ring snaps exactly. */
+  circle?: CircleGeometry;
 }
 
 export interface BoundingBox {
@@ -90,7 +106,7 @@ export type SketchListener = (reason: string) => void;
 
 export const lineLength = (line: LineEntity): number => distance(line.a, line.b);
 
-export function rectFrame(rect: ProfileEntity): { origin: Vec3; uDir: Vec3; vDir: Vec3; width: number; height: number } {
+export function rectFrame(rect: RectProfileEntity): { origin: Vec3; uDir: Vec3; vDir: Vec3; width: number; height: number } {
   const [c0, c1, , c3] = rect.corners;
   const uEdge = sub(c1, c0);
   const vEdge = sub(c3, c0);
@@ -109,7 +125,7 @@ export function makeRect(origin: Vec3, uDir: Vec3, vDir: Vec3, width: number, he
   return [clone(origin), add(origin, u), add(add(origin, u), v), add(origin, v)];
 }
 
-export function rectNormal(rect: ProfileEntity): Vec3 {
+export function rectNormal(rect: RectProfileEntity): Vec3 {
   const { uDir, vDir } = rectFrame(rect);
   return normalize(v3(
     uDir.y * vDir.z - uDir.z * vDir.y,
@@ -119,13 +135,32 @@ export function rectNormal(rect: ProfileEntity): Vec3 {
 }
 
 /** A positive dominant axis makes depth independent of the direction the rectangle was drawn. */
-export function extrusionNormal(profile: ProfileEntity): Vec3 {
+export function extrusionNormal(profile: RectProfileEntity): Vec3 {
   const normal = rectNormal(profile);
   const dominant = [normal.x, normal.y, normal.z].reduce((a, b) => Math.abs(a) >= Math.abs(b) ? a : b);
   return dominant < 0 ? scale(normal, -1) : normal;
 }
 
 export const extrusionOffset = (entity: ExtrusionEntity): Vec3 => scale(extrusionNormal(entity), entity.depth);
+
+/** The signed axial offset for a cylinder. */
+export const cylinderOffset = (entity: Pick<CylinderEntity, 'normal' | 'depth'>): Vec3 =>
+  scale(normalize(entity.normal), entity.depth);
+
+export const cylinderTopCenter = (entity: Pick<CylinderEntity, 'center' | 'normal' | 'depth'>): Vec3 =>
+  add(entity.center, cylinderOffset(entity));
+
+function circleExtremaPoints(circle: CircleGeometry): Vec3[] {
+  const normal = normalize(circle.normal);
+  return (['x', 'y', 'z'] as const).flatMap((axis) => {
+    const axisVector = axis === 'x' ? v3(1, 0, 0) : axis === 'y' ? v3(0, 1, 0) : v3(0, 0, 1);
+    const projected = sub(axisVector, scale(normal, dot(axisVector, normal)));
+    const tangentLength = length(projected);
+    if (tangentLength < 1e-12) return [clone(circle.center), clone(circle.center)];
+    const offset = scale(projected, circle.radius / tangentLength);
+    return [add(circle.center, offset), sub(circle.center, offset)];
+  });
+}
 
 /** Reject collapsed, skewed or non-planar profiles before making a solid. */
 export function isExtrudableProfile(corners: readonly Vec3[]): boolean {
@@ -144,6 +179,10 @@ export function isValidCircle(circle: CircleGeometry): boolean {
   return !!circle.center && !!circle.normal && isFinite3(circle.center) && isFinite3(circle.normal)
     && Number.isFinite(length(circle.normal)) && length(circle.normal) > 1e-12
     && Number.isFinite(circle.radius) && circle.radius >= 1e-6;
+}
+
+export function isValidCylinder(cylinder: Pick<CylinderEntity, 'center' | 'normal' | 'radius' | 'depth'>): boolean {
+  return isValidCircle(cylinder) && Number.isFinite(cylinder.depth) && Math.abs(cylinder.depth) >= 1e-6;
 }
 
 export function circleFrame(circle: Pick<CircleEntity, 'normal'>): { uDir: Vec3; vDir: Vec3 } {
@@ -165,6 +204,12 @@ export function entityVertices(entity: Entity): Vertex[] {
   if (entity.type === 'circle') {
     return [entity.center, ...circlePoints(entity, 4)].map((point, index) => ({ entityId: entity.id, point, index }));
   }
+  if (entity.type === 'cylinder') {
+    const top = cylinderTopCenter(entity);
+    const baseRing = circlePoints(entity, 4);
+    const topRing = baseRing.map((point) => add(point, cylinderOffset(entity)));
+    return [entity.center, ...baseRing, top, ...topRing].map((point, index) => ({ entityId: entity.id, point, index }));
+  }
   return entityPoints(entity).map((point, index) => ({ entityId: entity.id, point, index }));
 }
 
@@ -173,6 +218,23 @@ export function entitySegments(entity: Entity): Segment[] {
   if (entity.type === 'circle') {
     const points = circlePoints(entity);
     return points.map((a, index) => ({ entityId: entity.id, a, b: points[(index + 1) % points.length], index, circle: entity }));
+  }
+  if (entity.type === 'cylinder') {
+    const offset = cylinderOffset(entity);
+    const base = circlePoints(entity);
+    const top = base.map((point) => add(point, offset));
+    const circleBase: CircleGeometry = { center: clone(entity.center), normal: clone(entity.normal), radius: entity.radius };
+    const circleTop: CircleGeometry = { center: cylinderTopCenter(entity), normal: clone(entity.normal), radius: entity.radius };
+    return [
+      ...base.map((a, index) => ({ entityId: entity.id, a, b: base[(index + 1) % base.length], index, circle: circleBase })),
+      ...top.map((a, index) => ({ entityId: entity.id, a, b: top[(index + 1) % top.length], index: index + base.length, circle: circleTop })),
+      ...circlePoints(entity, 4).map((a, index) => ({
+        entityId: entity.id,
+        a,
+        b: add(a, offset),
+        index: index + base.length * 2,
+      })),
+    ];
   }
   const base = entity.corners.map((corner, index) => ({
     entityId: entity.id,
@@ -192,6 +254,19 @@ export function entitySegments(entity: Entity): Segment[] {
 /** Quad faces used by both the renderer and face picking. */
 export function entityFaces(entity: Entity): Vec3[][] {
   if (entity.type === 'line' || entity.type === 'circle') return [];
+  if (entity.type === 'cylinder') {
+    const base = circlePoints(entity);
+    const offset = cylinderOffset(entity);
+    const top = base.map((point) => add(point, offset));
+    const positive = entity.depth >= 0;
+    return [
+      positive ? base.slice().reverse() : base,
+      positive ? top : top.slice().reverse(),
+      ...base.map((a, index) => positive
+        ? [a, base[(index + 1) % base.length], top[(index + 1) % base.length], top[index]]
+        : [a, top[index], top[(index + 1) % base.length], base[(index + 1) % base.length]]),
+    ];
+  }
   if (entity.type === 'rect') return [[...entity.corners]];
   const offset = extrusionOffset(entity);
   const base = entity.corners;
@@ -203,7 +278,7 @@ export function entityFaces(entity: Entity): Vec3[][] {
 }
 
 export function entityMidpoints(entity: Entity): Vertex[] {
-  if (entity.type === 'circle') return [];
+  if (entity.type === 'circle' || entity.type === 'cylinder') return [];
   return entitySegments(entity).map((segment) => ({
     entityId: entity.id,
     point: lerp(segment.a, segment.b, 0.5),
@@ -214,6 +289,7 @@ export function entityMidpoints(entity: Entity): Vertex[] {
 export function entityCenter(entity: Entity): Vec3 {
   if (entity.type === 'line') return lerp(entity.a, entity.b, 0.5);
   if (entity.type === 'circle') return clone(entity.center);
+  if (entity.type === 'cylinder') return add(entity.center, scale(cylinderOffset(entity), 0.5));
   const center = lerp(entity.corners[0], entity.corners[2], 0.5);
   return entity.type === 'extrusion' ? add(center, scale(extrusionOffset(entity), 0.5)) : center;
 }
@@ -222,13 +298,14 @@ export function entityPoints(entity: Entity): Vec3[] {
   if (entity.type === 'line') return [entity.a, entity.b];
   if (entity.type === 'rect') return [...entity.corners];
   if (entity.type === 'circle') {
-    const normal = normalize(entity.normal);
-    return (['x', 'y', 'z'] as const).flatMap((axis) => {
-      const direction = scale(normal, -normal[axis]);
-      direction[axis] += 1;
-      const offset = scale(normalize(direction), entity.radius);
-      return [add(entity.center, offset), sub(entity.center, offset)];
-    });
+    return circleExtremaPoints(entity);
+  }
+  if (entity.type === 'cylinder') {
+    return [...circleExtremaPoints(entity), ...circleExtremaPoints({
+      center: cylinderTopCenter(entity),
+      normal: entity.normal,
+      radius: entity.radius,
+    })];
   }
   const offset = extrusionOffset(entity);
   return [...entity.corners, ...entity.corners.map((corner) => add(corner, offset))];
@@ -239,12 +316,38 @@ export function entityTriangles(entity: Entity): [Vec3, Vec3, Vec3][] {
     const points = circlePoints(entity);
     return points.map((point, index) => [entity.center, point, points[(index + 1) % points.length]]);
   }
-  return entityFaces(entity).flatMap(([a, b, c, d]) => [[a, b, c], [a, c, d]] as [Vec3, Vec3, Vec3][]);
+  if (entity.type === 'cylinder') {
+    const base = circlePoints(entity);
+    const top = base.map((point) => add(point, cylinderOffset(entity)));
+    const baseCenter = entity.center;
+    const topCenter = cylinderTopCenter(entity);
+    const triangles: [Vec3, Vec3, Vec3][] = [];
+    const positive = entity.depth >= 0;
+    for (let index = 0; index < base.length; index += 1) {
+      const next = (index + 1) % base.length;
+      // Reverse the base winding so its normal points away from the solid for positive depth.
+      const baseTriangle: [Vec3, Vec3, Vec3] = [baseCenter, base[next], base[index]];
+      const topTriangle: [Vec3, Vec3, Vec3] = [topCenter, top[index], top[next]];
+      const sideA: [Vec3, Vec3, Vec3] = [base[index], base[next], top[next]];
+      const sideB: [Vec3, Vec3, Vec3] = [base[index], top[next], top[index]];
+      const reverse = ([a, b, c]: [Vec3, Vec3, Vec3]): [Vec3, Vec3, Vec3] => [a, c, b];
+      triangles.push(...(positive
+        ? [baseTriangle, topTriangle, sideA, sideB]
+        : [reverse(baseTriangle), reverse(topTriangle), reverse(sideA), reverse(sideB)]));
+    }
+    return triangles;
+  }
+  return entityFaces(entity).flatMap((face) => {
+    if (face.length < 3) return [];
+    const [origin, ...rest] = face;
+    return rest.slice(1).map((point, index) => [origin, rest[index], point] as [Vec3, Vec3, Vec3]);
+  });
 }
 
 export function describeEntity(entity: Entity): string {
   if (entity.type === 'line') return `line ${formatMm(lineLength(entity))}`;
   if (entity.type === 'circle') return `circle diameter ${formatMm(entity.radius * 2)}`;
+  if (entity.type === 'cylinder') return `cylinder diameter ${formatMm(entity.radius * 2)} x depth ${formatMm(entity.depth)}`;
   const { width, height } = rectFrame(entity);
   if (entity.type === 'extrusion') return `extrusion ${formatMm(width)} x ${formatMm(height)} x ${formatMm(entity.depth)}`;
   return `rectangle ${formatMm(width)} x ${formatMm(height)}`;
@@ -256,9 +359,13 @@ export function formatMm(value: number): string {
 }
 
 function validateInput(input: EntityInput): void {
-  if (!['line', 'rect', 'extrusion', 'circle'].includes(input.type)) throw new Error('unsupported entity type');
+  if (!['line', 'rect', 'extrusion', 'circle', 'cylinder'].includes(input.type)) throw new Error('unsupported entity type');
   if (input.type === 'circle') {
     if (!isValidCircle(input)) throw new Error('a circle needs a finite center, a non-zero normal, and a positive radius');
+    return;
+  }
+  if (input.type === 'cylinder') {
+    if (!isValidCylinder(input)) throw new Error('a cylinder needs a finite circle and a non-zero finite depth');
     return;
   }
   const points = input.type === 'line' ? [input.a, input.b] : input.corners;
@@ -351,6 +458,14 @@ export class Sketch {
     if (input.type === 'line') return { id, type: 'line', a: clone(input.a), b: clone(input.b) };
     if (input.type === 'extrusion') return { id, type: 'extrusion', corners: input.corners.map(clone) as RectEntity['corners'], depth: input.depth };
     if (input.type === 'circle') return { id, type: 'circle', center: clone(input.center), normal: normalize(input.normal), radius: input.radius };
+    if (input.type === 'cylinder') return {
+      id,
+      type: 'cylinder',
+      center: clone(input.center),
+      normal: normalize(input.normal),
+      radius: input.radius,
+      depth: input.depth,
+    };
     return { id, type: 'rect', corners: input.corners.map(clone) as [Vec3, Vec3, Vec3, Vec3] };
   }
 
@@ -400,6 +515,28 @@ export class Sketch {
       },
       revert: () => {
         this.entities = this.entities.map((entity) => (entity.id === id ? previous : entity));
+      },
+    });
+    return next;
+  }
+
+  replaceEntities(inputs: readonly (EntityInput & { id: string })[], label?: string): Entity[] | null {
+    if (!inputs.length) return [];
+    const ids = new Set(inputs.map((input) => input.id));
+    if (ids.size !== inputs.length || inputs.some((input) => !this.get(input.id))) return null;
+    const previous = new Map(this.entities.filter((entity) => ids.has(entity.id)).map((entity) => [entity.id, entity]));
+    const next = inputs.map((input) => {
+      validateInput(input);
+      return this.materialize(input, input.id);
+    });
+    const replacements = new Map(next.map((entity) => [entity.id, entity]));
+    this.execute({
+      label: label ?? `edit ${next.length} entities`,
+      apply: () => {
+        this.entities = this.entities.map((entity) => replacements.get(entity.id) ?? entity);
+      },
+      revert: () => {
+        this.entities = this.entities.map((entity) => previous.get(entity.id) ?? entity);
       },
     });
     return next;

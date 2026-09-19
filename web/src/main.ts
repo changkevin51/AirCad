@@ -17,7 +17,7 @@ import { defaultFaceIndex, pickProfileFace, profileFaces } from './model/faces';
 import { pickFace } from './model/pick';
 import { nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
 import { adaptiveGridStep, snapCursor, type SnapResult } from './model/snap';
-import { circlePoints, describeEntity, entityMidpoints, entityVertices, formatMm, isExtrudableProfile, Sketch, type Entity, type ExtrusionEntity } from './model/sketch';
+import { circlePoints, describeEntity, entityMidpoints, entityVertices, formatMm, isExtrudableProfile, Sketch, type CircleGeometry, type Entity, type ExtrusionEntity, type SolidEntity } from './model/sketch';
 import { anchorAfterCommit, buildEntityFromStroke, StrokeSession } from './model/stroke';
 import { add, length2, nearlyEqual, normalize2, scale, sub2, v2, type Vec2, type Vec3 } from './model/vec';
 import { SketchRenderer } from './render/sketch-renderer';
@@ -39,6 +39,19 @@ const GRID_MIN_PX = 8;
 const PALM_ORBIT_GAIN = 1.0;
 const LOCK_AXES: Partial<Record<HoldAction, Axis>> = { lockX: 'x', lockY: 'y', lockZ: 'z' };
 const PLANE_FOR_VIEW: Record<Exclude<ViewPreset, 'iso'>, PlaneKind> = { top: 'XY', front: 'XZ', right: 'YZ' };
+
+function sameSolidPreview(a: SolidEntity, b: SolidEntity): boolean {
+  if (a.type !== b.type || a.depth !== b.depth) return false;
+  if (a.type === 'extrusion' && b.type === 'extrusion') {
+    return a.corners.every((corner, index) => nearlyEqual(corner, b.corners[index], 1e-6));
+  }
+  if (a.type === 'cylinder' && b.type === 'cylinder') {
+    return nearlyEqual(a.center, b.center, 1e-6)
+      && nearlyEqual(a.normal, b.normal, 1e-6)
+      && Math.abs(a.radius - b.radius) <= 1e-6;
+  }
+  return false;
+}
 
 class App {
   private readonly platform = detectPlatform();
@@ -302,7 +315,7 @@ class App {
         if (this.extrusion) {
           if (this.extrusion.cycleFace()) this.toasts.show(`Extruding ${this.extrusion.face.label} face`);
           else this.toasts.show('Release to switch faces');
-          this.sketchRenderer.setActiveFace(this.extrusion.face.quad);
+          this.sketchRenderer.setActiveFace(this.extrusion.face);
         } else {
           this.setPlaneKind(nextPlaneKind(this.plane.kind), true);
         }
@@ -377,7 +390,7 @@ class App {
         else if (this.extrusion === session) {
           session.setPull(pull);
           this.sketchRenderer.setExtrusion(session.preview);
-          this.sketchRenderer.setActiveFace(session.face.quad);
+          this.sketchRenderer.setActiveFace(session.face.outline);
         }
       });
       return;
@@ -387,7 +400,15 @@ class App {
       this.toasts.show('Draw something first, then press L to set its size', 'error');
       return;
     }
-    const prompt = target.type === 'line' ? `Length of ${describeEntity(target)} (mm):` : target.type === 'extrusion' ? 'Extrusion depth (mm) or base size (W x H mm):' : target.type === 'circle' ? 'Circle diameter (mm; e.g. 50 or 5 cm):' : `Size of ${describeEntity(target)} (W x H mm):`;
+    const prompt = target.type === 'line'
+      ? `Length of ${describeEntity(target)} (mm):`
+      : target.type === 'extrusion'
+        ? 'Extrusion depth (mm) or base size (W x H mm):'
+        : target.type === 'cylinder'
+          ? 'Cylinder pull depth (mm; negative pushes the active cap in):'
+          : target.type === 'circle'
+            ? 'Circle diameter (mm; e.g. 50 or 5 cm):'
+            : `Size of ${describeEntity(target)} (W x H mm):`;
     this.measure.open(prompt, (text) => {
       const result = this.commands.setDimension(target.id, text);
       this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'success' : 'error');
@@ -418,7 +439,7 @@ class App {
   private selectAtCursor(): void {
     const entity = this.entityAtCursor();
     this.selectEntity(entity);
-    if (entity) this.toasts.show(`Selected ${describeEntity(entity)}${entity.type === 'circle' ? ' · L to set diameter' : entity.type !== 'line' ? ' · Q to extrude' : ''}`);
+    if (entity) this.toasts.show(`Selected ${describeEntity(entity)}${entity.type === 'line' ? '' : entity.type === 'circle' ? ' · Q to extrude · L to set diameter' : ' · Q to push/pull'}`);
   }
 
   private beginExtrusion(): void {
@@ -428,14 +449,10 @@ class App {
     }
     const target = this.selected ?? this.entityAtCursor();
     if (!target || target.type === 'line') {
-      this.toasts.show('Select a closed rectangle: point inside it and pinch, click, or press S.', 'error', 5000);
+      this.toasts.show('Select a closed rectangle or circle: point inside it and pinch, click, or press S.', 'error', 5000);
       return;
     }
-    if (target.type === 'circle') {
-      this.toasts.show('Circle extrusion is not supported yet. Press L to set its diameter.', 'error');
-      return;
-    }
-    if (!isExtrudableProfile(target.corners)) {
+    if ((target.type === 'rect' || target.type === 'extrusion') && !isExtrudableProfile(target.corners)) {
       this.toasts.show('This shape is not a planar rectangle. Draw a new closed rectangle to extrude.', 'error');
       return;
     }
@@ -448,7 +465,7 @@ class App {
     this.hover = null;
     this.sketchRenderer.setHover(null);
     this.sketchRenderer.setExtrusion(this.extrusion.preview);
-    this.sketchRenderer.setActiveFace(this.extrusion.face.quad);
+    this.sketchRenderer.setActiveFace(this.extrusion.face);
     this.updateExtrusion();
     this.toasts.show(`Extruding ${this.extrusion.face.label} face · hover another face or Tab to switch · pinch/drag to pull`, 'info', 6000);
   }
@@ -468,7 +485,7 @@ class App {
     const hand = this.cursor.hand;
     const source = this.cursorSource;
     const gripping = this.held.has('draw') || !!hand?.pinching;
-    const before = { depth: session.depth, corners: session.corners, faceIndex: session.faceIndex };
+    const before = { preview: session.preview, faceIndex: session.faceIndex };
     if (!session.dragging && !gripping && this.cursor.position && source) {
       const hovered = pickProfileFace(session.currentFaces(), this.cursor.position, projector);
       if (hovered !== null && hovered !== session.faceIndex) session.setFace(hovered);
@@ -483,9 +500,9 @@ class App {
       if (length2(projected) >= 2) along = normalize2(projected);
     }
     session.update(this.cursor.position, gripping, source, along);
-    if (session.depth !== before.depth || session.corners !== before.corners || session.faceIndex !== before.faceIndex) {
+    if (!sameSolidPreview(session.preview, before.preview) || session.faceIndex !== before.faceIndex) {
       this.sketchRenderer.setExtrusion(session.preview);
-      this.sketchRenderer.setActiveFace(session.face.quad);
+      this.sketchRenderer.setActiveFace(session.face);
     }
   }
 
@@ -496,13 +513,21 @@ class App {
       this.toasts.show('Set a non-zero depth: pinch and move up/down, or press L to type one.', 'error');
       return;
     }
-    if (!isExtrudableProfile(session.corners)) {
+    const preview = session.preview;
+    if (preview.type === 'extrusion' && !isExtrudableProfile(preview.corners)) {
       this.toasts.show('The preview is degenerate — pull the face back out or press Esc.', 'error');
+      return;
+    }
+    if (preview.type === 'cylinder' && (!Number.isFinite(preview.radius) || preview.radius < 1e-6 || !Number.isFinite(preview.depth) || Math.abs(preview.depth) < 1e-6)) {
+      this.toasts.show('The preview is degenerate — pull the cap back out or press Esc.', 'error');
       return;
     }
     // Clear the preview transaction before the command emits its model change.
     this.extrusion = null;
-    const result = this.commands.extrude(session.profile.id, session.depth, session.corners);
+    const geometry = preview.type === 'extrusion'
+      ? preview.corners
+      : { center: preview.center, normal: preview.normal, radius: preview.radius } satisfies CircleGeometry;
+    const result = this.commands.extrude(session.profile.id, session.depth, geometry);
     this.sketchRenderer.setExtrusion(null);
     this.sketchRenderer.setActiveFace(null);
     this.sketchRenderer.setSketch(this.sketch.all);
@@ -655,7 +680,13 @@ class App {
       tolerancePx: SNAP_TOLERANCE_PX,
       gridStep: this.gridEnabled ? this.gridStep : 0,
     });
-    const commit = input.type === 'line' ? this.commands.addLine(input.a, input.b) : input.type === 'circle' ? this.commands.addCircle(input.center, input.normal, input.radius) : this.commands.addRect(input.corners);
+    const commit = input.type === 'line'
+      ? this.commands.addLine(input.a, input.b)
+      : input.type === 'circle'
+        ? this.commands.addCircle(input.center, input.normal, input.radius)
+        : input.type === 'rect'
+          ? this.commands.addRect(input.corners)
+          : { ok: false as const, error: 'A cylinder cannot be created from a sketch stroke' };
     if (!commit.ok) {
       this.toasts.show(commit.error, 'error');
       return;
@@ -814,8 +845,8 @@ class App {
         ];
         const target = this.selected ?? this.hover;
         if (this.hover) hints.push({ key: key('select'), label: 'select' });
-        if (target && target.type !== 'line' && target.type !== 'circle') hints.push({ key: key('extrude'), label: 'extrude' });
-        if (target) hints.push({ key: key('measure'), label: target.type === 'circle' ? 'diameter' : 'size' }, { key: key('delete'), label: 'delete' });
+        if (target && target.type !== 'line') hints.push({ key: key('extrude'), label: target.type === 'circle' ? 'extrude cylinder' : 'push/pull' });
+        if (target) hints.push({ key: key('measure'), label: target.type === 'circle' ? 'diameter' : target.type === 'cylinder' ? 'depth' : 'size' }, { key: key('delete'), label: 'delete' });
         else if (this.sketch.size) hints.push({ key: key('measure'), label: 'size' }, { key: key('undo'), label: 'undo' });
         hints.push({ key: key('export'), label: 'FreeCAD' }, { key: key('help'), label: 'help' });
         return hints;
@@ -839,7 +870,13 @@ class App {
       },
       lastRecognition: () => this.lastRecognition,
       selected: () => this.selected,
-      extrusion: () => this.extrusion ? { depth: this.extrusion.depth, dragging: this.extrusion.dragging, face: this.extrusion.face.label, corners: this.extrusion.corners } : null,
+      extrusion: () => this.extrusion ? {
+        depth: this.extrusion.depth,
+        dragging: this.extrusion.dragging,
+        face: this.extrusion.face.label,
+        preview: this.extrusion.preview,
+        ...(this.extrusion.preview.type === 'extrusion' ? { corners: this.extrusion.preview.corners } : {}),
+      } : null,
     };
   }
 }
@@ -856,7 +893,7 @@ export interface AirCadApi {
   /** Reason and plane points of the most recent pen-up, for diagnostics. */
   lastRecognition(): { reason: string; points: Vec2[]; screenExtent: number } | null;
   selected(): Entity | null;
-  extrusion(): { depth: number; dragging: boolean; face: string; corners: ExtrusionEntity['corners'] } | null;
+  extrusion(): { depth: number; dragging: boolean; face: string; preview: SolidEntity; corners?: ExtrusionEntity['corners'] } | null;
 }
 
 declare global {

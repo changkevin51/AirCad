@@ -220,6 +220,6 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
 
 /** The point the work-plane anchor moves to after a commit. */
 export function anchorAfterCommit(entity: EntityInput): Vec3 {
-  if (entity.type === 'circle') return entity.center;
+  if (entity.type === 'circle' || entity.type === 'cylinder') return entity.center;
   return entity.type === 'line' ? entity.b : entity.corners[0];
 }

@@ -1,6 +1,6 @@
 # AirCAD
 
-A spatial CAD sketching app: draw lines, rectangles, and circles in millimetres on a 3D work plane, then extrude rectangles into solids using a webcam-tracked fingertip (stand-in for a digital pen) or the mouse. The browser owns the CAD model; Python tracks the hand and can export the model to FreeCAD.
+A spatial CAD sketching app: draw lines, rectangles, and circles in millimetres on a 3D work plane, then extrude rectangles into boxes and circles into cylinders using a webcam-tracked fingertip (stand-in for a digital pen) or the mouse. The browser owns the CAD model; Python tracks the hand and can export the model to FreeCAD.
 
 ## Requirements
 
@@ -73,19 +73,19 @@ If Windows or macOS asked for camera access on first launch, allow it and start 
 
 ## Draw a circle
 
-Hold **Space** or left-drag around most of a circle — roughly two-thirds of the way around or more. You can leave a sizable gap, wobble, or draw a circular squiggle; release to fit a clean circle automatically. The circle is stored as a true circle — center, radius, and plane — not a polygon, and works on the XY, XZ, and YZ work planes. Select it and press **L** to set its diameter. Circle extrusion (cylinders) and hole cutting are not supported yet.
+Hold **Space** or left-drag around most of a circle — roughly two-thirds of the way around or more. You can leave a sizable gap, wobble, or draw a circular squiggle; release to fit a clean circle automatically. The circle is stored as a true circle — center, radius, and plane — not a polygon, and works on the XY, XZ, and YZ work planes. Select it and press **L** to set its diameter. Press **Q**, pull the highlighted cap with a pinch or drag, then press **Enter** (or **Q**) to commit a cylinder. **L** during the preview sets an exact signed pull distance, such as `500` or `-250`.
 
 ## Extrude with your hand
 
-1. Draw a closed rectangle. New shapes are selected automatically. To select another shape, point inside it and pinch your thumb and index finger, click it, or press **S**. The selected outline stays highlighted.
-2. Press **Q** to start extrusion. The face most facing the camera is highlighted — hover another face of the same shape (while not pinching) or press **Tab** to switch which side you push/pull. **E** remains the FreeCAD export shortcut.
-3. Pinch thumb + index and move to pull the highlighted face **out**, or back to push it **in**. Pulling a cap face sets the depth; pulling a side face widens the box. Grid snapping applies to the pull distance. If tracking is lost, the preview freezes; show your hand, release, then pinch again to resume.
+1. Draw a closed rectangle or circle. New shapes are selected automatically. To select another shape, point inside it and pinch your thumb and index finger, click it, or press **S**. The selected outline stays highlighted.
+2. Press **Q** to start push/pull. The face most facing the camera is highlighted — hover another face of the same shape (while not pinching) or press **Tab** to switch which side you push/pull. **E** remains the FreeCAD export shortcut.
+3. Pinch thumb + index and move to pull the highlighted face **out**, or back to push it **in**. Pulling a box cap sets its depth; pulling a side face widens the box. Pulling a cylinder cap changes its signed depth. Grid snapping applies to the pull distance. If tracking is lost, the preview freezes; show your hand, release, then pinch again to resume.
 4. Release the pinch to pause. Reposition your hand and pinch again to continue. Hold **Shift** to orbit or **Ctrl** to pan even during a pull; the preview stays fixed while you move the view. Release the navigation key to continue pulling from the current position without a depth jump.
 5. Press **Enter** or **Q** to apply, or **Esc** to cancel. **L** types an exact pull distance for the active face (`500`, `-250`, or `2 m`); **0** shows the result in isometric view. A zero-depth preview cannot be applied.
 
-Without a webcam, use **Q**, then **left-drag** (or hold **Space** while moving) along the highlighted direction. Release to pause, then **Enter** to apply. Extrusion is one undoable edit; undo restores the rectangle. Select an existing solid and press **Q** to push/pull any of its six faces. **L** on a solid edits depth with one value or base size with `width x height`.
+Without a webcam, use **Q**, then **left-drag** (or hold **Space** while moving) along the highlighted direction. Release to pause, then **Enter** to apply. Extrusion is one undoable edit; undo restores the original rectangle or circle. Select an existing box or cylinder and press **Q** to push/pull a face. **L** on a solid edits depth with one value or a box base size with `width x height`.
 
-Extrusion currently supports the app's closed rectangular shapes. Lines and circles are not rectangular profiles and cannot be extruded.
+Extrusion supports closed rectangular and circular profiles. Lines cannot be extruded, and hole cutting is outside the current scope. Cylinders have circular end caps and curved sides; cap pulls preserve the circle's radius and axis while the active cap moves along that axis.
 
 ## Controls
 
@@ -130,7 +130,7 @@ Snapping priority while drawing: vertex → midpoint → axis-align to the strok
 | **Ctrl+Backspace** / **Cmd+Backspace** | Clear the sketch |
 | **Esc** | Cancel the current stroke / extrusion, deselect, or close overlays |
 | **S** | Select the shape under the cursor (also pinch or click) |
-| **Q** | Start push/pull on a selected rectangle or solid; press again to apply |
+| **Q** | Start push/pull on a selected rectangle, circle, or solid; press again to apply |
 | **Enter** | Apply the extrusion preview |
 | **L** | Type a line length, circle diameter, rectangle size (W x H), or extrusion depth; mm/cm/m accepted |
 | **E** | Export to FreeCAD |

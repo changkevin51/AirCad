@@ -8,7 +8,9 @@ import {
   makeRect,
   rectFrame,
   type Entity,
+  type CircleGeometry,
   type Sketch,
+  type SolidEntity,
 } from './sketch';
 import { add, distance, nearlyEqual, normalize, scale, sub, toArray, type Vec3 } from './vec';
 
@@ -25,9 +27,14 @@ export type CommandResult<T = Entity> =
   | { ok: true; entity: T; message: string }
   | { ok: false; error: string };
 
+export type BatchCommandResult =
+  | { ok: true; entities: Entity[]; message: string }
+  | { ok: false; error: string };
+
 export type ExportEntity =
   | { type: 'line' | 'rect' | 'extrusion'; points: [number, number, number][]; vector?: [number, number, number] }
-  | { type: 'circle'; center: [number, number, number]; normal: [number, number, number]; radius: number };
+  | { type: 'circle'; center: [number, number, number]; normal: [number, number, number]; radius: number }
+  | { type: 'cylinder'; center: [number, number, number]; normal: [number, number, number]; radius: number; depth: number };
 
 export interface ExportPayload {
   units: 'mm';
@@ -114,12 +121,66 @@ export class Commands {
     return entity ? this.deleteEntity(entity.id) : { ok: false, error: 'nothing to delete' };
   }
 
-  extrude(id: string, depth: number, corners?: [Vec3, Vec3, Vec3, Vec3]): CommandResult {
+  extrude(id: string, depth: number, geometry?: [Vec3, Vec3, Vec3, Vec3] | CircleGeometry): CommandResult {
+    const result = this.prepareExtrusion(id, depth, geometry);
+    if (!result.ok || result.entity === this.sketch.get(id)) return result;
+    const label = `extrude ${result.entity.type === 'cylinder' ? 'cylinder ' : ''}${formatMm(depth)}`;
+    const next = this.sketch.replaceEntity(id, result.entity, label);
+    return next ? { ...result, entity: next } : { ok: false, error: 'entity vanished' };
+  }
+
+  extrudeMany(previews: readonly SolidEntity[]): BatchCommandResult {
+    const ids = new Set<string>();
+    const changed: SolidEntity[] = [];
+    for (const preview of previews) {
+      if (ids.has(preview.id)) return { ok: false, error: 'A shape can only appear once in an extrusion operation' };
+      ids.add(preview.id);
+      const geometry = preview.type === 'extrusion' ? preview.corners : preview;
+      const result = this.prepareExtrusion(preview.id, preview.depth, geometry);
+      if (!result.ok) return result;
+      if (result.entity !== this.sketch.get(preview.id)) changed.push(result.entity);
+    }
+    if (!changed.length) return { ok: true, entities: [], message: 'No extrusion changes' };
+    const first = changed[0];
+    const label = changed.length === 1
+      ? `extrude ${first.type === 'cylinder' ? 'cylinder ' : ''}${formatMm(first.depth)}`
+      : `extrude ${changed.length} shapes`;
+    const entities = this.sketch.replaceEntities(changed, label);
+    return entities
+      ? { ok: true, entities, message: `Applied extrusion to ${entities.length} ${entities.length === 1 ? 'shape' : 'shapes'}` }
+      : { ok: false, error: 'An extrusion target is no longer available' };
+  }
+
+  private prepareExtrusion(id: string, depth: number, geometry?: [Vec3, Vec3, Vec3, Vec3] | CircleGeometry): CommandResult<SolidEntity> {
     const entity = this.sketch.get(id);
-    if (!entity) return { ok: false, error: 'Select a rectangle to extrude' };
-    if (entity.type === 'line') return { ok: false, error: 'A line cannot be extruded. Draw a closed rectangle first.' };
-    if (entity.type === 'circle') return { ok: false, error: 'Circle extrusion is not supported yet' };
+    if (!entity) return { ok: false, error: 'Select a closed rectangle or circle to extrude' };
+    if (entity.type === 'line') return { ok: false, error: 'A line cannot be extruded. Draw a closed rectangle or circle first.' };
     if (!Number.isFinite(depth) || Math.abs(depth) < 1e-6) return { ok: false, error: 'Extrusion depth must be a non-zero distance' };
+
+    if (entity.type === 'circle' || entity.type === 'cylinder') {
+      if (geometry && Array.isArray(geometry)) return { ok: false, error: 'Cylinder extrusion needs circular base geometry' };
+      const source: CircleGeometry = {
+        center: entity.center,
+        normal: entity.normal,
+        radius: entity.radius,
+      };
+      const base = geometry && !Array.isArray(geometry) ? geometry : source;
+      if (!isValidCircle(base)) return { ok: false, error: 'Cylinder base needs a finite centre, non-zero normal, and positive radius' };
+      const unchanged = entity.type === 'cylinder'
+        && entity.depth === depth
+        && nearlyEqual(entity.center, base.center, 1e-6)
+        && nearlyEqual(entity.normal, base.normal, 1e-6)
+        && Math.abs(entity.radius - base.radius) <= 1e-6;
+      if (unchanged) return { ok: true, entity, message: 'Cylinder depth unchanged' };
+      return {
+        ok: true,
+        entity: { id, type: 'cylinder', center: base.center, normal: base.normal, radius: base.radius, depth },
+        message: `Cylinder depth set to ${formatMm(depth)}`,
+      };
+    }
+
+    if (geometry && Array.isArray(geometry) === false) return { ok: false, error: 'Rectangle extrusion needs four corners' };
+    const corners = geometry && Array.isArray(geometry) ? geometry : undefined;
     const base = corners ?? entity.corners;
     if (!isExtrudableProfile(base)) return { ok: false, error: 'Extrusion needs a planar rectangle with non-zero sides' };
     const unchanged =
@@ -127,21 +188,20 @@ export class Commands {
       entity.depth === depth &&
       entity.corners.every((corner, index) => nearlyEqual(corner, base[index], 1e-6));
     if (unchanged) return { ok: true, entity, message: 'Extrusion depth unchanged' };
-    const next = this.sketch.replaceEntity(id, { type: 'extrusion', corners: base, depth }, `extrude ${formatMm(depth)}`);
-    return next ? { ok: true, entity: next, message: `Extruded to ${formatMm(depth)}` } : { ok: false, error: 'entity vanished' };
+    return { ok: true, entity: { id, type: 'extrusion', corners: base, depth }, message: `Extruded to ${formatMm(depth)}` };
   }
 
   setDimension(id: string, spec: DimensionSpec | string): CommandResult {
     const entity = this.sketch.get(id);
     if (!entity) return { ok: false, error: 'no entity selected' };
-    if (entity.type === 'extrusion' && typeof spec === 'string') {
+    if ((entity.type === 'extrusion' || entity.type === 'cylinder') && typeof spec === 'string') {
       const depth = parseDepth(spec);
       if (depth !== null) return this.extrude(id, depth);
     }
     const parsed = typeof spec === 'string' ? parseDimensionSpec(spec) : spec;
     if (!parsed) return { ok: false, error: `could not read "${spec}" (try 4000 or 4000x3000)` };
     if (Object.values(parsed).some((value) => !Number.isFinite(value) || value <= 0)) return { ok: false, error: 'Dimensions must be positive finite distances' };
-    if (entity.type === 'extrusion' && parsed.length !== undefined) return this.extrude(id, parsed.length);
+    if ((entity.type === 'extrusion' || entity.type === 'cylinder') && parsed.length !== undefined) return this.extrude(id, parsed.length);
 
     if (entity.type === 'circle') {
       if (parsed.length === undefined || parsed.width !== undefined || parsed.height !== undefined) {
@@ -166,6 +226,10 @@ export class Commands {
       return next
         ? { ok: true, entity: next, message: `Line length set to ${formatMm(parsed.length)}` }
         : { ok: false, error: 'entity vanished' };
+    }
+
+    if (entity.type === 'cylinder') {
+      return { ok: false, error: 'a cylinder takes one depth, e.g. 100 or 10 cm' };
     }
 
     if (parsed.width === undefined || parsed.height === undefined) {
@@ -199,6 +263,8 @@ export class Commands {
       units: 'mm',
       entities: this.sketch.all.map((entity): ExportEntity => entity.type === 'circle'
         ? { type: 'circle', center: toArray(entity.center), normal: toArray(entity.normal), radius: entity.radius }
+        : entity.type === 'cylinder'
+        ? { type: 'cylinder', center: toArray(entity.center), normal: toArray(entity.normal), radius: entity.radius, depth: entity.depth }
         : {
             type: entity.type,
             points: (entity.type === 'line' ? [entity.a, entity.b] : entity.corners).map(toArray),

@@ -3,7 +3,7 @@ import { WorkPlane, type PlaneKind } from './plane';
 import { snapCursor, type SnapResult } from './snap';
 import { makeRect, Sketch } from './sketch';
 import { alignRectToStart, anchorAfterCommit, buildEntityFromStroke, pullRectCorners, StrokeSession } from './stroke';
-import { circleStroke, rectStroke, topViewProjector } from './test-helpers';
+import { circleStroke, rectStroke, rotatePoints, topViewProjector } from './test-helpers';
 import { v2, v3, type Vec2, type Vec3 } from './vec';
 
 const projector = topViewProjector(0.1, 400, 300);
@@ -179,5 +179,62 @@ describe('StrokeSession: circles', () => {
       session.add(snap, snap.raw, snap.screen, 0);
     });
     expect(session.recognize().shape?.kind).not.toBe('circle');
+  });
+});
+
+function sessionForSnappedStroke(points: readonly Vec2[]): StrokeSession {
+  const snapFor = (raw: Vec2, strokeStart: Vec3 | null = null): SnapResult => snapCursor({
+    cursor: projector.project(v3(raw.x, raw.y, 0))!,
+    projector,
+    plane,
+    targets: { vertices: [], midpoints: [], segments: [] },
+    gridStep: 100,
+    gridEnabled: true,
+    strokeStart,
+  });
+  const session = new StrokeSession(plane, snapFor(points[0]));
+  for (const point of points.slice(1)) {
+    const rawWorld = v3(point.x, point.y, 0);
+    session.add(snapFor(point, session.start.world), rawWorld, projector.project(rawWorld)!, 0);
+  }
+  return session;
+}
+
+function bowedSquareStroke(bow: number): Vec2[] {
+  const corners = [v2(1000, 500), v2(2000, 500), v2(2000, 1500), v2(1000, 1500)];
+  const points: Vec2[] = [];
+  for (let side = 0; side < corners.length; side++) {
+    const a = corners[side];
+    const b = corners[(side + 1) % corners.length];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy);
+    for (let i = 0; i < 16; i++) {
+      const t = i / 16;
+      const offset = Math.sin(Math.PI * t) * bow;
+      points.push(v2(a.x + dx * t - dy / length * offset, a.y + dy * t + dx / length * offset));
+    }
+  }
+  points.push(points[0]);
+  return points;
+}
+
+describe('StrokeSession: rough rectangles versus circle correction', () => {
+  it('recognises snapped rough squares, a small closing gap, rotation, and a bowed side as rectangles', () => {
+    const strokes = [
+      rectStroke(1000, 500, 1000, 1000, { pointsPerSide: 12, jitter: 80 }),
+      rectStroke(1000, 500, 1000, 1000, { pointsPerSide: 8, jitter: 120, overshoot: 0.04 }),
+      rectStroke(1000, 500, 1000, 1000, { pointsPerSide: 10, jitter: 80, gapFraction: 0.02 }),
+      rotatePoints(rectStroke(1000, 500, 1000, 1000, { pointsPerSide: 12, jitter: 80 }), 0.35, v2(1500, 1000)),
+      bowedSquareStroke(50),
+    ];
+    for (const points of strokes) {
+      const session = sessionForSnappedStroke(points);
+      const result = session.recognize();
+      expect(result.shape?.kind).toBe('rect');
+      if (!result.shape) continue;
+      const entity = buildEntityFromStroke(session, result.shape, { projector, vertices: [], tolerancePx: 14, gridStep: 100 });
+      expect(entity.type).toBe('rect');
+    }
   });
 });

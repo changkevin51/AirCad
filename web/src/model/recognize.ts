@@ -65,6 +65,7 @@ export interface RecognizeOptions {
   circleSmoothFrac: number;
   circleMaxGapDeg: number;
   circleMaxTravelTurns: number;
+  /** Max p85 sample distance to the nearest robust rectangle edge, normalized by bbox diagonal. */
   circleRectangleEdgeFrac: number;
 }
 
@@ -88,7 +89,9 @@ export const DEFAULT_RECOGNIZE_OPTIONS: RecognizeOptions = {
   circleSmoothFrac: 0.08,
   circleMaxGapDeg: 135,
   circleMaxTravelTurns: 1.75,
-  circleRectangleEdgeFrac: 0.025,
+  // The old value only rejected nearly perfect rectangles; this still allows
+  // ordinary hand jitter while rejecting straight sides that fit an OBB well.
+  circleRectangleEdgeFrac: 0.055,
 };
 
 const TWO_PI = Math.PI * 2;
@@ -284,6 +287,19 @@ function normalizeAngle90(angle: number): number {
   return a;
 }
 
+/** Open angular strokes need corner evidence in addition to a box-like fit. */
+function hasSharpOpenCorners(ring: readonly Vec2[], size: number, opts: RecognizeOptions): boolean {
+  let sharpCorners = 0;
+  const minTurn = Math.max(60, 90 - opts.collinearDeg) * DEG;
+  for (let i = 1; i + 1 < ring.length; i++) {
+    const prev = sub2(ring[i], ring[i - 1]);
+    const next = sub2(ring[i + 1], ring[i]);
+    if (length2(prev) < size * 0.04 || length2(next) < size * 0.04) continue;
+    if (Math.abs(Math.atan2(cross2(prev, next), dot2(prev, next))) >= minTurn) sharpCorners++;
+  }
+  return sharpCorners >= 2;
+}
+
 function fitCircle(points: readonly Vec2[], smoothed: readonly Vec2[], size: number, opts: RecognizeOptions): RecognizedCircle | null {
   if (points.length < 8 || !Number.isFinite(size) || size <= 0) return null;
   const origin = points[0];
@@ -347,7 +363,10 @@ function fitCircle(points: readonly Vec2[], smoothed: readonly Vec2[], size: num
       Math.abs(point.x - uLo), Math.abs(point.x - uHi),
       Math.abs(point.y - vLo), Math.abs(point.y - vHi),
     ));
-    if (percentile(edgeErrors, 0.85) <= opts.circleRectangleEdgeFrac) return null;
+    if (percentile(edgeErrors, 0.85) <= opts.circleRectangleEdgeFrac) {
+      const closed = distance2(points[0], points[points.length - 1]) <= opts.closureFrac * size;
+      if (closed || hasSharpOpenCorners(smoothed, size, opts)) return null;
+    }
   }
   return { kind: 'circle', center: v2(origin.x + center.x * size, origin.y + center.y * size), radius: radius * size };
 }

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HandsMessage, NavMessage, TrackedHandMessage } from './input/tracker-client';
 import type { AirCadApi } from './main';
+import { circleStroke, rectStroke } from './model/test-helpers';
 import { v2, v3, type Vec2, type Vec3 } from './model/vec';
 
 const h = vi.hoisted(() => ({
@@ -34,6 +35,7 @@ const h = vi.hoisted(() => ({
   listeners: new Map<string, ((event: unknown) => void)[]>(),
   hudStates: [] as { mode: string }[],
   hudKeys: [] as { key: string; label: string }[][],
+  renderer: { extrusions: [] as unknown[], activeFaces: [] as unknown[] },
   help: { visible: false },
   measure: { isOpen: false, submit: null as null | ((text: string) => void) },
   raf: null as null | ((time: number) => void),
@@ -96,8 +98,12 @@ vi.mock('./render/sketch-renderer', () => ({
     setSketch(): void {}
     setSelected(): void {}
     setHover(): void {}
-    setExtrusion(): void {}
-    setActiveFace(): void {}
+    setExtrusion(entity: unknown): void {
+      if (entity) h.renderer.extrusions.push(entity);
+    }
+    setActiveFace(face: unknown): void {
+      if (face) h.renderer.activeFaces.push(face);
+    }
     setLastLabel(): void {}
     setGhost(): void {}
     setInk(): void {}
@@ -261,6 +267,8 @@ beforeEach(async () => {
   h.listeners = new Map();
   h.hudStates = [];
   h.hudKeys = [];
+  h.renderer.extrusions = [];
+  h.renderer.activeFaces = [];
   h.help.visible = false;
   h.measure.isOpen = false;
   h.measure.submit = null;
@@ -665,5 +673,235 @@ describe('navigation HUD', () => {
     const keys = h.hudKeys.at(-1) ?? [];
     expect(keys).toContainEqual({ key: 'Shift', label: 'orbit' });
     expect(keys).toContainEqual({ key: 'Ctrl', label: 'pan' });
+  });
+});
+
+describe('drawing commits through the timed hand path', () => {
+  it('commits a rough square as a rectangle after One-Euro-smoothed hand samples', () => {
+    const points = rectStroke(0, 0, 1000, 1000, { pointsPerSide: 12, jitter: 150 });
+    const scale = 0.6;
+    const ox = 80;
+    const oy = 80;
+    const previousProject = h.projector.project;
+    const previousRay = h.projector.ray;
+    h.projector.project = (point: Vec3): Vec2 => v2(ox + point.x * scale, oy + (point.y - point.z) * scale);
+    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({
+      origin: { x: (point.x - ox) / scale, y: (point.y - oy) / scale, z: 1000 },
+      dir: { x: 0, y: 0, z: -1 },
+    });
+    try {
+      runFrame();
+      const screenFor = (point: Vec2): Vec2 => v2(ox + point.x * scale, oy + point.y * scale);
+      const first = screenFor(points[0]);
+      emitHands(handAt(first.x, first.y));
+      api.hold('draw', true);
+      for (const point of points.slice(1)) {
+        h.nowMs += 33;
+        const screen = screenFor(point);
+        emitHands(handAt(screen.x, screen.y));
+      }
+      api.hold('draw', false);
+    } finally {
+      h.projector.project = previousProject;
+      h.projector.ray = previousRay;
+    }
+    expect(api.lastRecognition()?.reason).toBe('rectangle');
+    expect(api.sketch.last?.type).toBe('rect');
+  });
+
+  it('commits a real circle stroke, selects it, and opens a cylinder preview with Q', () => {
+    const points = circleStroke(300, 250, 100);
+    api.press('toggleGrid');
+    api.setCursor(points[0]);
+    api.hold('draw', true);
+    for (const point of points.slice(1)) api.setCursor(point);
+    api.hold('draw', false);
+
+    expect(api.lastRecognition()?.reason).toBe('circle');
+    expect(api.sketch.last?.type).toBe('circle');
+    expect(api.selected()?.id).toBe(api.sketch.last?.id);
+    api.press('extrude');
+    expect(api.extrusion()?.preview.type).toBe('cylinder');
+  });
+});
+
+describe('preview rendering invalidation', () => {
+  it('repaints a rectangular side pull even when depth is unchanged', () => {
+    api.commands.addRect([v3(100, 100, 0), v3(500, 100, 0), v3(500, 400, 0), v3(100, 400, 0)]);
+    api.setCursor(v2(300, 250));
+    api.press('select');
+    api.press('toggleGrid');
+    api.press('extrude');
+    api.hold('draw', true);
+    api.setCursor(v2(300, 150));
+    api.hold('draw', false);
+    api.press('confirm');
+
+    api.setCursor(v2(300, 250));
+    api.press('select');
+    api.press('extrude');
+    api.press('cyclePlane');
+    api.press('cyclePlane');
+    expect(api.extrusion()?.face).toBe('right');
+    const before = api.extrusion();
+    h.renderer.extrusions = [];
+    api.hold('draw', true);
+    api.setCursor(v2(350, 250));
+    api.hold('draw', false);
+
+    const after = api.extrusion();
+    expect(after?.depth).toBe(before?.depth);
+    expect(after?.preview.type).toBe('extrusion');
+    if (after?.preview.type === 'extrusion' && before?.preview.type === 'extrusion') {
+      expect(after.preview.corners[1].x).toBeGreaterThan(before.preview.corners[1].x);
+      expect(h.renderer.extrusions.at(-1)).toMatchObject({ type: 'extrusion', corners: expect.any(Array) });
+    }
+  });
+});
+
+describe('circle push/pull controls', () => {
+  function addCircleAndStart(): string {
+    const added = api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
+    if (!added.ok) throw new Error(added.error);
+    api.setCursor(v2(250, 250));
+    api.press('select');
+    api.press('toggleGrid');
+    api.press('extrude');
+    return added.entity.id;
+  }
+
+  it('pulls a selected circle into a native cylinder, then undo restores the circle', () => {
+    const id = addCircleAndStart();
+    expect(api.extrusion()).toMatchObject({ depth: 0, dragging: false, face: 'top', preview: { type: 'cylinder', center: v3(250, 250, 0), radius: 100 } });
+
+    api.hold('draw', true);
+    api.setCursor(v2(250, 200));
+    expect(api.extrusion()).toMatchObject({ depth: 50, dragging: true, preview: { type: 'cylinder', depth: 50 } });
+    api.hold('draw', false);
+    api.press('confirm');
+
+    expect(api.sketch.get(id)?.type).toBe('cylinder');
+    expect(api.sketch.get(id)).toMatchObject({ type: 'cylinder', center: v3(250, 250, 0), radius: 100, depth: 50 });
+    expect(api.extrusion()).toBeNull();
+    api.press('undo');
+    expect(api.sketch.get(id)).toMatchObject({ type: 'circle', center: v3(250, 250, 0), radius: 100 });
+    api.press('redo');
+    expect(api.sketch.get(id)?.type).toBe('cylinder');
+  });
+
+  it('shows a cylinder shortcut in the HUD for a selected circle', () => {
+    api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
+    api.setCursor(v2(250, 250));
+    api.press('select');
+    runFrame();
+    expect(h.hudKeys.at(-1)).toContainEqual({ key: 'Q', label: 'extrude cylinder' });
+    expect(h.hudKeys.at(-1)).toContainEqual({ key: 'L', label: 'diameter' });
+  });
+
+  it('accepts an exact signed pull, cancels without changing the circle, and exposes a circular preview', () => {
+    const id = addCircleAndStart();
+    api.press('measure');
+    h.measure.submit?.('-250');
+    h.measure.isOpen = false;
+    expect(api.extrusion()).toMatchObject({ depth: -250, dragging: false, preview: { type: 'cylinder', depth: -250 } });
+    api.press('cancel');
+    expect(api.extrusion()).toBeNull();
+    expect(api.sketch.get(id)?.type).toBe('circle');
+    expect(api.sketch.get(id)).toMatchObject({ radius: 100, center: v3(250, 250, 0) });
+  });
+
+  it('re-edits an existing cylinder and can pull its opposite cap', () => {
+    const added = api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
+    if (!added.ok) throw new Error(added.error);
+    expect(api.commands.extrude(added.entity.id, 400).ok).toBe(true);
+    api.setCursor(v2(250, 250));
+    api.press('select');
+    api.press('extrude');
+    expect(api.extrusion()).toMatchObject({ depth: 400, preview: { type: 'cylinder', depth: 400 } });
+    api.press('cyclePlane');
+    api.press('measure');
+    h.measure.submit?.('100');
+    h.measure.isOpen = false;
+    const preview = api.extrusion();
+    expect(preview?.depth).toBe(500);
+    expect(preview?.preview.type).toBe('cylinder');
+    if (preview?.preview.type === 'cylinder') expect(preview.preview.center).toEqual(v3(250, 250, -100));
+    api.press('confirm');
+    expect(api.sketch.last).toMatchObject({ type: 'cylinder', depth: 500, center: v3(250, 250, -100), radius: 100 });
+  });
+});
+
+describe('face switching during the first extrusion', () => {
+  it.each([
+    ['hand', 'confirm'],
+    ['mouse', 'confirm'],
+    ['hand', 'cancel'],
+  ] as const)('%s input can release and pull a new side without restarting Q (%s)', (input, finish) => {
+    const previousProject = h.projector.project;
+    const previousRay = h.projector.ray;
+    h.projector.project = (point: Vec3): Vec2 => v2(point.x - point.z, point.y);
+    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({
+      origin: v3(point.x + 1000, point.y, 1000),
+      dir: v3(-Math.SQRT1_2, 0, -Math.SQRT1_2),
+    });
+    const move = (point: Vec2, gripping: boolean): void => {
+      if (input === 'hand') {
+        emitHands(handAt(point.x, point.y, { pinching: gripping, open: !gripping, openArmed: !gripping }));
+      } else {
+        api.hold('draw', gripping);
+        api.setCursor(point);
+      }
+    };
+    try {
+      if (input === 'hand') api.press('toggleNavAssist');
+      const serialized = startExtrusion((point) => move(point, false));
+      const id = api.selected()!.id;
+      move(v2(250, 250), true);
+      move(v2(150, 250), true);
+      expect(api.extrusion()!.depth).toBeCloseTo(100);
+      expect(api.extrusion()!.dragging).toBe(true);
+      move(v2(150, 250), false);
+      const firstPreview = structuredClone(api.extrusion()!.preview);
+      expect(api.extrusion()!.dragging).toBe(false);
+      move(v2(450, 250), false);
+      expect(api.extrusion()!.face).toBe('right');
+      expect(api.extrusion()!.preview).toEqual(firstPreview);
+      expect(h.renderer.activeFaces.at(-1)).toMatchObject({ axis: 'u', sign: 1 });
+      expect(api.sketch.serialize()).toBe(serialized);
+      expect(api.selected()!.id).toBe(id);
+      h.renderer.extrusions = [];
+      move(v2(450, 250), true);
+      expect(api.extrusion()!.preview).toEqual(firstPreview);
+      move(v2(500, 250), true);
+      move(v2(500, 250), false);
+      const after = api.extrusion()!;
+      expect(after.depth).toBeCloseTo(100);
+      expect(after.preview.type).toBe('extrusion');
+      if (after.preview.type !== 'extrusion') throw new Error('expected a box preview');
+      expect(after.preview.corners[0]).toEqual(v3(100, 100, 0));
+      expect(after.preview.corners[1].x).toBeCloseTo(550);
+      expect(after.preview.corners[2].x).toBeCloseTo(550);
+      expect(h.renderer.extrusions.at(-1)).toEqual(after.preview);
+      expect(api.sketch.serialize()).toBe(serialized);
+      expect(h.orbit.orbit).not.toHaveBeenCalled();
+      expect(h.orbit.pan).not.toHaveBeenCalled();
+      expect(h.orbit.zoom).not.toHaveBeenCalled();
+      api.press(finish);
+      expect(api.extrusion()).toBeNull();
+      if (finish === 'cancel') {
+        expect(api.sketch.serialize()).toBe(serialized);
+        expect(api.commands.undo()).toBe('add rect');
+      } else {
+        expect(api.sketch.get(id)).toEqual(after.preview);
+        const committed = api.sketch.serialize();
+        api.press('undo');
+        expect(api.sketch.serialize()).toBe(serialized);
+        api.press('redo');
+        expect(api.sketch.serialize()).toBe(committed);
+      }
+    } finally {
+      h.projector.project = previousProject;
+      h.projector.ray = previousRay;
+    }
   });
 });

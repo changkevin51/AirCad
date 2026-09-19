@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { ExtrusionSession } from './extrusion';
-import { defaultFaceIndex, labelForNormal, pickProfileFace, profileFaces, pushPull } from './faces';
+import { defaultFaceIndex, labelForNormal, pickExtrusionTarget, pickProfileFace, profileFaces, pushPull } from './faces';
 import { entityCenter, makeRect, type ExtrusionEntity, type RectEntity } from './sketch';
+import type { Projector } from './snap';
 import { topViewProjector } from './test-helpers';
-import { dot, normalize, scale, sub, v2, v3 } from './vec';
+import { dot, normalize, scale, sub, v2, v3, type Vec2, type Vec3 } from './vec';
 
 const rect: RectEntity = { id: 'r', type: 'rect', corners: makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300) };
 const solid: ExtrusionEntity = { ...rect, id: 's', type: 'extrusion', depth: 300 };
@@ -164,6 +165,81 @@ describe('ExtrusionSession faces', () => {
     session.setPull(-80);
     expect(session.depth).toBe(-80);
   });
+
+  it.each([0, 1])('unlocks every new side after releasing the first pull from cap %s', (cap) => {
+    const session = new ExtrusionSession(rect, 1, 0, cap);
+    const faces = session.faces;
+    expect(faces).toHaveLength(2);
+    session.update(v2(100, 200), true, 'hand:1', UP);
+    session.update(v2(100, 100), true, 'hand:1', UP);
+    const depth = cap === 0 ? 100 : -100;
+    expect(session.depth).toBe(depth);
+    expect(session.faces).toBe(faces);
+    expect(faces).toHaveLength(6);
+    expect(faces).toEqual(session.currentFaces());
+    expect(session.faceIndex).toBe(cap);
+    expect(session.setFace(2)).toBe(false);
+    expect(session.cycleFace()).toBe(false);
+    session.update(v2(100, 100), false, 'hand:1', UP);
+
+    for (const index of [2, 3, 4, 5]) {
+      const before = structuredClone(session.preview);
+      expect(session.setFace(index)).toBe(true);
+      expect(session.faceIndex).toBe(index);
+      expect(session.pulled).toBe(0);
+      expect(session.preview).toEqual(before);
+      session.update(v2(800, 600), true, 'hand:1', UP);
+      expect(session.preview).toEqual(before);
+      session.update(v2(800, 580), true, 'hand:1', UP);
+      session.update(v2(800, 580), false, 'hand:1', UP);
+      expect(session.depth).toBe(depth);
+      expect(session.faces).toEqual(session.currentFaces());
+    }
+    expect(session.corners).toEqual([v3(-20, -20, 0), v3(420, -20, 0), v3(420, 320, 0), v3(-20, 320, 0)]);
+    expect(rect.corners).toEqual([v3(0, 0, 0), v3(400, 0, 0), v3(400, 300, 0), v3(0, 300, 0)]);
+  });
+
+  it.each([100, -100])('cycles through all six faces as soon as exact depth is %s', (depth) => {
+    const session = new ExtrusionSession(rect, 1, 0, 0);
+    session.setPull(depth);
+    const preview = structuredClone(session.preview);
+    for (const index of [1, 2, 3, 4, 5, 0]) {
+      expect(session.cycleFace()).toBe(true);
+      expect(session.faceIndex).toBe(index);
+      expect(session.face).toEqual(session.currentFaces()[index]);
+      expect(session.preview).toEqual(preview);
+    }
+  });
+
+  it('drops vanished sides when depth returns to zero and restores them when it grows again', () => {
+    const session = new ExtrusionSession(rect, 1, 0, 0);
+    session.setPull(100);
+    expect(session.setFace(2)).toBe(true);
+    session.setDepth(0);
+    expect(session.faces).toHaveLength(2);
+    expect(session.faceIndex).toBe(0);
+    expect(session.face).toEqual(session.currentFaces()[0]);
+    expect(session.setFace(2)).toBe(false);
+    expect(session.cycleFace()).toBe(true);
+    expect(session.faceIndex).toBe(1);
+    expect(session.cycleFace()).toBe(true);
+    expect(session.faceIndex).toBe(0);
+    session.setDepth(-100);
+    expect(session.faces).toHaveLength(6);
+    expect(session.setFace(5)).toBe(true);
+    expect(session.face).toEqual(session.currentFaces()[5]);
+  });
+
+  it('keeps circular extrusion limited to its two caps', () => {
+    const session = new ExtrusionSession({ id: 'circle', type: 'circle', center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 50 }, 1, 0, 0);
+    session.setPull(100);
+    expect(session.faces).toHaveLength(2);
+    expect(session.setFace(2)).toBe(false);
+    expect(session.cycleFace()).toBe(true);
+    expect(session.faceIndex).toBe(1);
+    expect(session.cycleFace()).toBe(true);
+    expect(session.faceIndex).toBe(0);
+  });
 });
 
 describe('labelForNormal', () => {
@@ -174,5 +250,40 @@ describe('labelForNormal', () => {
     expect(labelForNormal(v3(0, 1, 0))).toBe('back');
     expect(labelForNormal(v3(1, 0, 0))).toBe('right');
     expect(labelForNormal(v3(-1, 0, 0))).toBe('left');
+  });
+});
+
+describe('pickExtrusionTarget', () => {
+  const top: Projector = {
+    project: (point: Vec3): Vec2 => v2(point.x, point.y),
+    ray: (point: Vec2) => ({ origin: v3(point.x, point.y, 1000), dir: v3(0, 0, -1) }),
+  };
+  const oblique: Projector = {
+    project: (point: Vec3): Vec2 => v2(point.x - point.z, point.y),
+    ray: (point: Vec2) => ({ origin: v3(point.x + 1000, point.y, 1000), dir: v3(-Math.SQRT1_2, 0, -Math.SQRT1_2) }),
+  };
+
+  it('picks the nearest shape and its exact face regardless of entity order', () => {
+    const near: RectEntity = { ...rect, id: 'near', corners: rect.corners.map((point) => ({ ...point, z: 100 })) as RectEntity['corners'] };
+    for (const entities of [[rect, near], [near, rect]]) {
+      expect(pickExtrusionTarget(entities, v2(200, 150), top)).toEqual({ entity: near, faceIndex: 0 });
+    }
+    expect(pickExtrusionTarget([rect, solid], v2(250, 150), oblique)).toEqual({ entity: solid, faceIndex: 2 });
+    expect(pickExtrusionTarget([rect], v2(900, 900), top)).toBeNull();
+  });
+
+  it('supports analytic circle and cylinder caps', () => {
+    const circle = { id: 'c', type: 'circle' as const, center: v3(500, 150, 0), normal: v3(0, 0, 1), radius: 50 };
+    const cylinder = { ...circle, id: 'cylinder', type: 'cylinder' as const, depth: 200 };
+    expect(pickExtrusionTarget([rect, circle], v2(500, 150), top)).toEqual({ entity: circle, faceIndex: 0 });
+    expect(pickExtrusionTarget([rect, cylinder], v2(500, 150), top)).toEqual({ entity: cylinder, faceIndex: 0 });
+  });
+
+  it('does not select a hidden cap or shape through a curved cylinder side', () => {
+    const cylinder = { id: 'c', type: 'cylinder' as const, center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 100, depth: 200 };
+    const behind: RectEntity = { id: 'behind', type: 'rect', corners: makeRect(v3(-50, -50, -100), v3(1, 0, 0), v3(0, 1, 0), 100, 100) };
+    for (const entities of [[cylinder, behind], [behind, cylinder]]) {
+      expect(pickExtrusionTarget(entities, v2(0, 0), oblique)).toBeNull();
+    }
   });
 });
