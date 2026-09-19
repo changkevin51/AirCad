@@ -573,6 +573,7 @@ class App {
       hold: (action, down) => this.setHold(action, down),
       setCursor: (point) => {
         this.cursor.updateMouse(point, performance.now() / 1000);
+        this.onCursorMoved();
       },
       lastRecognition: () => this.lastRecognition,
     };
