@@ -1,0 +1,18 @@
+# Python
+.venv*/
+__pycache__/
+*.pyc
+
+# Runtime snapshots written by the FreeCAD bridge
+.runtime/
+
+# Downloaded MediaPipe model (fetched on first run)
+hand_landmarker.task
+
+# Web frontend
+web/node_modules/
+web/dist/
+
+# OS / editor
+.DS_Store
+Thumbs.db

@@ -1,0 +1,5 @@
+opencv-python>=4.8,<6
+# 1.0.1 crashes during hand-landmarker initialization on this Apple Silicon Mac.
+# Use Python 3.9-3.12; 0.10.35 has no wheels for 3.13+ on Windows.
+mediapipe==0.10.35
+numpy>=1.26,<3
