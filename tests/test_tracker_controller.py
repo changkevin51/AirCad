@@ -82,7 +82,7 @@ def _spatial_factory(config, callbacks, logger=None):
     return FakeSpatialWorker(config, callbacks, logger=logger)
 
 
-def _spatial_sample(state="tracked", epoch=0, target="finger", revision=0):
+def _spatial_sample(state="tracked", epoch=0, target="keycap", revision=0):
     from tracker.depth_camera import SpatialSample
 
     has_point = state in ("tracked", "held")
@@ -141,7 +141,7 @@ class TrackerControllerTests(unittest.IsolatedAsyncioTestCase):
             {
                 "source": "webcam",
                 "cameraIndex": 1,
-                "target": "finger",
+                "target": "keycap",
                 "colorPreset": "green",
                 "colorTolerance": 1.0,
             },
@@ -179,14 +179,14 @@ class TrackerControllerTests(unittest.IsolatedAsyncioTestCase):
         run = self.controller.snapshot()["sourceRunId"]
         stream = self.controller.stream_id
         await self.controller.apply(
-            TrackerConfig(source="oak", target="color", color_preset="red"),
+            TrackerConfig(source="oak", target="keycap", color_tolerance=1.5),
             expected_stream_id=stream,
         )
         self.assertEqual(len(FakeWorker.instances), 1)
         self.assertTrue(worker.alive)
         self.assertEqual(len(worker.updates), 1)
-        self.assertEqual(worker.updates[0].target, "color")
-        self.assertEqual(worker.updates[0].color_preset, "red")
+        self.assertEqual(worker.updates[0].target, "keycap")
+        self.assertEqual(worker.updates[0].color_tolerance, 1.5)
         self.assertEqual(worker.updates[0].revision, 1)
         snapshot = self.controller.snapshot()
         self.assertNotEqual(snapshot["streamId"], stream)
@@ -282,7 +282,7 @@ class TrackerControllerTests(unittest.IsolatedAsyncioTestCase):
         await _flush()
         with self.assertRaises(ControllerBusyError):
             await controller.apply(
-                TrackerConfig(source="oak", target="color"),
+                TrackerConfig(source="oak", target="keycap"),
                 expected_stream_id=controller.stream_id,
             )
         self.assertEqual(worker.updates, [])
@@ -297,7 +297,7 @@ class TrackerControllerTests(unittest.IsolatedAsyncioTestCase):
         worker.thumb("jpeg0", 10, 10, revision=0)
         worker.status("ready", "old ready", revision=0)
         await controller.apply(
-            TrackerConfig(source="oak", target="color", color_preset="red"),
+            TrackerConfig(source="oak", target="keycap", color_tolerance=1.5),
             expected_stream_id=controller.stream_id,
         )
         await _flush()
@@ -308,12 +308,12 @@ class TrackerControllerTests(unittest.IsolatedAsyncioTestCase):
             any(m.get("type") == "thumb" for m in self.broadcaster.messages)
         )
         self.assertEqual(self.broadcaster.last_status["camera"], "starting")
-        worker.spatial(_spatial_sample(revision=1, target="color"))
+        worker.spatial(_spatial_sample(revision=1, target="keycap"))
         await _flush()
         spatial = [m for m in self.broadcaster.messages if m.get("type") == "spatial"]
         self.assertEqual(len(spatial), 1)
         self.assertEqual(spatial[0]["streamId"], controller.stream_id)
-        self.assertEqual(spatial[0]["target"], "color")
+        self.assertEqual(spatial[0]["target"], "keycap")
         worker.status("ready", "Depth camera ready", revision=1)
         await _flush()
         self.assertEqual(self.broadcaster.last_status["camera"], "ready")
@@ -324,13 +324,13 @@ class TrackerControllerTests(unittest.IsolatedAsyncioTestCase):
         )
         await controller.start(TrackerConfig(source="oak"))
         worker = FakeWorker.instances[0]
-        worker.spatial(_spatial_sample(revision=1, target="color"))
+        worker.spatial(_spatial_sample(revision=1, target="keycap"))
         await controller.apply(
-            TrackerConfig(source="oak", target="color"),
+            TrackerConfig(source="oak", target="keycap", color_tolerance=1.5),
             expected_stream_id=controller.stream_id,
         )
         await controller.apply(
-            TrackerConfig(source="oak", target="finger", color_preset="blue"),
+            TrackerConfig(source="oak", target="keycap", color_tolerance=1.8),
             expected_stream_id=controller.stream_id,
         )
         await _flush()
@@ -338,16 +338,16 @@ class TrackerControllerTests(unittest.IsolatedAsyncioTestCase):
             any(m.get("type") == "spatial" for m in self.broadcaster.messages)
         )
         self.assertEqual(controller._depth_revision, 2)
-        worker.spatial(_spatial_sample(revision=1, target="color"))
+        worker.spatial(_spatial_sample(revision=1, target="keycap"))
         await _flush()
         self.assertFalse(
             any(m.get("type") == "spatial" for m in self.broadcaster.messages)
         )
-        worker.spatial(_spatial_sample(revision=2, target="finger"))
+        worker.spatial(_spatial_sample(revision=2, target="keycap"))
         await _flush()
         spatial = [m for m in self.broadcaster.messages if m.get("type") == "spatial"]
         self.assertEqual(len(spatial), 1)
-        self.assertEqual(spatial[0]["target"], "finger")
+        self.assertEqual(spatial[0]["target"], "keycap")
         self.assertEqual(spatial[0]["streamId"], controller.stream_id)
 
     async def test_old_revision_error_still_reaches_status(self):
@@ -357,7 +357,7 @@ class TrackerControllerTests(unittest.IsolatedAsyncioTestCase):
         await controller.start(TrackerConfig(source="oak"))
         worker = FakeWorker.instances[0]
         await controller.apply(
-            TrackerConfig(source="oak", target="color"),
+            TrackerConfig(source="oak", target="keycap"),
             expected_stream_id=controller.stream_id,
         )
         self.assertEqual(self.broadcaster.last_status["camera"], "starting")
@@ -493,8 +493,8 @@ class ConfigValidationTests(unittest.TestCase):
         payload = {
             "source": "oak",
             "cameraIndex": 2,
-            "target": "color",
-            "colorPreset": "blue",
+            "target": "keycap",
+            "colorPreset": "green",
             "colorTolerance": 1.5,
         }
         config = config_from_json(payload)
@@ -507,16 +507,16 @@ class ConfigValidationTests(unittest.TestCase):
             "nope",
             {},
             {"source": "oak"},
-            {"source": "bad", "cameraIndex": 0, "target": "finger", "colorPreset": "green", "colorTolerance": 1.0},
-            {"source": "oak", "cameraIndex": True, "target": "finger", "colorPreset": "green", "colorTolerance": 1.0},
-            {"source": "oak", "cameraIndex": 33, "target": "finger", "colorPreset": "green", "colorTolerance": 1.0},
-            {"source": "oak", "cameraIndex": -1, "target": "finger", "colorPreset": "green", "colorTolerance": 1.0},
+            {"source": "bad", "cameraIndex": 0, "target": "keycap", "colorPreset": "green", "colorTolerance": 1.0},
+            {"source": "oak", "cameraIndex": True, "target": "keycap", "colorPreset": "green", "colorTolerance": 1.0},
+            {"source": "oak", "cameraIndex": 33, "target": "keycap", "colorPreset": "green", "colorTolerance": 1.0},
+            {"source": "oak", "cameraIndex": -1, "target": "keycap", "colorPreset": "green", "colorTolerance": 1.0},
             {"source": "oak", "cameraIndex": 0, "target": "x", "colorPreset": "green", "colorTolerance": 1.0},
-            {"source": "oak", "cameraIndex": 0, "target": "finger", "colorPreset": "x", "colorTolerance": 1.0},
-            {"source": "oak", "cameraIndex": 0, "target": "finger", "colorPreset": "green", "colorTolerance": 0.4},
-            {"source": "oak", "cameraIndex": 0, "target": "finger", "colorPreset": "green", "colorTolerance": 2.1},
-            {"source": "oak", "cameraIndex": 0, "target": "finger", "colorPreset": "green", "colorTolerance": float("nan")},
-            {"source": "oak", "cameraIndex": 0, "target": "finger", "colorPreset": "green", "colorTolerance": 1.0, "extra": 1},
+            {"source": "oak", "cameraIndex": 0, "target": "keycap", "colorPreset": "x", "colorTolerance": 1.0},
+            {"source": "oak", "cameraIndex": 0, "target": "keycap", "colorPreset": "green", "colorTolerance": 0.4},
+            {"source": "oak", "cameraIndex": 0, "target": "keycap", "colorPreset": "green", "colorTolerance": 2.1},
+            {"source": "oak", "cameraIndex": 0, "target": "keycap", "colorPreset": "green", "colorTolerance": float("nan")},
+            {"source": "oak", "cameraIndex": 0, "target": "keycap", "colorPreset": "green", "colorTolerance": 1.0, "extra": 1},
         ]
         for body in cases:
             with self.subTest(body=body):

@@ -69,9 +69,9 @@ function applyAvailability(button: HTMLButtonElement | HTMLSelectElement, availa
 }
 
 interface MenuItem {
+  checkable?: 'browser' | 'inspector' | 'pip';
   label: string;
   shortcut?: string;
-  checkable?: 'browser' | 'inspector' | 'pip' | 'navAssist';
   availability?: (snap: UiSnapshot) => CommandAvailability;
   action(): void;
 }
@@ -80,7 +80,6 @@ const CHECKED: Record<NonNullable<MenuItem['checkable']>, keyof UiSnapshot> = {
   browser: 'browserVisible',
   inspector: 'inspectorVisible',
   pip: 'pipVisible',
-  navAssist: 'navAssist',
 };
 
 /** A button + dropdown panel pair; Escape or an outside click closes it. */
@@ -195,7 +194,6 @@ export class AppBar {
             : { enabled: true },
         action: () => cb.dispatch({ type: 'press', action: 'togglePip' }),
       },
-      { label: 'Palm navigation', shortcut: 'N', checkable: 'navAssist', action: () => cb.dispatch({ type: 'press', action: 'toggleNavAssist' }) },
     ] satisfies MenuItem[]) {
       view.panel.appendChild(this.bindItem(item, view));
     }

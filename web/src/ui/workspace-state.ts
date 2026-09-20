@@ -52,7 +52,6 @@ export interface UiSnapshot {
   ortho: boolean;
   inputLabel: string;
   pipVisible: boolean;
-  navAssist: boolean;
   browserVisible: boolean;
   inspectorVisible: boolean;
   inspectorTab: InspectorTab;

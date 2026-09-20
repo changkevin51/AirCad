@@ -1,24 +1,10 @@
 /** WebSocket client for the Python tracker (see tracker/protocol.py). */
 
-export interface TrackedHandMessage {
+export interface TrackedKeycapMessage {
   id: number;
-  handedness: 'left' | 'right' | string | null;
-  /** Index fingertip in mirrored camera pixels; optional third value is depth. */
-  tip: [number, number] | [number, number, number];
-  thumb: [number, number];
-  palm: [number, number];
-  palmSize: number;
-  pinching: boolean;
-  open: boolean;
-  openArmed: boolean;
-  landmarks: [number, number][];
-}
-
-export interface NavMessage {
-  mode: 'one' | 'two';
-  pan: [number, number];
-  zoom: number;
-  rotation: number;
+  /** Green keycap center in mirrored camera pixels. */
+  center: [number, number];
+  confidence: number;
 }
 
 export interface ManagedStream {
@@ -27,14 +13,12 @@ export interface ManagedStream {
   config?: TrackerConfigJson;
 }
 
-export interface HandsMessage {
-  type: 'hands';
+export interface KeycapMessage {
+  type: 'keycap';
   v?: number;
   t: number;
   frame: { w: number; h: number };
-  hands: TrackedHandMessage[];
-  nav: NavMessage | null;
-  drawing?: boolean;
+  keycaps: TrackedKeycapMessage[];
   managed?: ManagedStream;
 }
 
@@ -44,6 +28,8 @@ export interface ThumbMessage {
   w: number;
   h: number;
   managed?: ManagedStream;
+  /** Measurement from the exact camera frame encoded in this preview. */
+  keycapFrame?: KeycapMessage;
 }
 
 export type CameraState = 'starting' | 'ready' | 'error' | 'stopped' | 'disabled';
@@ -55,7 +41,7 @@ export interface StatusMessage {
   managed?: ManagedStream;
 }
 
-export type SpatialTarget = 'finger' | 'color';
+export type SpatialTarget = 'keycap';
 export type SpatialState = 'acquiring' | 'tracked' | 'held' | 'lost';
 
 export interface SpatialQuality {
@@ -86,7 +72,7 @@ export interface SpatialMessage {
 }
 
 export type TrackerSource = 'webcam' | 'oak' | 'none';
-export type ColorPreset = 'green' | 'red' | 'blue';
+export type ColorPreset = 'green';
 
 export interface TrackerConfigJson {
   source: TrackerSource;
@@ -111,11 +97,11 @@ export interface TrackerSnapshot {
   serverTimeMs: number;
 }
 
-export type TrackerMessage = HandsMessage | ThumbMessage | StatusMessage | SpatialMessage;
+export type TrackerMessage = KeycapMessage | ThumbMessage | StatusMessage | SpatialMessage;
 export type ConnectionState = 'connecting' | 'open' | 'closed';
 
 export interface TrackerClientHandlers {
-  onHands?(message: HandsMessage): void;
+  onKeycap?(message: KeycapMessage): void;
   onThumb?(message: ThumbMessage): void;
   onStatus?(message: StatusMessage): void;
   onSpatial?(message: SpatialMessage): void;
@@ -195,7 +181,7 @@ export function parseSpatialMessage(data: unknown, state?: SpatialParseState): S
   const stateName = data.state;
   const epoch = integer(data.trackingEpoch, 0);
   if (!streamId || !sourceRunId || seq === null || t === null || t < 0 || epoch === null) return null;
-  if (target !== 'finger' && target !== 'color') return null;
+  if (target !== 'keycap') return null;
   if (stateName !== 'acquiring' && stateName !== 'tracked' && stateName !== 'held' && stateName !== 'lost') return null;
   if (typeof data.fresh !== 'boolean') return null;
   if (sampleTime === undefined || age === undefined) return null;
@@ -267,7 +253,23 @@ export function parseTrackerMessage(text: string, spatialState?: SpatialParseSta
   }
   if (!isObject(data)) return null;
   if (data.type === 'spatial') return parseSpatialMessage(data, spatialState);
-  if (data.type === 'hands' || data.type === 'thumb' || data.type === 'status') {
+  if (data.type === 'keycap') {
+    if (!isObject(data.frame) || !Array.isArray(data.keycaps) || data.keycaps.length > 1) return null;
+    const w = integer(data.frame.w, 1, MAX_FRAME_DIM), h = integer(data.frame.h, 1, MAX_FRAME_DIM);
+    if (w === null || h === null || finiteNumber(data.t) === null) return null;
+    for (const target of data.keycaps) {
+      if (!isObject(target) || integer(target.id, 0) === null) return null;
+      const center = parseTuple2(target.center), confidence = finiteNumber(target.confidence);
+      if (!center || center[0] < 0 || center[0] >= w || center[1] < 0 || center[1] >= h || confidence === null || confidence < .5 || confidence > 1) return null;
+    }
+    return data as unknown as KeycapMessage;
+  }
+  if (data.type === 'thumb' && data.keycapFrame !== undefined) {
+    if (!isObject(data.keycapFrame) || data.keycapFrame.type !== 'keycap') return null;
+    const paired = parseTrackerMessage(JSON.stringify(data.keycapFrame));
+    if (paired?.type !== 'keycap') return null;
+  }
+  if (data.type === 'thumb' || data.type === 'status') {
     return data as unknown as TrackerMessage;
   }
   return null;
@@ -453,9 +455,9 @@ export class TrackerClient {
       if (typeof event.data !== 'string') return;
       const message = parseTrackerMessage(event.data, this.spatialState);
       if (!message) return;
-      if (message.type === 'hands') {
+      if (message.type === 'keycap') {
         if (message.managed) this.noteSession(message.managed.streamId, message.managed.sourceRunId);
-        this.handlers.onHands?.(message);
+        this.handlers.onKeycap?.(message);
       } else if (message.type === 'thumb') {
         if (message.managed) this.noteSession(message.managed.streamId, message.managed.sourceRunId);
         this.handlers.onThumb?.(message);

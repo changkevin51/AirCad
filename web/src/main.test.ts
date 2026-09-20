@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as THREE from 'three';
 import type { AirCadApi } from './main';
-import type { HandsMessage, NavMessage, SpatialMessage, TrackedHandMessage } from './input/tracker-client';
+import type { KeycapMessage, SpatialMessage, TrackedKeycapMessage } from './input/tracker-client';
 import type { EdgeGuide } from './model/edge-inference';
 import { adaptiveGridStep } from './model/snap';
 import { makeRect, rectFrame, type ExtrusionEntity, type RectEntity } from './model/sketch';
@@ -271,7 +271,7 @@ vi.mock('./ui/pip', () => {
     source: string | null = null;
     setThumb() {}
     setCameraState() {}
-    setHands() {}
+    setKeycap() {}
     setSpatial() {}
     setStream() {}
     setSource(source: string) {
@@ -539,24 +539,17 @@ function setGrid(on: boolean): void {
   }
 }
 
-const handMessage = (nav: HandsMessage['nav'], over: Partial<TrackedHandMessage> = {}): HandsMessage => {
-  const hand: TrackedHandMessage = {
+const keycapMessage = (over: Partial<TrackedKeycapMessage> & { spaceHeld?: boolean } = {}): KeycapMessage => {
+  const keycap: TrackedKeycapMessage = {
     id: 1,
-    handedness: 'right',
-    tip: [320, 240],
-    thumb: [300, 250],
-    palm: [330, 300],
-    palmSize: 80,
-    pinching: false,
-    open: false,
-    openArmed: false,
-    landmarks: [],
+    center: [320, 240],
+    confidence: 1,
     ...over,
   };
-  return { type: 'hands', t: 0, frame: { w: 640, h: 480 }, hands: [hand], nav };
+  return { type: 'keycap', t: state.nowMs++, frame: { w: 640, h: 480 }, keycaps: [keycap] };
 };
 
-const emptyHands = (): HandsMessage => ({ type: 'hands', t: 0, frame: { w: 640, h: 480 }, hands: [], nav: null });
+const emptyKeycaps = (): KeycapMessage => ({ type: 'keycap', t: 0, frame: { w: 640, h: 480 }, keycaps: [] });
 
 const FRAME = { w: 640, h: 480 };
 
@@ -564,25 +557,21 @@ function tipFor(px: number, py: number): [number, number] {
   return [FRAME.w * 0.12 + (px / 800) * FRAME.w * 0.76, FRAME.h * 0.12 + (py / 600) * FRAME.h * 0.76];
 }
 
-function handAt(px: number, py: number, overrides: Partial<TrackedHandMessage> = {}, nav: NavMessage | null = null): HandsMessage {
-  const hand: TrackedHandMessage = {
+function keycapAt(px: number, py: number, overrides: Partial<TrackedKeycapMessage> & { spaceHeld?: boolean } = {}): KeycapMessage & { spaceHeld?: boolean } {
+  const keycap: TrackedKeycapMessage = {
     id: 1,
-    handedness: 'right',
-    tip: tipFor(px, py),
-    thumb: [0, 0],
-    palm: [0, 0],
-    palmSize: 80,
-    pinching: false,
-    open: false,
-    openArmed: false,
-    landmarks: [],
+    center: tipFor(px, py),
+    confidence: 1,
     ...overrides,
   };
-  return { type: 'hands', t: state.nowMs / 1000, frame: { ...FRAME }, hands: [hand], nav };
+  return { type: 'keycap', t: state.nowMs, frame: { ...FRAME }, keycaps: [keycap], spaceHeld: overrides.spaceHeld };
 }
 
-const emitHands = (message: HandsMessage): void => state.tracker?.onHands?.(message);
-const setHand = (p: Vec2): void => emitHands(handAt(p.x, p.y));
+const emitKeycap = (message: KeycapMessage & { spaceHeld?: boolean }): void => {
+  if (message.spaceHeld !== undefined) api.hold('draw', message.spaceHeld);
+  state.tracker?.onKeycap?.(message);
+};
+const setKeycap = (p: Vec2): void => emitKeycap(keycapAt(p.x, p.y));
 const runFrame = (): void => tick();
 
 function startExtrusion(setCursor: (p: Vec2) => void = (p) => api.setCursor(p)): string {
@@ -1175,33 +1164,26 @@ describe('stroke guards', () => {
 });
 
 describe('navigation gestures', () => {
-  it('ignores palm navigation while an explicit orbit hold is active', () => {
-    api.hold('orbit', true);
-    const before = state.viewport.perspective.quaternion.clone();
-    state.tracker.onHands(handMessage({ mode: 'one', pan: [40, 0], zoom: 1, rotation: 0 }));
-    expect(state.viewport.perspective.quaternion.equals(before)).toBe(true);
-    api.hold('orbit', false);
-  });
 
-  it('primes the cursor instead of jumping when a new hand takes over', () => {
+  it('primes the cursor instead of jumping when a new keycap takes over', () => {
     api.hold('orbit', true);
     const before = state.viewport.perspective.quaternion.clone();
-    state.tracker.onHands(handMessage(null));
-    const takeover = handMessage(null);
-    takeover.hands[0].id = 7;
-    takeover.hands[0].tip = [500, 100];
-    state.tracker.onHands(takeover);
+    state.tracker.onKeycap(keycapMessage());
+    const takeover = keycapMessage();
+    takeover.keycaps[0].id = 7;
+    takeover.keycaps[0].center = [500, 100];
+    state.tracker.onKeycap(takeover);
     expect(state.viewport.perspective.quaternion.equals(before)).toBe(true);
     api.hold('orbit', false);
   });
 
   it('does not settle a fresh takeover gesture on motion from the old one', () => {
     dispatchWindow('keydown', keyEvent('ShiftLeft'));
-    state.tracker.onHands(handMessage(null));
-    state.tracker.onHands(handMessage(null, { tip: [328, 240] }));
-    const takeover = handMessage(null, { id: 7, tip: [500, 300] });
-    state.tracker.onHands(takeover);
-    state.tracker.onHands(handMessage(null, { id: 7, tip: [502, 300] }));
+    state.tracker.onKeycap(keycapMessage());
+    state.tracker.onKeycap(keycapMessage({ center: [328, 240] }));
+    const takeover = keycapMessage({ id: 7, center: [500, 300] });
+    state.tracker.onKeycap(takeover);
+    state.tracker.onKeycap(keycapMessage({ id: 7, center: [502, 300] }));
     const tilted = state.viewport.perspective.quaternion.clone();
     dispatchWindow('keyup', keyEvent('ShiftLeft'));
     finishTransitions();
@@ -1266,41 +1248,30 @@ describe('navigation gestures', () => {
     expect(state.viewport.perspective.quaternion.equals(q)).toBe(true);
   });
 
-  it('reacquires a held orbit after hand loss as a fresh primed gesture', () => {
+  it('reacquires a held orbit after keycap loss as a fresh primed gesture', () => {
     dispatchWindow('keydown', keyEvent('ShiftLeft'));
-    state.tracker.onHands(handMessage(null));
-    state.tracker.onHands(handMessage(null, { tip: [360, 240] }));
+    state.tracker.onKeycap(keycapMessage());
+    state.tracker.onKeycap(keycapMessage({ center: [360, 240] }));
     const orbited = state.viewport.perspective.quaternion.clone();
-    state.tracker.onHands(emptyHands());
-    state.tracker.onHands(handMessage(null, { tip: [500, 300] }));
+    state.tracker.onKeycap(emptyKeycaps());
+    state.tracker.onKeycap(keycapMessage({ center: [500, 300] }));
     expect(state.viewport.perspective.quaternion.equals(orbited)).toBe(true);
-    state.tracker.onHands(handMessage(null, { tip: [560, 300] }));
+    state.tracker.onKeycap(keycapMessage({ center: [560, 300] }));
     expect(state.viewport.perspective.quaternion.equals(orbited)).toBe(false);
     dispatchWindow('keyup', keyEvent('ShiftLeft'));
   });
 
-  it('keeps a mouse orbit continuous across empty hand frames', () => {
+  it('keeps a mouse orbit continuous across empty keycap frames', () => {
     dispatchWindow('keydown', keyEvent('ShiftLeft'));
     api.setCursor(v2(400, 300));
     api.setCursor(v2(430, 300));
     const q = state.viewport.perspective.quaternion.clone();
-    state.tracker.onHands(emptyHands());
+    state.tracker.onKeycap(emptyKeycaps());
     api.setCursor(v2(460, 300));
     const angle = q.angleTo(state.viewport.perspective.quaternion);
     expect(angle).toBeGreaterThan(0.05);
     expect(angle).toBeLessThan(0.4);
     dispatchWindow('keyup', keyEvent('ShiftLeft'));
-  });
-
-  it('clears palm navigation when a manual pan takes over', () => {
-    api.press('toggleNavAssist');
-    state.tracker.onHands(handMessage({ mode: 'one', pan: [5, 0], zoom: 1, rotation: 0 }));
-    const tilted = state.viewport.perspective.quaternion.clone();
-    dispatchWindow('keydown', keyEvent('ControlLeft'));
-    state.tracker.onHands(handMessage({ mode: 'one', pan: [50, 0], zoom: 1, rotation: 0 }));
-    expect(state.viewport.perspective.quaternion.equals(tilted)).toBe(true);
-    dispatchWindow('keyup', keyEvent('ControlLeft'));
-    api.press('toggleNavAssist');
   });
 
   it('keeps orbiting while a second Shift source is still held', () => {
@@ -1313,30 +1284,6 @@ describe('navigation gestures', () => {
     api.setCursor(v2(460, 300));
     expect(state.viewport.perspective.quaternion.equals(q)).toBe(false);
     dispatchWindow('keyup', keyEvent('ShiftRight'));
-  });
-
-  it('settles a palm orbit onto a nearby preset and skips settling after two palms', () => {
-    api.press('toggleNavAssist');
-    api.press('viewIso');
-    finishTransitions();
-    const iso = 1 / Math.sqrt(3);
-    state.tracker.onHands(handMessage({ mode: 'one', pan: [0, 5], zoom: 1, rotation: 0 }));
-    state.tracker.onHands(handMessage(null));
-    finishTransitions();
-    const d = cameraDir();
-    expect(d.x).toBeCloseTo(-iso, 3);
-    expect(d.y).toBeCloseTo(iso, 3);
-    expect(d.z).toBeCloseTo(-iso, 3);
-
-    const startEl = state.viewport.perspective.quaternion.clone();
-    state.tracker.onHands(handMessage({ mode: 'one', pan: [0, 40], zoom: 1, rotation: 0 }));
-    state.tracker.onHands(handMessage({ mode: 'two', pan: [0, 40], zoom: 1, rotation: 0 }));
-    state.tracker.onHands(handMessage(null));
-    tick();
-    const d2 = cameraDir();
-    expect(Math.abs(d2.z + iso)).toBeGreaterThan(0.01);
-    expect(startEl.equals(state.viewport.perspective.quaternion)).toBe(false);
-    api.press('toggleNavAssist');
   });
 });
 
@@ -1378,7 +1325,7 @@ function spatialAt(world: Vec3, over: Partial<SpatialMessage> = {}): SpatialMess
     t: now,
     sampleTimeMs: now,
     ageMs: 0,
-    target: 'color',
+    target: 'keycap',
     trackingEpoch: 0,
     frame: { w: 100, h: 80, mirrored: true },
     pixel: [40, 40],
@@ -1832,12 +1779,12 @@ describe('workspace dispatcher', () => {
 describe('tracker snapshot adoption', () => {
   const snapshot = (source: string, depthai = false) => ({
     ok: true,
-    config: { source, cameraIndex: 0, target: 'finger', colorPreset: 'green', colorTolerance: 1 },
+    config: { source, cameraIndex: 0, target: 'keycap', colorPreset: 'green', colorTolerance: 1 },
     camera: source === 'none' ? 'disabled' : 'ready',
     message: '',
     streamId: 's1',
     sourceRunId: null,
-    capabilities: { sources: ['webcam', 'oak', 'none'], depthTargets: ['finger', 'color'], depthaiInstalled: depthai },
+    capabilities: { sources: ['webcam', 'oak', 'none'], depthTargets: ['keycap'], depthaiInstalled: depthai },
     serverTimeMs: 0,
   });
 
@@ -1930,16 +1877,16 @@ describe('closed outlines and line loops', () => {
     expect(api.sketch.serialize()).toBe(saved);
   });
 
-  it('follows the same Q path with a hand pinch', () => {
+  it('follows the same Q path with a keycap Space grab', () => {
     drawStroke([v2(100, 100), v2(500, 100), v2(200, 400), v2(100, 100)]);
     api.setCursor(v2(250, 200));
     api.press('select');
     api.press('extrude');
-    setHand(v2(250, 200));
-    emitHands(handAt(250, 200, { pinching: true }));
-    emitHands(handAt(250, 170, { pinching: true }));
+    setKeycap(v2(250, 200));
+    emitKeycap(keycapAt(250, 200, { spaceHeld: true }));
+    emitKeycap(keycapAt(250, 170, { spaceHeld: true }));
     expect(api.extrusion()!.depth).toBeCloseTo(30);
-    emitHands(handAt(250, 170, { pinching: false }));
+    emitKeycap(keycapAt(250, 170, { spaceHeld: false }));
     expect(api.extrusion()).not.toBeNull();
     api.press('confirm');
     expect(api.sketch.last).toMatchObject({ type: 'prism' });
@@ -2171,7 +2118,7 @@ describe('voice distance', () => {
     api.hold('draw', false);
     api.setCursor(v2(250, 100));
     h.mouse.onMove?.(v2(400, 400));
-    emitHands(handAt(300, 300, { pinching: true }));
+    emitKeycap(keycapAt(300, 300, { spaceHeld: true }));
     api.press('confirm');
     api.press('cyclePlane');
     api.hold('orbit', true);
@@ -2360,12 +2307,12 @@ describe('voice distance', () => {
     expect(line.b).toEqual(v3(5100, 100, 0));
   });
 
-  it('shows and freezes the same free-angle guide for tracked-hand drawing', () => {
-    emitHands(handAt(100, 100));
+  it('shows and freezes the same free-angle guide for tracked-keycap drawing', () => {
+    emitKeycap(keycapAt(100, 100));
     api.hold('draw', true);
     for (let i = 1; i <= 24; i += 1) {
       h.nowMs += 33;
-      emitHands(handAt(100 + 6 * i, 100 + 8 * i + (i % 2 ? 2 : -2)));
+      emitKeycap(keycapAt(100 + 6 * i, 100 + 8 * i + (i % 2 ? 2 : -2)));
     }
     runFrame();
     const points = h.guide.mock.calls.at(-1)![0] as Vec3[];
@@ -2374,7 +2321,7 @@ describe('voice distance', () => {
     expect(Math.abs(direction.y - 0.8)).toBeLessThan(0.04);
     const target = h.voice!.capture();
     h.nowMs += 33;
-    emitHands(handAt(800, 100));
+    emitKeycap(keycapAt(800, 100));
     runFrame();
     expect(h.guide.mock.calls.at(-1)![0]).toEqual(points);
     expect(h.voice!.isCurrent(target)).toBe(true);
@@ -2537,5 +2484,114 @@ describe('parallel edge guides', () => {
     api.press('cancel');
     expect(state.renderer.guide).toBeNull();
     expect(api.sketch.size).toBe(1);
+  });
+});
+
+describe('green keycap drawing controls', () => {
+  let clock: { mockRestore(): void };
+  beforeEach(() => {
+    state.nowMs = 10_000;
+    clock = vi.spyOn(performance, 'now').mockImplementation(() => state.nowMs);
+  });
+  afterEach(() => clock.mockRestore());
+  it('freezes a draft during a brief miss and completes one line on same-target recovery', () => {
+    api.press('toggleGrid');
+    setKeycap(v2(100, 100));
+    dispatchWindow('keydown', keyEvent('Space'));
+    setKeycap(v2(250, 100));
+    tick();
+    state.tracker.onKeycap(emptyKeycaps());
+    const frozen = JSON.stringify(state.ghost);
+    state.nowMs += 80;
+    tick(80);
+    expect(api.sketch.size).toBe(0);
+    expect(JSON.stringify(state.ghost)).toBe(frozen);
+    // Incidental mouse movement cannot steal this briefly suspended draft.
+    state.mouse.onMove(v2(700, 500));
+    setKeycap(v2(280, 100));
+    setKeycap(v2(400, 100));
+    dispatchWindow('keyup', keyEvent('Space'));
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.all[0].type).toBe('line');
+    const saved = api.sketch.toJSON();
+    api.press('undo');
+    expect(api.sketch.size).toBe(0);
+    api.press('redo');
+    expect(api.sketch.toJSON()).toEqual(saved);
+  });
+
+  it('does not join a short gap to a distant same-ID measurement', () => {
+    api.press('toggleGrid');
+    setKeycap(v2(100, 100));
+    dispatchWindow('keydown', keyEvent('Space'));
+    setKeycap(v2(250, 100));
+    state.tracker.onKeycap(emptyKeycaps());
+    state.nowMs += 50;
+    setKeycap(v2(700, 500));
+    expect(api.sketch.size).toBe(1);
+    const saved = api.sketch.toJSON();
+    dispatchWindow('keyup', keyEvent('Space'));
+    expect(api.sketch.toJSON()).toEqual(saved);
+  });
+
+  it('releasing Space during a gap commits only the last measured endpoint', () => {
+    api.press('toggleGrid');
+    setKeycap(v2(100, 100));
+    dispatchWindow('keydown', keyEvent('Space'));
+    setKeycap(v2(250, 100));
+    state.tracker.onKeycap(emptyKeycaps());
+    dispatchWindow('keyup', keyEvent('Space'));
+    expect(api.sketch.size).toBe(1);
+    const saved = api.sketch.toJSON();
+    state.nowMs += 80;
+    setKeycap(v2(280, 100));
+    expect(api.sketch.toJSON()).toEqual(saved);
+  });
+
+  it('moves without drawing, selects with S, and commits only with Space', () => {
+    api.press('toggleGrid');
+    setKeycap(v2(100, 100));
+    setKeycap(v2(180, 100));
+    expect(api.sketch.size).toBe(0);
+    dispatchWindow('keydown', keyEvent('Space'));
+    setKeycap(v2(360, 100));
+    dispatchWindow('keyup', keyEvent('Space'));
+    expect(api.sketch.size).toBe(1);
+    api.press('cancel');
+    setKeycap(v2(270, 100));
+    dispatchWindow('keydown', keyEvent('KeyS'));
+    expect(api.selected()?.id).toBe(api.sketch.all[0].id);
+  });
+
+  it('ends a stroke on sustained loss without joining to the reacquired point', () => {
+    api.press('toggleGrid');
+    setKeycap(v2(100, 100));
+    dispatchWindow('keydown', keyEvent('Space'));
+    setKeycap(v2(300, 100));
+    state.tracker.onKeycap(emptyKeycaps());
+    expect(api.sketch.size).toBe(0);
+    state.nowMs += 300;
+    tick(300);
+    expect(api.sketch.size).toBe(1);
+    const saved = api.sketch.toJSON();
+    setKeycap(v2(700, 500));
+    dispatchWindow('keyup', keyEvent('Space'));
+    expect(api.sketch.toJSON()).toEqual(saved);
+  });
+});
+
+
+describe('keycap identity continuity', () => {
+  it('ends the old stroke when a dropped loss frame is followed by a new identity', () => {
+    api.press('toggleGrid');
+    setKeycap(v2(100, 100));
+    dispatchWindow('keydown', keyEvent('Space'));
+    setKeycap(v2(300, 100));
+    emitKeycap(keycapAt(700, 500, { id: 2 }));
+    expect(api.sketch.size).toBe(1);
+    const saved = api.sketch.toJSON();
+    emitKeycap(keycapAt(750, 500, { id: 2 }));
+    dispatchWindow('keyup', keyEvent('Space'));
+    expect(api.sketch.toJSON()).toEqual(saved);
   });
 });

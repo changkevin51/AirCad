@@ -24,12 +24,12 @@ from tracker.depth_camera import DepthConfig
 
 
 SOURCES = ("webcam", "oak", "none")
-DEPTH_TARGETS = ("finger", "color")
-COLOR_PRESETS = ("green", "red", "blue")
+DEPTH_TARGETS = ("keycap",)
+COLOR_PRESETS = ("green",)
 CAMERA_INDEX_MIN, CAMERA_INDEX_MAX = 0, 32
 COLOR_TOLERANCE_MIN, COLOR_TOLERANCE_MAX = 0.5, 2.0
 STOP_JOIN_TIMEOUT_S = 3.0
-STREAM_MESSAGE_TYPES = ("hands", "spatial", "thumb")
+STREAM_MESSAGE_TYPES = ("keycap", "spatial", "thumb")
 _SPATIAL_SAMPLE_FIELDS = (
     "t_ms",
     "sample_time_ms",
@@ -54,7 +54,7 @@ _SPATIAL_SAMPLE_FIELDS = (
 class TrackerConfig:
     source: str = "webcam"
     camera_index: int = 0
-    target: str = "finger"
+    target: str = "keycap"
     color_preset: str = "green"
     color_tolerance: float = 1.0
 
@@ -336,11 +336,11 @@ class TrackerController:
             print("Camera: {}".format(message), file=sys.stderr, flush=True)
 
     def _make_callbacks(self, run: _Run) -> WorkerCallbacks:
-        def on_frame(frame, observations, width, height) -> None:
+        def on_frame(target, timestamp_ms, width, height) -> None:
             self._publish(
                 run,
-                lambda managed: protocol.hands_message(
-                    frame, width, height, observations, managed=managed
+                lambda managed: protocol.keycap_message(
+                    target, timestamp_ms, width, height, managed=managed
                 ),
             )
 
@@ -351,12 +351,12 @@ class TrackerController:
                 depth_revision=getattr(sample, "revision", None),
             )
 
-        def on_thumb(jpeg, width, height, *, revision=None) -> None:
+        def on_thumb(jpeg, width, height, *, revision=None, keycap_frame=None) -> None:
             if not self._broadcaster.client_count:
                 return
             self._publish(
                 run,
-                lambda managed: protocol.thumb_message(jpeg, width, height, managed=managed),
+                lambda managed: protocol.thumb_message(jpeg, width, height, managed=managed, keycap_frame=keycap_frame),
                 depth_revision=revision,
             )
 

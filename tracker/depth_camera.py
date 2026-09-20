@@ -1,6 +1,6 @@
 """OAK-D capture worker: synchronized RGB-D, detection, filtered XYZ samples.
 
-The DepthAI SDK and MediaPipe are imported lazily so importing this module
+The DepthAI SDK is imported lazily so importing this module
 never needs the optional hardware dependencies.  Device access goes through a
 small session object (``poll`` -> newest complete paired RGB+depth frame), so
 tests can drive the whole loop with fake frames, clocks and queues.
@@ -17,17 +17,10 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from tracker.camera import (
-    _handedness_label,
-    encode_thumbnail,
-    ensure_model,
-    landmarks_to_observation,
-)
+from tracker.camera import encode_thumbnail
+from tracker.keycap import KeycapTracker
 from tracker.depth_tracking import (
     HOLD_TIMEOUT_S,
-    INDEX_DIP,
-    INDEX_PIP,
-    INDEX_TIP,
     MAX_PAIR_SKEW_MS,
     MAX_SAMPLE_AGE_MS,
     RGB_HEIGHT,
@@ -37,8 +30,6 @@ from tracker.depth_tracking import (
     TargetAssociator,
     TargetCandidate,
     estimate_depth,
-    find_color_candidates,
-    finger_sample_points,
     led_sample_points,
     pixel_to_xyz,
     validate_intrinsics,
@@ -49,15 +40,13 @@ THUMB_INTERVAL_S = 1.0 / 12.0
 POLL_IDLE_S = 0.002
 STALL_EMIT_MS = 100.0
 STALL_FATAL_MS = 3000.0
-HAND_DETECTION_CONFIDENCE = 0.65
-HAND_TRACKING_CONFIDENCE = 0.6
 
 
 @dataclass(frozen=True)
 class DepthConfig:
     """Immutable detection settings consumed between frames by the worker."""
 
-    target: str = "finger"
+    target: str = "keycap"
     color_preset: str = "green"
     color_tolerance: float = 1.0
     revision: int = 0
@@ -256,75 +245,6 @@ class OakSession:
         self._device.close()
 
 
-def _default_landmarker_factory():
-    """MediaPipe VIDEO landmarker over plain RGB arrays; lazy heavy import."""
-
-    import mediapipe as mp
-
-    from tracker.camera import MODEL_PATH
-
-    ensure_model()
-    options = mp.tasks.vision.HandLandmarkerOptions(
-        base_options=mp.tasks.BaseOptions(
-            model_asset_path=str(MODEL_PATH),
-            delegate=mp.tasks.BaseOptions.Delegate.CPU,
-        ),
-        running_mode=mp.tasks.vision.RunningMode.VIDEO,
-        num_hands=2,
-        min_hand_detection_confidence=HAND_DETECTION_CONFIDENCE,
-        min_tracking_confidence=HAND_TRACKING_CONFIDENCE,
-    )
-    landmarker = mp.tasks.vision.HandLandmarker.create_from_options(options)
-
-    class _Adapter:
-        def detect_for_video(self, rgb, timestamp_ms: int):
-            image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            return landmarker.detect_for_video(image, timestamp_ms)
-
-        def close(self) -> None:
-            landmarker.close()
-
-    return _Adapter()
-
-
-def _primary_landmarks_finite(landmarks) -> bool:
-    """Raw normalized tip/DIP/PIP must be finite and inside the image."""
-
-    try:
-        for index in (INDEX_TIP, INDEX_DIP, INDEX_PIP):
-            point = landmarks[index]
-            x = float(getattr(point, "x"))
-            y = float(getattr(point, "y"))
-            if not (0.0 <= x < 1.0 and 0.0 <= y < 1.0):
-                return False
-        return True
-    except (AttributeError, IndexError, TypeError, ValueError):
-        return False
-
-
-def finger_observations(result, width: int, height: int):
-    """Hands whose primary finger landmarks are valid and on-image.
-
-    Iterates raw result entries so a malformed or off-image hand is dropped
-    instead of being clamped into a drawable edge point; matching handedness
-    entries are preserved by index.
-    """
-
-    observations = []
-    for index, landmarks in enumerate(getattr(result, "hand_landmarks", ())):
-        if not _primary_landmarks_finite(landmarks):
-            continue
-        try:
-            observations.append(
-                landmarks_to_observation(
-                    landmarks, _handedness_label(result, index), width, height
-                )
-            )
-        except (TypeError, ValueError):
-            continue
-    return observations
-
-
 SpatialCallback = Callable[[SpatialSample], None]
 ThumbCallback = Callable[[str, int, int], None]
 StatusCallback = Callable[[str, str], None]
@@ -333,8 +253,8 @@ StatusCallback = Callable[[str, str], None]
 class DepthCameraWorker(threading.Thread):
     """Background RGB-D loop emitting validated spatial samples.
 
-    ``session`` and ``landmarker_factory`` are injectable so tests can run the
-    whole pipeline without DepthAI, MediaPipe or a camera.  ``update_config``
+    ``session`` and ``detector_factory`` are injectable so tests can run the
+    whole pipeline without DepthAI or a camera.  ``update_config``
     swaps the immutable detection revision, which the loop picks up between
     frames (resetting detector/filter state) without reopening the device.
     """
@@ -347,7 +267,7 @@ class DepthCameraWorker(threading.Thread):
         on_status: Optional[StatusCallback] = None,
         *,
         session=None,
-        landmarker_factory: Optional[Callable[[], object]] = None,
+        detector_factory: Optional[Callable[[], object]] = None,
         logger=None,
         clock: Callable[[], float] = time.monotonic,
         thumb_interval_s: float = THUMB_INTERVAL_S,
@@ -358,7 +278,7 @@ class DepthCameraWorker(threading.Thread):
         self.on_status = on_status or (lambda _state, _message, revision=0: None)
         self.thumb_interval_s = float(thumb_interval_s)
         self._session = session
-        self._landmarker_factory = landmarker_factory or _default_landmarker_factory
+        self._detector_factory = detector_factory or KeycapTracker
         self._logger = logger
         self._clock = clock
         self._stop_event = threading.Event()
@@ -398,7 +318,6 @@ class DepthCameraWorker(threading.Thread):
             "starting", "Opening depth camera", revision=self._applied_revision
         )
         session = self._session
-        landmarker = None
         try:
             if session is None:
                 session = OakSession.open(import_depthai(), logger=self._logger)
@@ -415,7 +334,6 @@ class DepthCameraWorker(threading.Thread):
             last_group_ms: Optional[float] = None
             stall_emit_ms: Optional[float] = None
             last_thumb_ms = 0.0
-            mp_ts = 0
             while not self._stop_event.is_set():
                 revision = self._revision()
                 if revision != applied:
@@ -423,8 +341,7 @@ class DepthCameraWorker(threading.Thread):
                     associator.reset()
                     applied = revision
                     self._applied_revision = revision.revision
-                    if revision.target == "finger" and landmarker is None:
-                        landmarker = self._landmarker_factory()
+                    detector = self._detector_factory()
                     self.on_status(
                         "ready", "Depth camera ready", revision=revision.revision
                     )
@@ -505,33 +422,10 @@ class DepthCameraWorker(threading.Thread):
                 raw = None
                 miss_reason = None
 
-                if revision.target == "finger":
-                    import cv2
-
-                    mp_ts = max(mp_ts + 1, int(host_capture_ms))
-                    rgb_input = np.ascontiguousarray(
-                        cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
-                    )
-                    result = landmarker.detect_for_video(rgb_input, mp_ts)
-                    candidates = [
-                        TargetCandidate(
-                            centroid=obs.palm_center,
-                            size=obs.palm_size,
-                            handedness=obs.handedness,
-                            payload=obs,
-                        )
-                        for obs in finger_observations(result, frame_w, frame_h)
-                    ]
-                else:
-                    candidates = [
-                        TargetCandidate(
-                            centroid=candidate.centroid,
-                            size=math.sqrt(max(candidate.area, 0.0)),
-                        )
-                        for candidate in find_color_candidates(
-                            rgb, revision.color_preset, revision.color_tolerance
-                        )
-                    ]
+                target = detector.update(rgb, host_capture_ms / 1000, revision.color_tolerance)
+                candidates = [] if target is None else [TargetCandidate(
+                    centroid=(target.x, target.y), size=math.sqrt(target.area),
+                )]
 
                 association = associator.update(candidates, host_capture_ms)
                 if association.acquired:
@@ -540,13 +434,8 @@ class DepthCameraWorker(threading.Thread):
                 if chosen is None:
                     miss_reason = "ambiguous" if association.ambiguous else "no_target"
                 else:
-                    landmarks = getattr(chosen.payload, "landmarks", None)
-                    if landmarks:
-                        tip = landmarks[8]
-                        samples = finger_sample_points(landmarks)
-                    else:
-                        tip = chosen.centroid
-                        samples = led_sample_points(tip[0], tip[1])
+                    tip = chosen.centroid
+                    samples = led_sample_points(tip[0], tip[1])
                     estimate = estimate_depth(depth, samples, filt.last_z)
                     pixel = (frame_w - 1.0 - tip[0], tip[1])
                     if estimate.z is not None:
@@ -581,11 +470,6 @@ class DepthCameraWorker(threading.Thread):
                     last_thumb_ms = processing_now_ms
                     self._emit_thumb(rgb, pixel, revision)
         finally:
-            if landmarker is not None:
-                try:
-                    landmarker.close()
-                except Exception:
-                    pass
             close = getattr(session, "close", None)
             if close is not None:
                 try:
@@ -687,6 +571,5 @@ __all__ = [
     "OakSession",
     "SpatialSample",
     "build_pipeline",
-    "finger_observations",
     "import_depthai",
 ]

@@ -28,7 +28,6 @@ export interface InputPanelState {
   calibrationGoal?: number;
   streamId?: string | null;
   trackingAgeMs?: number | null;
-  navAssist?: boolean;
   pipVisible?: boolean;
   applying: boolean;
 }
@@ -43,7 +42,6 @@ export interface InputPanelHandlers {
   onRecenter(): void;
   onFitWorkspace(): void;
   onRetry(): void;
-  onToggleNavAssist(): void;
   onTogglePip(): void;
   onCancelInteraction(): void;
   onReleaseFocus?: () => void;
@@ -107,20 +105,20 @@ export function inputStatus(state: InputStatusContext): { text: string; tone: In
       case 'held':
         return { text: state.spatialReason ? `Paused (${state.spatialReason})` : 'Paused', tone: 'warn', retry: false };
       case 'lost':
-        return { text: 'Target lost — show the tracked tip', tone: 'warn', retry: false };
+        return { text: 'Target lost — show the green keycap', tone: 'warn', retry: false };
       default:
         return { text: 'Acquiring…', tone: 'neutral', retry: false };
     }
   }
   switch (state.tracking) {
-    case 'hand':
+    case 'keycap':
       return { text: 'Tracking', tone: 'ok', retry: false };
     case 'lost':
-      return { text: 'Hand lost — show your hand', tone: 'warn', retry: false };
+      return { text: 'Keycap lost — show the green keycap', tone: 'warn', retry: false };
     case 'mouse':
       return { text: 'Camera ready — mouse active', tone: 'neutral', retry: false };
     default:
-      return { text: 'Show a hand to track', tone: 'neutral', retry: false };
+      return { text: 'Show the green keycap to track', tone: 'neutral', retry: false };
   }
 }
 
@@ -147,7 +145,6 @@ export function buildInputPanelState(
     calibrationGoal: extras.calibrationGoal ?? CALIBRATION_MIN_SAMPLES,
     streamId: extras.streamId ?? null,
     trackingAgeMs: extras.trackingAgeMs ?? null,
-    navAssist: extras.navAssist ?? false,
     pipVisible: extras.pipVisible ?? false,
     applying: extras.applying ?? false,
   };
@@ -204,7 +201,6 @@ export class InputPanel {
   private readonly originButton: HTMLButtonElement;
   private readonly recenterButton: HTMLButtonElement;
   private readonly fitButton: HTMLButtonElement;
-  private readonly navToggle: HTMLButtonElement;
   private readonly pipToggle: HTMLButtonElement;
   private readonly diagnostics: HTMLElement;
 
@@ -239,27 +235,24 @@ export class InputPanel {
 
     // Webcam ---------------------------------------------------------------
     this.webcamGroup = group();
-    this.navToggle = this.toggleButton('Palm navigation', 'One open palm orbits; two palms pan and zoom (N)', () =>
-      this.handlers.onToggleNavAssist(),
-    );
     this.pipToggle = this.toggleButton('Camera preview', 'Show the webcam preview inset (P)', () =>
       this.handlers.onTogglePip(),
     );
-    this.webcamGroup.append(this.navToggle, this.pipToggle);
+    const keycapHint = document.createElement('div');
+    keycapHint.className = 'input-panel__hint';
+    keycapHint.textContent = 'Move the green keycap to point. Space draws / grabs; S selects; Shift orbits; Ctrl pans; + / − zoom.';
+    this.webcamGroup.append(keycapHint, this.pipToggle);
 
     // Depth camera ----------------------------------------------------------
     this.depthGroup = group();
     this.targetSelect = selectOf([
-      { value: 'finger', label: 'Finger' },
-      { value: 'color', label: 'LED / Colour' },
+      { value: 'keycap', label: 'Green keycap' },
     ]);
     this.targetSelect.addEventListener('change', () => this.handlers.onTarget(this.targetSelect.value as SpatialTarget));
 
     this.colorFields = group();
     this.colorSelect = selectOf([
       { value: 'green', label: 'Green' },
-      { value: 'red', label: 'Red' },
-      { value: 'blue', label: 'Blue' },
     ]);
     this.colorSelect.addEventListener('change', () =>
       this.handlers.onColorPreset(this.colorSelect.value as ColorPreset),
@@ -279,7 +272,7 @@ export class InputPanel {
 
     const calibration = document.createElement('div');
     calibration.className = 'input-panel__row';
-    this.originButton = this.actionButton('Set origin (O)', 'Hold the tracked tip still to set the workspace origin', () =>
+    this.originButton = this.actionButton('Set origin (O)', 'Hold the keycap center still to set the workspace origin', () =>
       this.handlers.onSetOrigin(),
     );
     this.recenterButton = this.actionButton('Recenter (R)', 'Recenter the workspace on the last endpoint', () =>
@@ -380,14 +373,13 @@ export class InputPanel {
     this.mouseGroup.classList.toggle('hidden', state.source !== 'none');
     this.webcamGroup.classList.toggle('hidden', state.source !== 'webcam');
     this.depthGroup.classList.toggle('hidden', state.source !== 'oak');
-    this.colorFields.classList.toggle('hidden', state.target !== 'color');
+    this.colorFields.classList.toggle('hidden', state.target !== 'keycap');
 
     const status = inputStatus(state);
     this.status.textContent = status.text;
     this.status.dataset.tone = status.tone;
     this.retry.classList.toggle('hidden', !status.retry);
 
-    this.navToggle.setAttribute('aria-pressed', String(!!state.navAssist));
     this.pipToggle.setAttribute('aria-pressed', String(!!state.pipVisible));
 
     const applying = state.applying;

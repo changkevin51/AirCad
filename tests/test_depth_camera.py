@@ -87,19 +87,19 @@ def _pair(seq, sdk_ts, skew_ms=0.0, age_ms=7.0, rgb=None, depth=None):
 
 
 class WorkerHarness:
-    def __init__(self, session=None, clock=None, config=None, landmarker_factory=None):
+    def __init__(self, session=None, clock=None, config=None, detector_factory=None):
         self.samples = []
         self.statuses = []
         self.thumbs = []
         self.clock = clock or ManualClock()
         self.session = session or FakeSession(clock=self.clock)
         self.worker = DepthCameraWorker(
-            config or DepthConfig(target="color", color_preset="green", color_tolerance=1.0),
+            config or DepthConfig(target="keycap", color_preset="green", color_tolerance=1.0),
             self.samples.append,
             lambda jpeg, w, h, revision=0: self.thumbs.append((jpeg, w, h, revision)),
             lambda state, message, revision=0: self.statuses.append((state, message, revision)),
             session=self.session,
-            landmarker_factory=landmarker_factory,
+            detector_factory=detector_factory,
             clock=self.clock,
         )
         self.worker.start()
@@ -136,9 +136,9 @@ class DepthCameraWorkerTests(unittest.TestCase):
         last = tracked[-1]
         expected = pixel_to_xyz(60.0, 40.0, 500.0, *INTRINSICS)
         np.testing.assert_allclose(last.camera_mm, expected, atol=5.0)
-        self.assertAlmostEqual(last.pixel[0], 99.0 - 60.0, places=3)
-        self.assertAlmostEqual(last.pixel[1], 40.0, places=3)
-        self.assertEqual(last.target, "color")
+        self.assertAlmostEqual(last.pixel[0], 99.0 - 60.5, places=3)
+        self.assertAlmostEqual(last.pixel[1], 40.5, places=3)
+        self.assertEqual(last.target, "keycap")
         self.assertEqual(last.revision, 0)
         self.assertEqual((last.frame_w, last.frame_h), (100, 80))
         self.assertTrue(last.fresh)
@@ -148,7 +148,7 @@ class DepthCameraWorkerTests(unittest.TestCase):
         self.assertTrue(harness.session.closed)
 
     def test_no_sdk_or_mediapipe_import_in_color_mode(self) -> None:
-        harness = WorkerHarness(landmarker_factory=lambda: (_ for _ in ()).throw(AssertionError("mediapipe used")))
+        harness = WorkerHarness()
         saved = {name: sys.modules.get(name) for name in ("depthai", "mediapipe")}
         sys.modules["depthai"] = None
         sys.modules["mediapipe"] = None
@@ -254,18 +254,18 @@ class DepthCameraWorkerTests(unittest.TestCase):
     def test_detector_latency_rejects_stale_after_inference(self) -> None:
         clock = ManualClock()
 
-        class SlowLandmarker:
-            def detect_for_video(self, rgb, ts):
+        class SlowDetector:
+            def update(self, rgb, ts, tolerance):
                 clock.advance(0.25)
-                return types.SimpleNamespace(hand_landmarks=[], handedness=[])
+                return None
 
             def close(self):
                 pass
 
         harness = WorkerHarness(
             clock=clock,
-            config=DepthConfig(target="finger"),
-            landmarker_factory=SlowLandmarker,
+            config=DepthConfig(target="keycap"),
+            detector_factory=SlowDetector,
         )
         harness.session.push(_pair(1, 1000.0))
         self.assertTrue(harness.consumed(1))
@@ -300,7 +300,9 @@ class DepthCameraWorkerTests(unittest.TestCase):
         wire_times = [s.t_ms for s in harness.samples]
         self.assertEqual(wire_times, sorted(wire_times))
         tracked = next(s for s in post if s.state == "tracked")
-        self.assertEqual(tracked.sample_time_ms, 1582.0 + HOST_OFFSET_MS)
+        # The RGB identity survives this 252 ms capture gap, but depth still
+        # requires its full cluster of fresh samples before relocking.
+        self.assertEqual(tracked.sample_time_ms, 1450.0 + (RELOCK_FRAMES - 1) * 33.0 + HOST_OFFSET_MS)
         self.assertNotEqual(tracked.sample_time_ms, tracked.t_ms)
 
     def test_stall_after_tracked_ends_lost_and_stoppable(self) -> None:
@@ -348,7 +350,7 @@ class DepthCameraWorkerTests(unittest.TestCase):
         self.assertEqual(held.state, "held")
         self.assertFalse(held.fresh)
         np.testing.assert_allclose(held.camera_mm, tracked.camera_mm)
-        self.assertAlmostEqual(held.pixel[0], 99.0 - 30.0, places=3)
+        self.assertAlmostEqual(held.pixel[0], 99.0 - 30.5, places=3)
         self.assertEqual(held.sample_time_ms, tracked.sample_time_ms)
 
     def test_invalid_intrinsics_report_error_and_close_session(self) -> None:
@@ -374,7 +376,7 @@ class DepthCameraWorkerTests(unittest.TestCase):
         pre_count = len(harness.samples)
         tracked = harness.samples[-1]
         harness.worker.update_config(
-            DepthConfig(target="color", color_preset="green", color_tolerance=1.0, revision=1)
+            DepthConfig(target="keycap", color_preset="green", color_tolerance=1.0, revision=1)
         )
         for index in range(RELOCK_FRAMES + 2):
             harness.session.push(_pair(50 + index, 3000.0 + index * 33.0))
@@ -394,97 +396,8 @@ class DepthCameraWorkerTests(unittest.TestCase):
         self.assertTrue(later)
         self.assertEqual(later[-1].tracking_epoch, tracked.tracking_epoch)
 
-    def test_finger_target_with_fake_landmarker(self) -> None:
-        class Lmk:
-            def __init__(self, x, y):
-                self.x = x
-                self.y = y
 
-        class Result:
-            def __init__(self):
-                points = [Lmk(0.5, 0.5)] * 21
-                points[8] = Lmk(0.6, 0.5)
-                points[7] = Lmk(0.59, 0.5)
-                points[6] = Lmk(0.58, 0.5)
-                self.hand_landmarks = [points]
-                self.handedness = [[type("C", (), {"category_name": "Right"})()]]
 
-        class FakeLandmarker:
-            def detect_for_video(self, rgb, ts):
-                return Result()
-
-            def close(self):
-                pass
-
-        clock = ManualClock()
-        session = FakeSession(clock=clock)
-        harness = WorkerHarness(
-            session=session,
-            clock=clock,
-            config=DepthConfig(target="finger"),
-            landmarker_factory=FakeLandmarker,
-        )
-        for index in range(RELOCK_FRAMES + 2):
-            session.push(_pair(1 + index, 1000.0 + index * 33.0))
-        self.assertTrue(harness.consumed(RELOCK_FRAMES + 2))
-        harness.stop()
-        last = harness.samples[-1]
-        self.assertEqual(last.target, "finger")
-        tip_u, tip_v = 0.6 * 100, 0.5 * 80
-        expected = pixel_to_xyz(tip_u, tip_v, 500.0, *INTRINSICS)
-        np.testing.assert_allclose(last.camera_mm, expected, atol=5.0)
-        self.assertAlmostEqual(last.pixel[0], 99.0 - tip_u, places=3)
-
-    def test_finger_input_converted_bgr_to_rgb(self) -> None:
-        seen = []
-
-        class FakeLandmarker:
-            def detect_for_video(self, rgb, ts):
-                seen.append(np.asarray(rgb).copy())
-                return types.SimpleNamespace(hand_landmarks=[], handedness=[])
-
-            def close(self):
-                pass
-
-        clock = ManualClock()
-        session = FakeSession(clock=clock)
-        harness = WorkerHarness(
-            session=session,
-            clock=clock,
-            config=DepthConfig(target="finger"),
-            landmarker_factory=FakeLandmarker,
-        )
-        bgr = np.full((80, 100, 3), (10, 20, 30), dtype=np.uint8)
-        session.push(_pair(1, 1000.0, rgb=bgr))
-        self.assertTrue(harness.wait_for(lambda: len(seen) >= 1))
-        harness.stop()
-        self.assertEqual(tuple(int(v) for v in seen[0][0, 0]), (30, 20, 10))
-        self.assertEqual(tuple(int(v) for v in seen[0][-1, -1]), (30, 20, 10))
-
-    def test_off_frame_primary_landmarks_dropped(self) -> None:
-        class Lmk:
-            def __init__(self, x, y):
-                self.x = x
-                self.y = y
-
-        cat = type("C", (), {"category_name": "Right"})
-
-        def hand(tip_x):
-            points = [Lmk(0.5, 0.5)] * 21
-            points[8] = Lmk(tip_x, 0.5)
-            points[7] = Lmk(0.49, 0.5)
-            points[6] = Lmk(0.48, 0.5)
-            return points
-
-        result = types.SimpleNamespace(
-            hand_landmarks=[hand(1.2), hand(0.6), hand(float("nan"))],
-            handedness=[[cat()], [cat()], [cat()]],
-        )
-        observations = dc.finger_observations(result, 100, 80)
-        self.assertEqual(len(observations), 1)
-        self.assertAlmostEqual(observations[0].index_tip[0], 0.6 * 100, places=3)
-        empty = types.SimpleNamespace(hand_landmarks=[], handedness=[])
-        self.assertEqual(dc.finger_observations(empty, 100, 80), [])
 
 
 class _FakePort:

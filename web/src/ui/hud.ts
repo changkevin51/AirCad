@@ -27,7 +27,6 @@ export interface HudState {
   calibrationSamples?: number;
   calibrationGoal?: number;
   projection: 'Persp' | 'Ortho';
-  navAssist: boolean;
   edgeOn: boolean;
   entityCount: number;
   selected: string | null;
@@ -78,8 +77,8 @@ const INSTRUCTIONS: Record<Mode, string> = {
   READY: 'Ready — left-drag to draw, click to select',
   DRAWING: 'Drawing — release to commit',
   EXTRUDING: 'Push/Pull — drag or hold Space to pull',
-  MOVING: 'Move — pinch or drag on the work plane · Enter / M applies',
-  SCALING: 'Scale — pinch or drag a corner · Enter / R applies',
+  MOVING: 'Move — hold Space or drag on the work plane · Enter / M applies',
+  SCALING: 'Scale — hold Space or drag a corner · Enter / R applies',
   ORBIT: 'Orbiting — release to stop',
   PAN: 'Panning — release to stop',
 };
@@ -203,7 +202,7 @@ export class Hud {
     }
     if (state.extrusion) {
       if (state.tracking === 'lost') {
-        return 'Tracking lost — show your hand to resume pulling.';
+        return 'Tracking lost — show the green keycap, release Space, then hold it again to resume pulling.';
       }
       if (state.mode === 'ORBIT' || state.mode === 'PAN') {
         return 'Push/Pull paused while you move the view — release to continue.';
@@ -215,19 +214,19 @@ export class Hud {
     }
     if (state.mode === 'SCALING') {
       return state.tracking === 'lost'
-        ? 'Tracking lost — scaling paused. Show your hand, release the pinch, then pinch again to continue.'
-        : 'Pinch or drag a corner to scale proportionally. The opposite corner stays fixed. Enter / R applies · Esc cancels.';
+        ? 'Tracking lost — scaling paused. Show the green keycap, release Space, then hold it again to continue.'
+        : 'Hold Space and move the keycap, or drag a corner to scale proportionally. The opposite corner stays fixed. Enter / R applies · Esc cancels.';
     }
     if (state.mode === 'MOVING') {
       return state.tracking === 'lost'
-        ? 'Tracking lost — move paused. Show your hand, release the pinch, then pinch again to continue.'
-        : 'Pinch or left-drag (or hold Space) to move on the work plane. Tab changes plane. Enter / M applies · Esc cancels.';
+        ? 'Tracking lost — move paused. Show the green keycap, release Space, then hold it again to continue.'
+        : 'Hold Space or left-drag to move on the work plane. Tab changes plane. Enter / M applies · Esc cancels.';
     }
     if (state.inputSource === 'oak' && state.spatialState === 'origin') {
-      return 'Depth camera needs an origin — press O and hold the tracked tip still.';
+      return 'Depth camera needs an origin — press O and hold the keycap center still.';
     }
     if (state.tracking === 'lost' && state.inputSource !== 'oak') {
-      return 'Tracking paused — show your hand to resume, or keep using the mouse.';
+      return 'Tracking paused — show the green keycap to resume, or keep using the mouse.';
     }
     return '';
   }
