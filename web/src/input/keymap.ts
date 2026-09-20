@@ -29,6 +29,7 @@ export type PressAction =
   | 'select'
   | 'extrude'
   | 'confirm'
+  | 'voice'
   | 'export'
   | 'togglePip'
   | 'help';
@@ -84,6 +85,7 @@ export const PRESS_BINDINGS: readonly KeyBinding<PressAction>[] = [
   { action: 'extrude', codes: ['KeyQ'], mods: { primary: false, ctrl: false, alt: false }, label: 'Q', help: 'Push/pull the selected rectangle or solid: pick a face, pinch and move', group: 'tools' },
   { action: 'confirm', codes: ['Enter', 'NumpadEnter'], label: 'Enter', help: 'Apply the extrusion preview (Q also applies)', group: 'tools' },
   { action: 'measure', codes: ['KeyL'], label: 'L', help: 'Type a length, circle diameter, rectangle size, or extrusion depth', group: 'tools' },
+  { action: 'voice', codes: ['KeyV'], mods: { primary: false, ctrl: false, alt: false }, label: 'V', help: 'Speak a distance for the active line or face pull; V again sends', group: 'tools' },
   { action: 'export', codes: ['KeyE'], label: 'E', help: 'Export to FreeCAD', group: 'tools' },
   { action: 'toggleNavAssist', codes: ['KeyN'], label: 'N', help: 'Off-hand palm navigation on / off', group: 'tools' },
   { action: 'togglePip', codes: ['KeyP'], label: 'P', help: 'Camera picture-in-picture', group: 'tools' },

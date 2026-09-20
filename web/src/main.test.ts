@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HandsMessage, NavMessage, TrackedHandMessage } from './input/tracker-client';
 import type { AirCadApi } from './main';
+import { type ExtrusionEntity, type RectEntity } from './model/sketch';
 import { v2, v3, type Vec2, type Vec3 } from './model/vec';
+import type { VoiceControlOptions } from './voice/control';
 
 const h = vi.hoisted(() => ({
   projector: {
@@ -38,6 +40,8 @@ const h = vi.hoisted(() => ({
   measure: { isOpen: false, submit: null as null | ((text: string) => void) },
   raf: null as null | ((time: number) => void),
   nowMs: 10_000,
+  voice: null as VoiceControlOptions | null,
+  voiceControl: null as null | { toggle: () => void; cancel: () => void },
 }));
 
 vi.mock('./scene/viewport', () => ({
@@ -195,6 +199,17 @@ vi.mock('./input/tracker-client', () => ({
   },
 }));
 
+vi.mock('./voice/control', () => ({
+  VoiceControl: class {
+    toggle = vi.fn();
+    cancel = vi.fn();
+    constructor(_root: unknown, options: VoiceControlOptions) {
+      h.voice = options;
+      h.voiceControl = this;
+    }
+  },
+}));
+
 vi.mock('./input/mouse-source', () => ({
   MouseSource: class {
     constructor(_element: unknown, handlers: typeof h.mouse) {
@@ -266,6 +281,8 @@ beforeEach(async () => {
   h.measure.submit = null;
   h.raf = null;
   h.nowMs = 10_000;
+  h.voice = null;
+  h.voiceControl = null;
   vi.clearAllMocks();
   const windowStub = {
     addEventListener: (type: string, listener: (event: unknown) => void) => {
@@ -665,5 +682,200 @@ describe('navigation HUD', () => {
     const keys = h.hudKeys.at(-1) ?? [];
     expect(keys).toContainEqual({ key: 'Shift', label: 'orbit' });
     expect(keys).toContainEqual({ key: 'Ctrl', label: 'pan' });
+  });
+});
+
+describe('voice distance', () => {
+  /** Pen-down at (100,100) then a 50 px diagonal move; the captured line runs (0.6, 0.8, 0). */
+  const captureLine = () => {
+    api.press('toggleGrid');
+    api.setCursor(v2(100, 100));
+    api.hold('draw', true);
+    api.setCursor(v2(130, 140));
+    return h.voice!.capture();
+  };
+
+  it('freezes the draft on capture, applies the spoken length on execute and selects the line', () => {
+    const serialized = api.sketch.serialize();
+    const target = captureLine();
+    expect(target.operation.kind).toBe('line');
+    api.hold('draw', false);
+    api.setCursor(v2(700, 600));
+    runFrame();
+    expect(api.sketch.serialize()).toBe(serialized);
+    const result = h.voice!.execute({ distance_mm: 500 }, target);
+    expect(result.ok).toBe(true);
+    const line = api.selected();
+    expect(line?.type).toBe('line');
+    if (line?.type === 'line') {
+      expect(line.a).toEqual(v3(100, 100, 0));
+      expect(line.b).toEqual(v3(400, 500, 0));
+    }
+    api.press('undo');
+    expect(api.sketch.serialize()).toBe(serialized);
+  });
+
+  it('captures a measured line on the XZ plane', () => {
+    const project = h.projector.project;
+    const ray = h.projector.ray;
+    h.projector.project = (point: Vec3) => v2(point.x, -point.z);
+    h.projector.ray = (screen: Vec2) => ({ origin: v3(screen.x, -1000, -screen.y), dir: v3(0, 1, 0) });
+    try {
+      api.press('viewFront');
+      api.press('toggleGrid');
+      api.setCursor(v2(100, -300));
+      api.hold('draw', true);
+      api.setCursor(v2(130, -340));
+      const target = h.voice!.capture();
+      api.hold('draw', false);
+      const result = h.voice!.execute({ distance_mm: 500 }, target);
+      expect(result.ok).toBe(true);
+      const line = api.selected();
+      expect(line?.type).toBe('line');
+      if (line?.type === 'line') {
+        expect(line.a).toEqual(v3(100, 0, 300));
+        expect(line.b).toEqual(v3(400, 0, 700));
+      }
+    } finally {
+      h.projector.project = project;
+      h.projector.ray = ray;
+    }
+  });
+
+  it('rejects capture with no active operation, even with a selection, and with no clear movement', () => {
+    api.commands.addRect([v3(100, 100, 0), v3(500, 100, 0), v3(500, 400, 0), v3(100, 400, 0)]);
+    api.setCursor(v2(250, 250));
+    api.press('select');
+    expect(api.selected()?.type).toBe('rect');
+    expect(() => h.voice!.capture()).toThrow();
+
+    api.press('toggleGrid');
+    api.setCursor(v2(100, 100));
+    api.hold('draw', true);
+    expect(() => h.voice!.capture()).toThrow();
+    api.hold('draw', false);
+  });
+
+  it('cancels the draft on Esc and ignores a late execute', () => {
+    const target = captureLine();
+    api.press('cancel');
+    expect(h.voiceControl!.cancel).toHaveBeenCalledTimes(1);
+    const result = h.voice!.execute({ distance_mm: 500 }, target);
+    expect(result.ok).toBe(false);
+    expect(api.sketch.size).toBe(0);
+  });
+
+  it('rejects the frozen operation after a programmatic model edit but keeps the new geometry', () => {
+    const target = captureLine();
+    api.commands.addRect([v3(0, 0, 0), v3(10, 0, 0), v3(10, 10, 0), v3(0, 10, 0)]);
+    const result = h.voice!.execute({ distance_mm: 500 }, target);
+    expect(result.ok).toBe(false);
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.last?.type).toBe('rect');
+    api.press('cancel');
+    expect(api.sketch.size).toBe(1);
+  });
+
+  it('keeps the frozen draft after a failed execute so V can retry the same target', () => {
+    const target = captureLine();
+    api.hold('draw', false);
+    const failed = h.voice!.execute({ distance_mm: -5 }, target);
+    expect(failed.ok).toBe(false);
+    expect(api.sketch.size).toBe(0);
+    const retried = h.voice!.execute({ distance_mm: 500 }, target);
+    expect(retried.ok).toBe(true);
+    expect(api.sketch.last?.type).toBe('line');
+    expect((api.sketch.last as { b: Vec3 }).b).toEqual(v3(400, 500, 0));
+  });
+
+  it('rejects replay of a completed target', () => {
+    const target = captureLine();
+    api.hold('draw', false);
+    expect(h.voice!.execute({ distance_mm: 500 }, target).ok).toBe(true);
+    const replay = h.voice!.execute({ distance_mm: 100 }, target);
+    expect(replay.ok).toBe(false);
+    expect(api.sketch.size).toBe(1);
+  });
+
+  it('V toggles the voice control once and works while extruding', () => {
+    api.press('voice');
+    expect(h.voiceControl!.toggle).toHaveBeenCalledTimes(1);
+    startExtrusion();
+    api.press('voice');
+    expect(h.voiceControl!.toggle).toHaveBeenCalledTimes(2);
+    api.press('cancel');
+  });
+
+  it('freezes a face pull against gestures, face cycling and other actions, then applies the spoken distance', () => {
+    const serialized = startExtrusion();
+    api.hold('draw', true);
+    api.setCursor(v2(250, 200));
+    expect(api.extrusion()!.depth).toBe(50);
+    const target = h.voice!.capture();
+    api.hold('draw', false);
+    api.setCursor(v2(250, 100));
+    h.mouse.onMove?.(v2(400, 400));
+    emitHands(handAt(300, 300, { pinching: true }));
+    api.press('confirm');
+    api.press('cyclePlane');
+    api.hold('orbit', true);
+    api.setCursor(v2(600, 500));
+    runFrame();
+    expect(api.extrusion()!.depth).toBe(50);
+    expect(h.orbit.orbit).not.toHaveBeenCalled();
+    const result = h.voice!.execute({ distance_mm: 500 }, target);
+    expect(result.ok).toBe(true);
+    const solid = api.selected() as ExtrusionEntity;
+    expect(solid.depth).toBe(500);
+    expect(api.extrusion()).toBeNull();
+    api.press('undo');
+    expect(api.sketch.serialize()).toBe(serialized);
+  });
+
+  it('moves an existing solid inward by exactly the spoken distance', () => {
+    api.commands.addRect([v3(100, 100, 0), v3(500, 100, 0), v3(500, 400, 0), v3(100, 400, 0)]);
+    const rect = api.sketch.last as RectEntity;
+    expect(api.commands.extrude(rect.id, 80).ok).toBe(true);
+    const serialized = api.sketch.serialize();
+    api.setCursor(v2(250, 250));
+    api.press('select');
+    api.press('toggleGrid');
+    api.press('extrude');
+    api.hold('draw', true);
+    api.setCursor(v2(250, 287));
+    const target = h.voice!.capture();
+    api.hold('draw', false);
+    const result = h.voice!.execute({ distance_mm: 12.345 }, target);
+    expect(result.ok).toBe(true);
+    expect((api.selected() as ExtrusionEntity).depth).toBeCloseTo(80 - 12.345, 9);
+    api.press('undo');
+    expect(api.sketch.serialize()).toBe(serialized);
+  });
+
+  it('measures a face pull from the current grab baseline', () => {
+    startExtrusion();
+    api.hold('draw', true);
+    api.setCursor(v2(250, 230));
+    expect(api.extrusion()!.depth).toBe(20);
+    api.hold('draw', false);
+    api.hold('draw', true);
+    api.setCursor(v2(400, 193));
+    expect(api.extrusion()!.depth).toBe(57);
+    const target = h.voice!.capture();
+    api.hold('draw', false);
+    const result = h.voice!.execute({ distance_mm: 10 }, target);
+    expect(result.ok).toBe(true);
+    expect((api.selected() as ExtrusionEntity).depth).toBeCloseTo(30, 9);
+  });
+
+  it('still commits an ordinary stroke on release when voice was never used', () => {
+    api.press('toggleGrid');
+    api.setCursor(v2(100, 100));
+    api.hold('draw', true);
+    api.setCursor(v2(150, 100));
+    api.hold('draw', false);
+    const line = api.sketch.last;
+    expect(line?.type).toBe('line');
+    if (line?.type === 'line') expect(line.b).toEqual(v3(150, 100, 0));
   });
 });

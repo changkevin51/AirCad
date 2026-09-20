@@ -551,3 +551,50 @@ kbd {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.voice-control {
+  position: absolute;
+  top: 96px;
+  left: 12px;
+  z-index: 5;
+  width: min(320px, calc(100vw - 24px));
+  padding: 10px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--panel);
+  backdrop-filter: blur(6px);
+  font-size: 12px;
+}
+
+.voice-control button {
+  padding: 6px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.voice-control button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.voice-control button:focus-visible {
+  outline: 2px solid var(--ok);
+  outline-offset: 2px;
+}
+
+.voice-control__cancel {
+  margin-left: 8px;
+}
+
+.voice-control__status {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}

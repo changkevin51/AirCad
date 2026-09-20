@@ -22,6 +22,7 @@ export interface HudState {
   entityCount: number;
   selected: string | null;
   extrusion: { depth: number; dragging: boolean; face: string; pulled: number } | null;
+  voice?: string | null;
 }
 
 export interface KeyHint {
@@ -91,6 +92,7 @@ export class Hud {
       ['Tracking', tracking.text, tracking.tone],
     ];
     if (state.navAssist) chips.push(['Palm nav', 'on', 'ok']);
+    if (state.voice) chips.push(['Voice', state.voice, 'ok']);
     if (state.extrusion) chips.push(['Face', state.extrusion.face, 'ok'], ['Depth', formatMm(state.extrusion.depth), 'ok']);
     else if (state.selected) chips.push(['Selected', state.selected, 'warn']);
     const html = chips
@@ -100,7 +102,9 @@ export class Hud {
       this.lastChips = html;
       this.chips.innerHTML = html;
     }
-    const hintText = state.extrusion
+    const hintText = state.voice
+      ? `Voice draft frozen (${state.voice}) — you may release. V sends or retries · Esc cancels the draft.`
+      : state.extrusion
       ? state.tracking === 'lost'
         ? 'Tracking lost — depth paused. Show your hand, release the pinch, then pinch again to continue.'
         : state.mode === 'ORBIT' || state.mode === 'PAN'

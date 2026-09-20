@@ -18,6 +18,7 @@ import webbrowser
 from aiohttp import WSMsgType, web
 
 from tracker import protocol
+from voice_api import handle_voice
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -183,6 +184,7 @@ def create_app(*, send_to_freecad=None) -> web.Application:
     app.router.add_get("/ws", handle_ws)
     app.router.add_get("/api/health", handle_health)
     app.router.add_post("/api/export/freecad", handle_export)
+    app.router.add_post("/api/voice/command", handle_voice)
     if WEB_DIST.is_dir():
         app.router.add_static("/", WEB_DIST, show_index=False)
 

@@ -195,3 +195,85 @@ describe('extrusion gesture transaction', () => {
     expect(edit.depth).toBe(-251);
   });
 });
+
+describe('face pull measurement', () => {
+  const UP = v2(0, -1);
+  const box = (depth = 80): ExtrusionEntity => ({ ...profile(), type: 'extrusion', depth });
+
+  it('latches the first clear outward direction once the grab moves 12 projected pixels', () => {
+    const session = new ExtrusionSession(box(), 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 295), true, 'mouse', UP);
+    expect(session.measurement).toBeNull();
+    session.update(v2(300, 288), true, 'mouse', UP);
+    const measurement = session.measurement!;
+    expect(measurement.axis).toBe('n');
+    expect(measurement.sign).toBe(1);
+    expect(measurement.direction).toBe(1);
+    expect(measurement.base).toEqual(box());
+    measurement.base.corners[0].x = -1;
+    measurement.direction = -1;
+    expect(session.measurement!.base.corners[0].x).toBe(100);
+    expect(session.measurement!.direction).toBe(1);
+  });
+
+  it('latches inward as -1', () => {
+    const session = new ExtrusionSession(box(), 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 337), true, 'mouse', UP);
+    expect(session.measurement!.direction).toBe(-1);
+  });
+
+  it('keeps the measurement across release and pause but clears it on a fresh grab', () => {
+    const session = new ExtrusionSession(box(), 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 263), true, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+    session.update(v2(300, 263), false, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+    session.pause();
+    expect(session.measurement).not.toBeNull();
+    session.update(v2(300, 263), true, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+    session.update(v2(300, 263), false, 'mouse', UP);
+    session.update(v2(500, 500), true, 'mouse', UP);
+    expect(session.measurement).toBeNull();
+    session.update(v2(500, 463), true, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+  });
+
+  it('clears the measurement when the face changes or an exact value is typed', () => {
+    const session = new ExtrusionSession(box(), 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 263), true, 'mouse', UP);
+    session.update(v2(300, 263), false, 'mouse', UP);
+    expect(session.setFace(2)).toBe(true);
+    expect(session.measurement).toBeNull();
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 263), true, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+    session.setPull(40);
+    expect(session.measurement).toBeNull();
+    session.update(v2(300, 300), false, 'mouse', UP);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 263), true, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+    session.setDepth(-50);
+    expect(session.measurement).toBeNull();
+  });
+
+  it('snapshots the pending preview as a fresh grab baseline without touching the preview on read', () => {
+    const session = new ExtrusionSession(profile(), 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 280), true, 'mouse', UP);
+    session.update(v2(300, 280), false, 'mouse', UP);
+    session.update(v2(500, 500), true, 'mouse', UP);
+    session.update(v2(500, 463), true, 'mouse', UP);
+    const measurement = session.measurement!;
+    expect(measurement.base.type).toBe('extrusion');
+    expect((measurement.base as ExtrusionEntity).depth).toBeCloseTo(20);
+    const before = { depth: session.depth, corners: session.corners, pull: session.pulled };
+    expect(session.measurement).toEqual(measurement);
+    expect({ depth: session.depth, corners: session.corners, pull: session.pulled }).toEqual(before);
+  });
+});

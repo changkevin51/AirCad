@@ -11,7 +11,7 @@ import {
 } from './input/keymap';
 import { MouseSource } from './input/mouse-source';
 import { defaultTrackerUrl, TrackerClient, type CameraState, type ConnectionState, type HandsMessage, type NavMessage } from './input/tracker-client';
-import { Commands, parseDepth } from './model/commands';
+import { Commands, parseDepth, type CommandResult } from './model/commands';
 import { ExtrusionSession } from './model/extrusion';
 import { defaultFaceIndex, pickProfileFace, profileFaces } from './model/faces';
 import { pickFace } from './model/pick';
@@ -31,6 +31,8 @@ import { Hud, type KeyHint, type Mode } from './ui/hud';
 import { MeasureInput } from './ui/measure-input';
 import { CameraPip } from './ui/pip';
 import { Toasts } from './ui/toast';
+import { captureVoiceTarget, dispatchVoiceCommand, sameVoiceTarget, type VoiceTarget } from './voice/commands';
+import { VoiceControl } from './voice/control';
 
 const SNAP_TOLERANCE_PX = 14;
 const MIN_STROKE_PX = 6;
@@ -58,6 +60,7 @@ class App {
   private readonly pip: CameraPip;
   private readonly measure: MeasureInput;
   private readonly glyph: CursorGlyph;
+  private readonly voice: VoiceControl;
 
   private plane = new WorkPlane('XY');
   private readonly held = new Set<HoldAction>();
@@ -79,6 +82,8 @@ class App {
   private cameraState: CameraState | null = null;
   private reportedCameraError = false;
   private lastRecognition: { reason: string; points: Vec2[]; screenExtent: number } | null = null;
+  private modelRevision = 0;
+  private voiceCapture: { target: VoiceTarget; revision: number } | null = null;
 
   constructor(root: HTMLElement) {
     const viewportElement = document.createElement('div');
@@ -100,7 +105,15 @@ class App {
     this.measure = new MeasureInput(root);
     this.help = new HelpOverlay(root, this.platform);
 
+    this.voice = new VoiceControl(root, {
+      capture: () => this.captureVoiceOperation(),
+      isCurrent: (target) => this.isVoiceOperationCurrent(target),
+      execute: (command, target) => this.executeVoiceCommand(command, target),
+      notify: (message, error) => this.toasts.show(message, error ? 'error' : 'success', 6000),
+    });
+
     this.sketch.onChange(() => {
+      this.modelRevision += 1;
       this.sketchRenderer.setSketch(this.sketch.all.filter((entity) => entity.id !== this.extrusion?.profile.id));
       if (this.selectedId && !this.sketch.get(this.selectedId)) this.selectedId = null;
       this.sketchRenderer.setSelected(this.extrusion ? null : this.selected);
@@ -188,8 +201,71 @@ class App {
     this.mouse.releaseAll();
   }
 
+  private voiceReady(): boolean {
+    return this.focused && !this.navigationMode && !this.measure.isOpen && !this.help.visible;
+  }
+
+  private captureVoiceOperation(): VoiceTarget {
+    if (this.voiceCapture) {
+      if (!this.isVoiceOperationCurrent(this.voiceCapture.target)) throw new Error('Operation or geometry changed; cancel the draft and start again');
+      return this.voiceCapture.target;
+    }
+    const target = captureVoiceTarget(this.stroke, this.extrusion, this.voiceReady());
+    this.voiceCapture = { target, revision: this.modelRevision };
+    this.extrusion?.pause();
+    this.previousCursor = null;
+    this.held.clear();
+    this.mouse.releaseAll();
+    return target;
+  }
+
+  private isVoiceOperationCurrent(target: VoiceTarget): boolean {
+    if (!this.voiceCapture || this.voiceCapture.target !== target || this.voiceCapture.revision !== this.modelRevision) return false;
+    try {
+      return sameVoiceTarget(target, captureVoiceTarget(this.stroke, this.extrusion, this.voiceReady()));
+    } catch {
+      return false;
+    }
+  }
+
+  private executeVoiceCommand(command: unknown, target: VoiceTarget): CommandResult {
+    if (!this.isVoiceOperationCurrent(target)) {
+      return { ok: false, error: 'Operation or geometry changed; cancel the draft and start again' };
+    }
+    let current: VoiceTarget;
+    try {
+      current = captureVoiceTarget(this.stroke, this.extrusion, this.voiceReady());
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Invalid voice command' };
+    }
+    const result = dispatchVoiceCommand(command, target, this.commands, current, () => {
+      this.voiceCapture = null;
+      this.stroke = null;
+      this.extrusion = null;
+      this.planeBeforeStroke = null;
+      this.sketchRenderer.setInk(null);
+      this.sketchRenderer.setGhost(null, false, null);
+      this.sketchRenderer.setExtrusion(null);
+      this.sketchRenderer.setActiveFace(null);
+      this.held.clear();
+      this.mouse.releaseAll();
+    });
+    if (result.ok) {
+      this.lastCommitted = result.entity;
+      this.plane = this.plane.withAnchor(anchorAfterCommit(result.entity));
+      this.selectEntity(result.entity);
+      this.sketchRenderer.setLastLabel(result.entity);
+      this.sketchRenderer.setSketch(this.sketch.all);
+    }
+    return result;
+  }
+
   private setHold(action: HoldAction, down: boolean): void {
     if (down && (this.measure.isOpen || this.help.visible)) return;
+    if (this.voiceCapture) {
+      if (!down) this.held.delete(action);
+      return;
+    }
     if (down) this.held.add(action);
     else this.held.delete(action);
     if (action === 'orbit' || action === 'pan') {
@@ -257,7 +333,11 @@ class App {
 
   private doPress(action: PressAction): void {
     if (this.help.visible && action !== 'help' && action !== 'cancel') return;
-    if (this.extrusion && !['extrude', 'confirm', 'cancel', 'measure', 'help', 'togglePip', 'cyclePlane', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'zoomIn', 'zoomOut'].includes(action)) {
+    if (this.voiceCapture && action !== 'voice' && action !== 'cancel' && action !== 'togglePip') {
+      this.toasts.show('Voice distance pending: V to send/retry, Esc to cancel');
+      return;
+    }
+    if (this.extrusion && !['extrude', 'confirm', 'cancel', 'measure', 'help', 'togglePip', 'cyclePlane', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'zoomIn', 'zoomOut', 'voice'].includes(action)) {
       this.toasts.show('Finish the extrusion with Enter, or cancel with Esc');
       return;
     }
@@ -343,6 +423,9 @@ class App {
         else if (this.extrusion) this.cancelExtrusion();
         else if (this.stroke) this.cancelStroke();
         else this.selectEntity(null);
+        break;
+      case 'voice':
+        this.voice.toggle();
         break;
       case 'measure':
         this.openMeasure();
@@ -455,7 +538,7 @@ class App {
 
   private updateExtrusion(): void {
     const session = this.extrusion;
-    if (!session) return;
+    if (!session || this.voiceCapture) return;
     if (!this.focused || this.measure.isOpen || this.help.visible) {
       session.pause();
       return;
@@ -517,6 +600,8 @@ class App {
   }
 
   private cancelExtrusion(): void {
+    this.voiceCapture = null;
+    this.voice.cancel();
     this.extrusion = null;
     this.sketchRenderer.setExtrusion(null);
     this.sketchRenderer.setActiveFace(null);
@@ -595,6 +680,10 @@ class App {
   private onCursorMoved(): void {
     const position = this.cursor.position;
     const source = this.cursorSource;
+    if (this.voiceCapture) {
+      this.previousCursor = null;
+      return;
+    }
     if (!this.focused || this.measure.isOpen || this.help.visible || !position || !source) {
       this.previousCursor = null;
       this.extrusion?.pause();
@@ -621,7 +710,7 @@ class App {
   private sampleStroke(): void {
     const stroke = this.stroke;
     const position = this.cursor.position;
-    if (!stroke || !position || this.cursor.isLost || this.navigationMode) return;
+    if (!stroke || !position || this.cursor.isLost || this.navigationMode || this.voiceCapture) return;
     const snap = this.computeSnap(position);
     this.lastSnap = snap;
     stroke.add(snap, snap.raw, position);
@@ -668,6 +757,8 @@ class App {
   }
 
   private cancelStroke(): void {
+    this.voiceCapture = null;
+    this.voice.cancel();
     this.stroke = null;
     if (this.planeBeforeStroke) this.plane = this.planeBeforeStroke;
     this.planeBeforeStroke = null;
@@ -677,6 +768,15 @@ class App {
   }
 
   private updateGhost(stroke: StrokeSession): void {
+    const captured = this.voiceCapture?.target;
+    if (captured && captured.source === stroke && captured.operation.kind === 'line') {
+      const measurement = captured.operation.measurement;
+      const a = measurement.start;
+      const b = add(a, scale(measurement.direction, measurement.previewLength));
+      this.sketchRenderer.setInk(stroke.worldPath());
+      this.sketchRenderer.setGhost([a, b], false, { text: formatMm(measurement.previewLength), at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 } });
+      return;
+    }
     const result = stroke.recognize();
     this.sketchRenderer.setInk(stroke.worldPath());
     const shape = result.shape;
@@ -757,6 +857,7 @@ class App {
       entityCount: this.sketch.size,
       selected: this.selected ? describeEntity(this.selected) : null,
       extrusion: this.extrusion ? { depth: this.extrusion.depth, dragging: this.extrusion.dragging, face: this.extrusion.face.label, pulled: this.extrusion.pulled } : null,
+      voice: this.voiceCapture?.target.description ?? null,
     });
     this.hud.setKeys(this.keyHints(mode));
 
@@ -782,6 +883,12 @@ class App {
   private keyHints(mode: Mode): KeyHint[] {
     const key = (action: PressAction | HoldAction) => labelForAction(action, this.platform);
     if (this.measure.isOpen) return [{ key: 'Enter', label: 'apply' }, { key: 'Esc', label: 'cancel' }];
+    if (this.voiceCapture) {
+      return [
+        { key: key('voice'), label: 'send / retry' },
+        { key: key('cancel'), label: 'cancel draft' },
+      ];
+    }
     switch (mode) {
       case 'EXTRUDING':
         return [
@@ -791,6 +898,7 @@ class App {
           { key: key('pan'), label: 'pan' },
           { key: 'Enter / Q', label: 'apply' },
           { key: key('measure'), label: 'exact pull' },
+          { key: key('voice'), label: 'voice distance' },
           { key: '0', label: '3D view' },
           { key: key('cancel'), label: 'cancel' },
         ];
@@ -798,6 +906,7 @@ class App {
         return [
           { key: key('draw'), label: 'release to commit' },
           { key: 'X / Y / Z', label: 'hold to lock axis' },
+          { key: key('voice'), label: 'voice distance' },
           { key: key('cancel'), label: 'cancel stroke' },
         ];
       case 'ORBIT':

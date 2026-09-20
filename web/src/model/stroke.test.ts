@@ -4,7 +4,7 @@ import { snapCursor, type SnapResult } from './snap';
 import { makeRect, Sketch } from './sketch';
 import { alignRectToStart, anchorAfterCommit, buildEntityFromStroke, pullRectCorners, StrokeSession } from './stroke';
 import { circleStroke, rectStroke, topViewProjector } from './test-helpers';
-import { v2, v3, type Vec2, type Vec3 } from './vec';
+import { add, scale, v2, v3, type Vec2, type Vec3 } from './vec';
 
 const projector = topViewProjector(0.1, 400, 300);
 const plane = new WorkPlane('XY');
@@ -179,5 +179,86 @@ describe('StrokeSession: circles', () => {
       session.add(snap, snap.raw, snap.screen, 0);
     });
     expect(session.recognize().shape?.kind).not.toBe('circle');
+  });
+});
+
+describe('StrokeSession: line measurement', () => {
+  const origin = v3(100, 200, 300);
+
+  const snapFor = (workPlane: WorkPlane, world: Vec3, overrides: Partial<SnapResult> = {}): SnapResult => ({
+    type: 'free',
+    world,
+    plane: workPlane.toPlane(world),
+    screen: workPlane.toPlane(world),
+    onPlane: workPlane.contains(world),
+    raw: world,
+    ...overrides,
+  });
+
+  const sessionOn = (kind: PlaneKind): { plane: WorkPlane; session: StrokeSession } => {
+    const workPlane = new WorkPlane(kind, origin);
+    const session = new StrokeSession(workPlane, snapFor(workPlane, origin));
+    return { plane: workPlane, session };
+  };
+
+  it('does not latch a direction before the stroke moves 12 screen pixels', () => {
+    const { plane: workPlane, session } = sessionOn('XY');
+    const near = v3(105, 200, 300);
+    session.add(snapFor(workPlane, near), near, v2(105, 200), 0);
+    expect(session.measurement).toBeNull();
+  });
+
+  it('latches a signed unit direction in the work plane and keeps the first clear direction', () => {
+    const { plane: workPlane, session } = sessionOn('XY');
+    const first = v3(130, 240, 300);
+    session.add(snapFor(workPlane, first), first, v2(130, 240), 0);
+    const measurement = session.measurement!;
+    expect(measurement.plane).toBe('XY');
+    expect(measurement.start).toEqual(origin);
+    expect(measurement.direction.x).toBeCloseTo(0.6);
+    expect(measurement.direction.y).toBeCloseTo(0.8);
+    expect(measurement.direction.z).toBeCloseTo(0);
+    expect(measurement.previewLength).toBeCloseTo(50);
+    // Later motion in another direction updates the rough length, not the direction.
+    const second = v3(100, 260, 300);
+    session.add(snapFor(workPlane, second), second, v2(100, 260), 0);
+    const again = session.measurement!;
+    expect(again.direction).toEqual(measurement.direction);
+    expect(again.previewLength).toBeCloseTo(60);
+    expect(again.start).toEqual(origin);
+    expect(again.direction).not.toBe(measurement.direction);
+  });
+
+  it.each(['XZ', 'YZ'] as const)('measures a pure world-Z direction at a nonzero %s offset', (kind) => {
+    const { plane: workPlane, session } = sessionOn(kind);
+    const end = add(origin, scale(workPlane.v, 40));
+    session.add(snapFor(workPlane, end), end, workPlane.toPlane(end), 0);
+    const measurement = session.measurement!;
+    expect(measurement.plane).toBe(kind);
+    expect(measurement.direction).toEqual(workPlane.v);
+    expect(measurement.start).toEqual(origin);
+    expect(measurement.start[workPlane.info.normalAxis]).toBeCloseTo(origin[workPlane.info.normalAxis]);
+    expect(measurement.previewLength).toBeCloseTo(40);
+  });
+
+  it('rejects an off-plane hard axis lock as a direction', () => {
+    const { plane: workPlane, session } = sessionOn('XY');
+    const locked = v3(100, 200, 340);
+    session.add(snapFor(workPlane, locked, { type: 'lock', axis: 'z' }), locked, v2(100, 240), 0);
+    expect(session.measurement).toBeNull();
+    const inPlane = v3(140, 200, 300);
+    session.add(snapFor(workPlane, inPlane), inPlane, v2(140, 200), 0);
+    expect(session.measurement!.direction).toEqual(v3(1, 0, 0));
+  });
+
+  it('uses the in-plane ray hit of an off-plane object snap without moving the line off the plane', () => {
+    const { plane: workPlane, session } = sessionOn('XY');
+    const rayHit = v3(160, 200, 300);
+    const vertex = snapFor(workPlane, v3(160, 200, 2500), { type: 'vertex', onPlane: false });
+    session.add(vertex, rayHit, v2(160, 200), 0);
+    const measurement = session.measurement!;
+    expect(measurement.direction).toEqual(v3(1, 0, 0));
+    expect(measurement.start).toEqual(origin);
+    expect(measurement.start.z).toBe(300);
   });
 });

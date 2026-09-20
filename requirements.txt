@@ -4,3 +4,4 @@ opencv-python>=4.8,<6
 mediapipe==0.10.35
 numpy>=1.26,<3
 aiohttp>=3.9,<4
+certifi==2026.7.22

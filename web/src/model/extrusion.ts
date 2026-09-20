@@ -2,6 +2,13 @@ import { profileFaces, pushPull, type ProfileFace } from './faces';
 import type { ExtrusionEntity, ProfileEntity } from './sketch';
 import { clone, dot2, roundTo, sub2, type Vec2 } from './vec';
 
+export interface FacePullMeasurement {
+  base: ProfileEntity;
+  axis: ProfileFace['axis'];
+  sign: ProfileFace['sign'];
+  direction: 1 | -1;
+}
+
 /** A preview transaction: no model/history writes until the user confirms. */
 export class ExtrusionSession {
   /** Faces of the original profile, refreshed to track the preview geometry. */
@@ -13,7 +20,8 @@ export class ExtrusionSession {
   /** Geometry the active face's pull started from; re-snapshotted by setFace. */
   private base: ProfileEntity;
   private pull = 0;
-  private grab: { position: Vec2; pull: number } | null = null;
+  private grab: { position: Vec2; pull: number; base: ProfileEntity; axis: ProfileFace['axis']; sign: ProfileFace['sign'] } | null = null;
+  private measurementState: FacePullMeasurement | null = null;
   private source: string | null = null;
   private needsRelease = false;
 
@@ -47,6 +55,11 @@ export class ExtrusionSession {
   /** Total outward distance the active face has been pulled so far (mm). */
   get pulled(): number { return this.pull; }
 
+  /** Frozen grab baseline + first clear pull direction for voice, or null before 12 px of movement. */
+  get measurement(): FacePullMeasurement | null {
+    return this.measurementState ? structuredClone(this.measurementState) : null;
+  }
+
   /** Faces of the current preview; the active face's quad lives here. */
   currentFaces(): ProfileFace[] {
     return profileFaces(this.preview);
@@ -76,6 +89,7 @@ export class ExtrusionSession {
     this.faceIndex = index;
     this.base = this.preview;
     this.pull = 0;
+    this.measurementState = null;
     this.refreshFaces();
     return true;
   }
@@ -102,11 +116,23 @@ export class ExtrusionSession {
     }
     if (this.needsRelease) return;
     if (!this.grab) {
-      this.grab = { position: { ...position }, pull: this.pull };
+      const base: ProfileEntity = this.profile.type === 'rect' && this.depth === 0
+        ? { id: this.profile.id, type: 'rect', corners: structuredClone(this.corners) }
+        : structuredClone(this.preview);
+      const face = this.face;
+      this.grab = { position: { ...position }, pull: this.pull, base, axis: face.axis, sign: face.sign };
+      this.measurementState = null;
       return;
     }
     // Round the delta, so starting a drag never changes an existing exact depth.
-    const delta = dot2(sub2(position, this.grab.position), along) * this.mmPerPixel;
+    const pixels = dot2(sub2(position, this.grab.position), along);
+    const delta = pixels * this.mmPerPixel;
+    if (!this.measurementState && Math.abs(pixels) >= 12 && Number.isFinite(delta) && delta !== 0) {
+      this.measurementState = {
+        base: structuredClone(this.grab.base), axis: this.grab.axis, sign: this.grab.sign,
+        direction: delta > 0 ? 1 : -1,
+      };
+    }
     this.applyPull(this.grab.pull + roundTo(delta, this.step));
   }
 
@@ -119,6 +145,7 @@ export class ExtrusionSession {
   /** Set the active face's total pull to an exact value (mm) relative to the base snapshot. */
   setPull(distance: number): void {
     if (!Number.isFinite(distance)) return;
+    this.measurementState = null;
     this.applyPull(distance);
     this.pause();
   }
@@ -129,6 +156,7 @@ export class ExtrusionSession {
     this.depth = depth;
     this.base = this.preview;
     this.pull = 0;
+    this.measurementState = null;
     this.refreshFaces();
     this.pause();
   }
