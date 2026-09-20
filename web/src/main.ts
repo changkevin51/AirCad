@@ -751,14 +751,16 @@ class App {
     this.previousCursor = null;
     this.holdSources.clear();
     this.held.clear();
-    this.mouse.releaseAll();
+    // Drop the mouse button without treating it as a cancel — the draft stays frozen.
+    this.mouse.releaseAll(false);
     return target;
   }
 
   private isVoiceOperationCurrent(target: VoiceTarget): boolean {
     if (!this.voiceCapture || this.voiceCapture.target !== target || this.voiceCapture.revision !== this.modelRevision) return false;
     try {
-      return sameVoiceTarget(target, captureVoiceTarget(this.stroke, this.extrusion, this.voiceReady()));
+      // A frozen draft stays valid if the window blurs (mic permission, alt-tab).
+      return sameVoiceTarget(target, captureVoiceTarget(this.stroke, this.extrusion, true));
     } catch {
       return false;
     }
@@ -770,7 +772,7 @@ class App {
     }
     let current: VoiceTarget;
     try {
-      current = captureVoiceTarget(this.stroke, this.extrusion, this.voiceReady());
+      current = captureVoiceTarget(this.stroke, this.extrusion, true);
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'Invalid voice command' };
     }
@@ -2778,6 +2780,23 @@ class App {
   }
 
   private cancelInteraction(): void {
+    // A frozen voice draft is explicit; Esc or a successful execute clears it.
+    // Window blur / lost pointer capture must not abort the recognizer.
+    if (this.voiceCapture) {
+      this.extrusion?.pause();
+      this.pauseMove();
+      this.pauseScale();
+      this.holdSources.clear();
+      this.held.clear();
+      this.navMode = null;
+      this.mouse.releaseAll(false);
+      this.previousCursor = null;
+      this.endOrbitGesture(false);
+      this.orbit.cancelTransition(false);
+      this.endPalmNav(false);
+      this.inference.reset();
+      return;
+    }
     if (this.stroke) this.cancelStroke();
     this.extrusion?.pause();
     this.pauseMove();

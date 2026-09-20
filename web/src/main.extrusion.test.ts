@@ -39,6 +39,7 @@ const h = vi.hoisted(() => ({
     onMove?: (point: Vec2) => void;
     onHold?: (action: 'draw' | 'orbit' | 'pan', down: boolean) => void;
     onWheel?: (deltaY: number, point: Vec2) => void;
+    onCancel?: () => void;
   },
   listeners: new Map<string, ((event: unknown) => void)[]>(),
   hudStates: [] as { mode: string }[],
@@ -385,7 +386,9 @@ vi.mock('./input/mouse-source', () => ({
     constructor(_element: unknown, handlers: typeof h.mouse) {
       h.mouse = handlers;
     }
-    releaseAll(): void {}
+    releaseAll(notify = true): void {
+      if (notify) h.mouse.onCancel?.();
+    }
     dispose(): void {}
   },
 }));

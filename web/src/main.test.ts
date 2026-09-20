@@ -469,10 +469,12 @@ vi.mock('./voice/control', () => ({
 vi.mock('./input/mouse-source', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./input/mouse-source')>();
   class MockMouse {
-    constructor(_element: unknown, handlers: unknown) {
+    constructor(_element: unknown, handlers: { onCancel?: () => void }) {
       state.mouse = handlers;
     }
-    releaseAll() {}
+    releaseAll(notify = true) {
+      if (notify) state.mouse?.onCancel?.();
+    }
     dispose() {}
   }
   return { ...actual, MouseSource: MockMouse };
@@ -2091,6 +2093,25 @@ describe('voice distance', () => {
     api.setCursor(v2(130, 140));
     return h.voice!.capture();
   };
+
+  it('keeps a mouse-held stroke when V freezes the draft', () => {
+    api.setCursor(v2(100, 100));
+    h.mouse.onHold?.('draw', true);
+    api.setCursor(v2(130, 140));
+    const target = h.voice!.capture();
+    expect(target.operation.kind).toBe('line');
+    const result = h.voice!.execute({ distance_mm: 500 }, target);
+    expect(result.ok).toBe(true);
+    expect(api.sketch.last?.type).toBe('line');
+  });
+
+  it('keeps the frozen draft if the window blurs during recognition', () => {
+    const target = captureLine();
+    dispatchWindow('blur', {});
+    const result = h.voice!.execute({ distance_mm: 500 }, target);
+    expect(result.ok).toBe(true);
+    expect(api.sketch.last?.type).toBe('line');
+  });
 
   it('freezes the draft on capture, applies the spoken length on execute and selects the line', () => {
     const serialized = api.sketch.serialize();
