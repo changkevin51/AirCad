@@ -29,5 +29,5 @@ The browser tests mock `/api/tracker` and `/ws`, so no Python server or camera i
 
 - Native profiles are any simple closed planar outline: polygons (`PolygonEntity`), rectangles, and virtual `LineLoopProfile`s detected from endpoint-connected lines. Virtual loops are never serialized; extruding one consumes only its unshared source lines as a single undoable edit.
 - Shared polygon geometry lives in `web/src/model/polygon.ts` (planarity, simple-ring validation, `ShapeUtils.triangulateShape` triangulation) and loop detection in `web/src/model/loops.ts`; keep them free of runtime import cycles.
-- Circle fitting/drawing was removed: round closed strokes become polygons. Legacy saved circles still load, render, and serialize, but are read-only (no extrude/diameter edit) — do not reintroduce a circle command without an explicit request.
+- Circle fitting/drawing was removed: round closed strokes square up to rectangles. Legacy saved circles still load, render, and serialize, but are read-only (no extrude/diameter edit) — do not reintroduce a circle command without an explicit request.
 - Out of scope: holes, non-planar or self-crossing outlines. Do not silently clamp or grid-round typed/voice measurements.

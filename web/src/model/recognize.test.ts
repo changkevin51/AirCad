@@ -219,53 +219,54 @@ describe('recognizeStroke: closed outlines', () => {
     return points;
   };
 
-  it('recognises trapezoids, pentagons and concave outlines as polygons with vertices preserved', () => {
-    const cases: Vec2[][] = [
-      [v2(0, 0), v2(400, 0), v2(300, 200), v2(100, 200)],
-      [v2(0, 0), v2(300, 0), v2(400, 200), v2(200, 350), v2(-50, 200)],
-      [v2(0, 0), v2(400, 0), v2(400, 100), v2(100, 100), v2(100, 300), v2(0, 300)],
-    ];
-    for (const corners of cases) {
+  it('recognises trapezoids and pentagons as rectangles, and keeps a concave outline as a polygon', () => {
+    const trapezoid = [v2(0, 0), v2(400, 0), v2(300, 200), v2(100, 200)];
+    const pentagon = [v2(0, 0), v2(300, 0), v2(400, 200), v2(200, 350), v2(-50, 200)];
+    const concave = [v2(0, 0), v2(400, 0), v2(400, 100), v2(100, 100), v2(100, 300), v2(0, 300)];
+    for (const corners of [trapezoid, pentagon]) {
       for (const jitter of [0, 4]) {
         const result = recognizeStroke(polyStroke(corners, 20, jitter));
-        expect(result.shape?.kind).toBe('polygon');
-        if (result.shape?.kind !== 'polygon') continue;
-        if (jitter === 0) expect(result.shape.corners.length).toBe(corners.length);
-        else expect(result.shape.corners.length).toBeGreaterThanOrEqual(corners.length);
-        for (const corner of corners) {
-          expect(result.shape.corners.some((c) => Math.hypot(c.x - corner.x, c.y - corner.y) <= 2 * Math.max(1, jitter))).toBe(true);
-        }
+        expect(result.shape?.kind).toBe('rect');
       }
     }
-  });
-
-  it('keeps a closed round stroke a many-sided sampled polygon, never a circle or rectangle', () => {
-    for (const count of [80, 160]) {
-      const result = recognizeStroke(circleStroke(200, -300, 500, count));
+    for (const jitter of [0, 4]) {
+      const result = recognizeStroke(polyStroke(concave, 20, jitter));
       expect(result.shape?.kind).toBe('polygon');
       if (result.shape?.kind !== 'polygon') continue;
-      expect(result.shape.corners.length).toBeGreaterThan(8);
-      const cx = result.shape.corners.reduce((s, c) => s + c.x, 0) / result.shape.corners.length;
-      const cy = result.shape.corners.reduce((s, c) => s + c.y, 0) / result.shape.corners.length;
-      expect(Math.hypot(cx - 200, cy + 300)).toBeLessThan(20);
-      for (const corner of result.shape.corners) {
-        expect(Math.hypot(corner.x - 200, corner.y + 300)).toBeCloseTo(500, 0);
+      if (jitter === 0) expect(result.shape.corners.length).toBe(concave.length);
+      else expect(result.shape.corners.length).toBeGreaterThanOrEqual(concave.length);
+      for (const corner of concave) {
+        expect(result.shape.corners.some((c) => Math.hypot(c.x - corner.x, c.y - corner.y) <= 2 * Math.max(1, jitter))).toBe(true);
       }
     }
   });
 
-  it('preserves the uneven radii of a wobbly round outline instead of fitting a circle', () => {
+  it('squares a closed round stroke up to a rectangle and never fits a circle', () => {
+    for (const count of [80, 160]) {
+      const result = recognizeStroke(circleStroke(200, -300, 500, count));
+      expect(result.shape?.kind).toBe('rect');
+      if (result.shape?.kind !== 'rect') continue;
+      expect(result.shape.corners).toHaveLength(4);
+      expect(result.shape.width).toBeGreaterThan(980);
+      expect(result.shape.width).toBeLessThan(1020);
+      expect(result.shape.height).toBeGreaterThan(980);
+      expect(result.shape.height).toBeLessThan(1020);
+      const cx = result.shape.corners.reduce((s, c) => s + c.x, 0) / 4;
+      const cy = result.shape.corners.reduce((s, c) => s + c.y, 0) / 4;
+      expect(Math.hypot(cx - 200, cy + 300)).toBeLessThan(20);
+    }
+  });
+
+  it('squares a wobbly round outline up to a rectangle instead of fitting a circle', () => {
     const points = Array.from({ length: 121 }, (_, i) => {
       const angle = (i * Math.PI * 2) / 120;
       const radius = 500 * (1 + 0.05 * Math.sin(angle * 3) + 0.025 * Math.cos(angle * 7));
       return v2(200 + Math.cos(angle) * radius * 1.04, -300 + Math.sin(angle) * radius * 0.97);
     });
     const result = recognizeStroke(points);
-    expect(result.shape?.kind).toBe('polygon');
-    if (result.shape?.kind !== 'polygon') return;
-    expect(result.shape.corners.length).toBeGreaterThan(8);
-    const radii = result.shape.corners.map((c) => Math.hypot(c.x - 200, c.y + 300));
-    expect(Math.max(...radii) - Math.min(...radii)).toBeGreaterThan(10);
+    expect(result.shape?.kind).toBe('rect');
+    if (result.shape?.kind !== 'rect') return;
+    expect(result.shape.corners).toHaveLength(4);
   });
 
   it.each([240, 270, 300])('leaves a %s degree arc unrecognized in either direction', (sweep) => {
@@ -291,12 +292,10 @@ describe('recognizeStroke: closed outlines', () => {
     expect(recognizeStroke([v2(0, 0), v2(500, 0), v2(0, 0)]).shape).toBeNull();
   });
 
-  it('simplifies a dense pentagon down to the real corners', () => {
+  it('squares a dense pentagon up to a rectangle', () => {
     const pentagon = polyStroke([v2(0, 0), v2(300, 0), v2(400, 200), v2(200, 350), v2(-50, 200)], 120, 0);
     const result = recognizeStroke(pentagon);
-    expect(result.shape?.kind).toBe('polygon');
-    if (result.shape?.kind !== 'polygon') return;
-    expect(result.shape.corners.length).toBe(5);
+    expect(result.shape?.kind).toBe('rect');
   });
 
   it('fits a clean three-corner stroke as a triangle rather than a sampled polygon', () => {
@@ -304,17 +303,58 @@ describe('recognizeStroke: closed outlines', () => {
     expect(result.shape?.kind).toBe('triangle');
   });
 
-  it('does not box arbitrary quadrilaterals into rectangles', () => {
+  it('boxes an arbitrary quadrilateral into a rectangle', () => {
     const result = recognizeStroke(polyStroke([v2(0, 0), v2(400, 30), v2(350, 300), v2(80, 250)], 25, 0));
-    expect(result.shape?.kind).toBe('polygon');
-    if (result.shape?.kind !== 'polygon') return;
-    expect(result.shape.corners.length).toBe(4);
+    expect(result.shape?.kind).toBe('rect');
+    if (result.shape?.kind !== 'rect') return;
+    expect(result.shape.corners).toHaveLength(4);
   });
 
   it('still recognises genuine rectangles over the polygon fallback', () => {
     expect(recognizeStroke(rectStroke(0, 0, 1000, 1000)).shape?.kind).toBe('rect');
     expect(recognizeStroke(rotatePoints(rectStroke(0, 0, 1000, 1000), Math.PI / 4, v2(500, 500))).shape?.kind).toBe('rect');
     expect(recognizeStroke(rectStroke(0, 0, 1000, 1000, { jitter: 30 })).shape?.kind).toBe('rect');
+  });
+
+  it('squares a rectangle with rounded corners up to the intended box', () => {
+    const x0 = 100;
+    const y0 = 200;
+    const w = 800;
+    const h = 500;
+    const r = 80;
+    const points: Vec2[] = [];
+    const arc = (cx: number, cy: number, start: number, sweep: number) => {
+      for (let i = 0; i <= 12; i++) {
+        const t = start + sweep * i / 12;
+        points.push(v2(cx + Math.cos(t) * r, cy + Math.sin(t) * r));
+      }
+    };
+    arc(x0 + w - r, y0 + r, -Math.PI / 2, Math.PI / 2);
+    arc(x0 + w - r, y0 + h - r, 0, Math.PI / 2);
+    arc(x0 + r, y0 + h - r, Math.PI / 2, Math.PI / 2);
+    arc(x0 + r, y0 + r, Math.PI, Math.PI / 2);
+    points.push({ ...points[0] });
+    const result = recognizeStroke(points);
+    expect(result.shape?.kind).toBe('rect');
+    if (result.shape?.kind !== 'rect') return;
+    expectRectClose(result.shape, x0, y0, w, h, 8);
+  });
+
+  it('squares a rectangle that overshoots the closing corner', () => {
+    const result = recognizeStroke(rectStroke(0, 0, 1200, 800, { overshoot: 0.12, gapFraction: 0.04 }));
+    expect(result.shape?.kind).toBe('rect');
+    if (result.shape?.kind !== 'rect') return;
+    expectRectClose(result.shape, 0, 0, 1200, 800, 40);
+  });
+
+  it('squares a rectangle with a shallow fifth bump on one side', () => {
+    const points = rectStroke(0, 0, 1000, 600, { pointsPerSide: 40 });
+    const bumpAt = 20;
+    points.splice(bumpAt, 0, v2(500, -40));
+    const result = recognizeStroke(points);
+    expect(result.shape?.kind).toBe('rect');
+    if (result.shape?.kind !== 'rect') return;
+    expectRectClose(result.shape, 0, 0, 1000, 600, 50);
   });
 });
 

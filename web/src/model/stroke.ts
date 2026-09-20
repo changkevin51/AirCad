@@ -195,7 +195,7 @@ export class StrokeSession {
     const rawResult = recognizeStroke(outline, options);
     if (rawResult.shape?.kind === 'polygon' || rawResult.shape?.kind === 'rect' || rawResult.shape?.kind === 'triangle') return rawResult;
     const snapped = recognizeStroke(this.planePoints(), options);
-    if (snapped.shape?.kind === 'polygon' && !rawResult.shape) return rawResult;
+    if ((snapped.shape?.kind === 'polygon' || snapped.shape?.kind === 'rect') && !rawResult.shape) return rawResult;
     if (snapped.shape?.kind === 'triangle') return rawResult;
     return snapped.shape ? snapped : rawResult;
   }

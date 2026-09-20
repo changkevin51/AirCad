@@ -10,7 +10,7 @@ import {
   StrokeSession,
 } from './stroke';
 import { circleStroke, rectStroke, topViewProjector, triangleStroke } from './test-helpers';
-import { add, distance, dot, normalize, scale, sub, v2, v3, type Vec2, type Vec3 } from './vec';
+import { add, dot, normalize, scale, sub, v2, v3, type Vec2, type Vec3 } from './vec';
 
 const projector = topViewProjector(0.1, 400, 300);
 const plane = new WorkPlane('XY');
@@ -135,7 +135,7 @@ describe('buildEntityFromStroke', () => {
 });
 
 describe('StrokeSession: closed outlines', () => {
-  it.each(['XY', 'XZ', 'YZ'] as const)('recognises a raw closed round stroke on %s as a polygon on the real plane', (kind) => {
+  it.each(['XY', 'XZ', 'YZ'] as const)('recognises a raw closed round stroke on %s as a rectangle on the real plane', (kind) => {
     const outlinePlane = new WorkPlane(kind, v3(100, 200, 300));
     const raw = circleStroke(700, 800, 250, 60);
     const snapFor = (p: Vec2): SnapResult => ({
@@ -151,19 +151,21 @@ describe('StrokeSession: closed outlines', () => {
       session.add(snapFor(p), outlinePlane.toWorld(p), v2(p.x / 2, p.y / 2), 0);
     }
     const result = session.recognize();
-    expect(result.shape?.kind).toBe('polygon');
-    if (result.shape?.kind !== 'polygon') return;
-    const entity = buildEntityFromStroke(session, result.shape, { projector, vertices: [], tolerancePx: 14, gridStep: 1000 });
-    expect(entity.type).toBe('polygon');
-    if (entity.type !== 'polygon') return;
-    const centre = outlinePlane.toWorld(v2(700, 800));
-    expect(entity.corners.length).toBeGreaterThan(8);
-    for (const corner of entity.corners) {
-      expect(outlinePlane.contains(corner)).toBe(true);
-      expect(distance(corner, centre)).toBeCloseTo(250, 0);
-    }
-    const first = outlinePlane.toPlane(entity.corners[0]);
-    expect(Math.hypot(first.x - 950, first.y - 800)).toBeLessThan(1);
+    expect(result.shape?.kind).toBe('rect');
+    if (result.shape?.kind !== 'rect') return;
+    const entity = buildEntityFromStroke(session, result.shape, { projector, vertices: [], tolerancePx: 14, gridStep: 0 });
+    expect(entity.type).toBe('rect');
+    if (entity.type !== 'rect') return;
+    expect(entity.corners).toHaveLength(4);
+    for (const corner of entity.corners) expect(outlinePlane.contains(corner)).toBe(true);
+    const local = entity.corners.map((corner) => outlinePlane.toPlane(corner));
+    const cx = local.reduce((s, p) => s + p.x, 0) / 4;
+    const cy = local.reduce((s, p) => s + p.y, 0) / 4;
+    expect(Math.hypot(cx - 700, cy - 800)).toBeLessThan(20);
+    const width = Math.max(...local.map((p) => p.x)) - Math.min(...local.map((p) => p.x));
+    const height = Math.max(...local.map((p) => p.y)) - Math.min(...local.map((p) => p.y));
+    expect(Math.max(width, height)).toBeGreaterThan(450);
+    expect(Math.max(width, height)).toBeLessThan(800);
     expect(anchorAfterCommit(entity)).toEqual(entity.corners[0]);
   });
 
@@ -200,7 +202,7 @@ describe('StrokeSession: closed outlines', () => {
       session.add(snap, snap.raw, snap.screen, 0);
     });
     const result = session.recognize();
-    expect(result.shape?.kind).toBe('polygon');
+    expect(result.shape?.kind).toBe('rect');
   });
 });
 

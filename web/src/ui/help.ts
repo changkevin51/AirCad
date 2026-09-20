@@ -72,7 +72,7 @@ export class HelpOverlay {
         return `<h3>Getting started</h3>
           ${paragraph('AirCAD is a sketch-first modeler: you draw on a work plane, then push or pull shapes into solids. Everything is in millimetres; typed values also accept cm and m.')}
           <ol>
-            <li>Left-drag on the canvas — or hold <kbd>Space</kbd> and move — to draw. A straight stroke becomes a line; a closed loop becomes a rectangle, fitted triangle, polygon, or outline assembled from snapped lines.</li>
+            <li>Left-drag on the canvas — or hold <kbd>Space</kbd> and move — to draw. A straight stroke becomes a line; a closed loop squares up to a rectangle when it is even loosely box-like (including round loops), otherwise a fitted triangle or a polygon. Snapped lines can still assemble an outline.</li>
             <li>Click a shape (or press <kbd>S</kbd> under the cursor) to select it. The Model panel and the Properties inspector follow the same selection.</li>
             <li>Type exact dimensions with <kbd>L</kbd>, or edit Width/Height/Depth in the Properties inspector. <kbd>M</kbd> moves a selected shape; <kbd>R</kbd> scales from a corner.</li>
             <li><kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> undo and redo; <kbd>Delete</kbd> removes the selected object.</li>

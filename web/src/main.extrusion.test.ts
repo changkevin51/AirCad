@@ -889,7 +889,7 @@ describe('drawing commits through the timed hand path', () => {
     expect(['rect', 'polygon']).toContain(api.sketch.last?.type);
   });
 
-  it('commits a closed circular stroke as a polygon and opens a solid preview with Q', () => {
+  it('commits a closed circular stroke as a rectangle and opens a solid preview with Q', () => {
     const points = circleStroke(300, 250, 100);
     api.press('toggleGrid');
     api.setCursor(points[0]);
@@ -897,8 +897,8 @@ describe('drawing commits through the timed hand path', () => {
     for (const point of points.slice(1)) api.setCursor(point);
     api.hold('draw', false);
 
-    expect(api.lastRecognition()?.reason).toBe('closed outline');
-    expect(api.sketch.last?.type).toBe('polygon');
+    expect(['rectangle', 'oriented rectangle']).toContain(api.lastRecognition()?.reason);
+    expect(api.sketch.last?.type).toBe('rect');
     expect(api.selected()?.id).toBe(api.sketch.last?.id);
     api.press('extrude');
     expect(api.extrusion()?.preview.type).toBe('extrusion');

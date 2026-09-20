@@ -89,7 +89,7 @@ If Windows or macOS asked for camera access on first launch, allow it and start 
 
 ## Draw a closed outline
 
-Hold **Space** or left-drag around any simple closed shape — triangles, concave outlines, and even round loops are kept as drawn (a closed round stroke becomes a polygon outline; circles are no longer fitted). Fitted triangles stay as a dedicated triangle entity. You can also draw the sides as separate lines whose endpoints snap together: the closed loop is then recognised and selectable as one outline. An outline must lie flat on one work plane and must not cross itself; holes are not supported.
+Hold **Space** or left-drag around any simple closed shape. A closed loop that is even loosely rectangular — including round loops, rounded corners, and wobbly sides — squares up to a rectangle. Circles are not fitted. Fitted triangles stay as a dedicated triangle entity. Distinct concave outlines stay polygons. You can also draw the sides as separate lines whose endpoints snap together: the closed loop is then recognised and selectable as one outline. An outline must lie flat on one work plane and must not cross itself; holes are not supported.
 
 Select any shape and press **M** to move it on the work plane, or **R** to scale it by dragging a corner while the opposite corner stays fixed. **Enter** (or **M** / **R**) applies the preview as one undoable edit. **Esc** cancels.
 

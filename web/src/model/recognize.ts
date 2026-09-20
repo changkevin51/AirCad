@@ -66,6 +66,10 @@ export interface RecognizeOptions {
   rectangleEdgeFrac: number;
   outlineRdpFrac: number;
   outlineClosureFrac: number;
+  /** A loose rectangle candidate is closed when start/end are within this fraction of the bbox diagonal. */
+  rectClosureFrac: number;
+  /** Minimum polygon area / oriented-bounding-box area for the aggressive rectangle fallback. */
+  obbAreaRatioMin: number;
 }
 
 export const DEFAULT_RECOGNIZE_OPTIONS: RecognizeOptions = {
@@ -84,6 +88,8 @@ export const DEFAULT_RECOGNIZE_OPTIONS: RecognizeOptions = {
   rectangleEdgeFrac: 0.025,
   outlineRdpFrac: 0.0025,
   outlineClosureFrac: 0.03,
+  rectClosureFrac: 0.28,
+  obbAreaRatioMin: 0.52,
 };
 
 const TWO_PI = Math.PI * 2;
@@ -279,33 +285,19 @@ function normalizeAngle90(angle: number): number {
   return a;
 }
 
-function recognizeRectangle(points: readonly Vec2[], diagonal: number, opts: RecognizeOptions, first: Vec2): RecognizeResult | null {
-  const simplified = simplifyRdp(points, opts.rdpFrac * diagonal);
-  let ring = simplified;
-  if (ring.length > 1 && distance2(ring[0], ring[ring.length - 1]) <= opts.closureFrac * diagonal) {
-    ring = ring.slice(0, -1);
-  }
-  ring = removeShallowCorners(ring, opts.collinearDeg * DEG);
-  if (ring.length !== 4) return null;
-
-  const turns = turningAngles(ring);
-  if (turns.some((turn) => Math.abs(Math.abs(turn) - Math.PI / 2) > opts.rectangleTurnDeg * DEG)) return null;
-  const turning = turns.reduce((sum, t) => sum + t, 0);
-  if (Math.abs(Math.abs(turning) - TWO_PI) > opts.turningTolerance * TWO_PI) return null;
-
-  const area = Math.abs(polygonArea(points));
+function rectangleFromObb(
+  points: readonly Vec2[],
+  first: Vec2,
+  opts: RecognizeOptions,
+  minRatio = opts.obbAreaRatioMin,
+  maxRatio = 1.02,
+): RecognizeResult | null {
+  const signedArea = polygonArea(points);
+  const area = Math.abs(signedArea);
   const obb = minAreaRect(convexHull(points));
   if (!obb || obb.area < 1e-12) return null;
-  if (area / obb.area < opts.areaRatioMin) return null;
-
-  const obbAligned = points.map((p) => rotate(p, -obb.angle));
-  const [suLo, suHi] = robustExtent(obbAligned.map((p) => p.x));
-  const [svLo, svHi] = robustExtent(obbAligned.map((p) => p.y));
-  const edgeErrors = obbAligned.map((p) => Math.min(
-    Math.abs(p.x - suLo), Math.abs(p.x - suHi),
-    Math.abs(p.y - svLo), Math.abs(p.y - svHi),
-  ));
-  if (percentile(edgeErrors, 0.85) > opts.rectangleEdgeFrac * diagonal) return null;
+  const ratio = area / obb.area;
+  if (ratio < minRatio || ratio > maxRatio) return null;
 
   const tilt = normalizeAngle90(obb.angle);
   const oriented = Math.abs(tilt) > opts.orientedDeg * DEG;
@@ -319,7 +311,7 @@ function recognizeRectangle(points: readonly Vec2[], diagonal: number, opts: Rec
   if (width < opts.minSize || height < opts.minSize) return null;
 
   let corners = [v2(uLo, vLo), v2(uHi, vLo), v2(uHi, vHi), v2(uLo, vHi)].map((c) => rotate(c, angle));
-  if (turning < 0) corners = [corners[0], corners[3], corners[2], corners[1]];
+  if (signedArea < 0) corners = [corners[0], corners[3], corners[2], corners[1]];
   let startIndex = 0;
   let startDistance = Infinity;
   corners.forEach((c, i) => {
@@ -344,6 +336,36 @@ function recognizeRectangle(points: readonly Vec2[], diagonal: number, opts: Rec
     },
     reason: oriented ? 'oriented rectangle' : 'rectangle',
   };
+}
+
+function recognizeRectangle(points: readonly Vec2[], diagonal: number, opts: RecognizeOptions, first: Vec2): RecognizeResult | null {
+  const simplified = simplifyRdp(points, opts.rdpFrac * diagonal);
+  let ring = simplified;
+  if (ring.length > 1 && distance2(ring[0], ring[ring.length - 1]) <= opts.closureFrac * diagonal) {
+    ring = ring.slice(0, -1);
+  }
+  ring = removeShallowCorners(ring, opts.collinearDeg * DEG);
+  if (ring.length !== 4) return null;
+
+  const turns = turningAngles(ring);
+  if (turns.some((turn) => Math.abs(Math.abs(turn) - Math.PI / 2) > opts.rectangleTurnDeg * DEG)) return null;
+  const turning = turns.reduce((sum, t) => sum + t, 0);
+  if (Math.abs(Math.abs(turning) - TWO_PI) > opts.turningTolerance * TWO_PI) return null;
+
+  const obb = minAreaRect(convexHull(points));
+  if (!obb || obb.area < 1e-12) return null;
+  if (Math.abs(polygonArea(points)) / obb.area < opts.areaRatioMin) return null;
+
+  const obbAligned = points.map((p) => rotate(p, -obb.angle));
+  const [suLo, suHi] = robustExtent(obbAligned.map((p) => p.x));
+  const [svLo, svHi] = robustExtent(obbAligned.map((p) => p.y));
+  const edgeErrors = obbAligned.map((p) => Math.min(
+    Math.abs(p.x - suLo), Math.abs(p.x - suHi),
+    Math.abs(p.y - svLo), Math.abs(p.y - svHi),
+  ));
+  if (percentile(edgeErrors, 0.85) > opts.rectangleEdgeFrac * diagonal) return null;
+
+  return rectangleFromObb(points, first, opts, opts.areaRatioMin);
 }
 
 function fitTriangle(points: readonly Vec2[], size: number, opts: RecognizeOptions): RecognizedTriangle | null {
@@ -381,7 +403,9 @@ function fitTriangle(points: readonly Vec2[], size: number, opts: RecognizeOptio
 /**
  * Recognise a pen stroke (2D plane coordinates, mm) as a straight line, a
  * fitted triangle or rectangle, or any other simple closed outline (a polygon
- * whose corners are stroke samples).  Open strokes return `shape: null`.
+ * whose corners are stroke samples). Closed strokes that are even loosely
+ * rectangular, including round loops, square up to a rectangle. Open strokes
+ * return `shape: null`.
  */
 export function recognizeStroke(input: readonly Vec2[], options: Partial<RecognizeOptions> = {}): RecognizeResult {
   const opts = { ...DEFAULT_RECOGNIZE_OPTIONS, ...options };
@@ -412,6 +436,10 @@ export function recognizeStroke(input: readonly Vec2[], options: Partial<Recogni
   if (chord <= opts.closureFrac * box.diagonal) {
     const rect = recognizeRectangle(points, box.diagonal, opts, first);
     if (rect) return rect;
+  }
+  if (chord <= opts.rectClosureFrac * box.diagonal) {
+    const fitted = rectangleFromObb(points, first, opts);
+    if (fitted) return fitted;
   }
 
   if (chord > opts.outlineClosureFrac * box.diagonal) return { shape: null, reason: 'open stroke' };

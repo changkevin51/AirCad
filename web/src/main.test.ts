@@ -2032,11 +2032,11 @@ describe('closed outlines and line loops', () => {
     for (const point of round.slice(1)) api.setCursor(point);
     runFrame();
     expect(h.ghost?.closed).toBe(true);
-    expect(h.ghost!.points.length).toBeGreaterThan(8);
+    expect(h.ghost!.points.length).toBe(4);
     api.hold('draw', false);
     const shape = api.sketch.last;
-    expect(shape?.type).toBe('polygon');
-    if (shape?.type === 'polygon') expect(shape.corners.length).toBeGreaterThan(8);
+    expect(shape?.type).toBe('rect');
+    if (shape?.type === 'rect') expect(shape.corners).toHaveLength(4);
     const arc = Array.from({ length: 30 }, (_, i) => v2(400 + Math.cos((i / 29) * Math.PI * 1.4) * 200, 600 + Math.sin((i / 29) * Math.PI * 1.4) * 200));
     drawStroke(arc);
     expect(api.sketch.size).toBe(1);
