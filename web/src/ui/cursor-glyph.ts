@@ -13,7 +13,7 @@ export class CursorGlyph {
   private readonly readout: HTMLDivElement;
   private lastClass = '';
 
-  constructor(root: HTMLElement) {
+  constructor(private readonly root: HTMLElement) {
     this.element = document.createElement('div');
     this.element.className = 'cursor hidden';
     this.glyph = document.createElement('div');
@@ -33,7 +33,11 @@ export class CursorGlyph {
       return;
     }
     this.element.classList.remove('hidden');
+    // snap.screen is canvas-local; flip the readout before it would clip at
+    // the right or bottom edge of the overlay.
     this.element.style.transform = `translate(${snap.screen.x}px, ${snap.screen.y}px)`;
+    this.element.classList.toggle('cursor--flip-x', snap.screen.x > this.root.clientWidth - 120);
+    this.element.classList.toggle('cursor--flip-y', snap.screen.y > this.root.clientHeight - 48);
     const className = `cursor__glyph cursor__glyph--${snap.type}${drawing ? ' cursor__glyph--drawing' : ''}${snap.onPlane ? '' : ' cursor__glyph--offplane'}`;
     if (className !== this.lastClass) {
       this.lastClass = className;

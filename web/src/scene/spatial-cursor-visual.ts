@@ -1,14 +1,15 @@
 import * as THREE from 'three';
 import type { SpatialSnapType } from '../model/spatial-snap';
 import type { Vec3 } from '../model/vec';
+import { THREE_COLORS } from '../ui/theme';
 
 const SNAP_COLORS: Record<SpatialSnapType, number> = {
-  vertex: 0xffc857,
-  midpoint: 0x7fd4c1,
-  edge: 0x8ab4f8,
-  grid: 0xb8c0cc,
-  lock: 0xe8a0bf,
-  free: 0xffc857,
+  vertex: THREE_COLORS.hoverSnap,
+  midpoint: THREE_COLORS.success,
+  edge: THREE_COLORS.accent,
+  grid: 0xc8cdd3,
+  lock: THREE_COLORS.warning,
+  free: THREE_COLORS.hoverSnap,
 };
 
 export interface SpatialCursorVisualOptions {
@@ -32,30 +33,30 @@ export class SpatialCursorVisual {
     this.group.name = 'spatial-cursor';
     this.marker = new THREE.Mesh(
       new THREE.SphereGeometry(4, 12, 8),
-      new THREE.MeshBasicMaterial({ color: 0xffc857, depthTest: false }),
+      new THREE.MeshBasicMaterial({ color: THREE_COLORS.hoverSnap, depthTest: false }),
     );
     this.marker.renderOrder = 21;
     this.radiusSphere = new THREE.Mesh(
       new THREE.SphereGeometry(1, 20, 14),
-      new THREE.MeshBasicMaterial({ color: 0xffc857, transparent: true, opacity: 0.12, depthWrite: false }),
+      new THREE.MeshBasicMaterial({ color: THREE_COLORS.hoverSnap, transparent: true, opacity: 0.12, depthWrite: false }),
     );
     this.radiusSphere.renderOrder = 19;
     this.targetMark = new THREE.Mesh(
       new THREE.SphereGeometry(6, 12, 8),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false }),
+      new THREE.MeshBasicMaterial({ color: THREE_COLORS.text, depthTest: false }),
     );
     this.targetMark.renderOrder = 22;
     this.targetMark.visible = false;
     this.dropPositions = new THREE.Float32BufferAttribute(6, 3);
     this.drop = new THREE.Line(
       new THREE.BufferGeometry().setAttribute('position', this.dropPositions),
-      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthTest: false }),
+      new THREE.LineBasicMaterial({ color: 0xc8cdd3, transparent: true, opacity: 0.35, depthTest: false }),
     );
     this.drop.renderOrder = 20;
     const axisPoints = [-40, 0, 0, 40, 0, 0, 0, -40, 0, 0, 40, 0, 0, 0, 0, 0, 0, 80];
     this.axes = new THREE.LineSegments(
       new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(axisPoints, 3)),
-      new THREE.LineBasicMaterial({ vertexColors: false, color: 0x8ab4f8, transparent: true, opacity: 0.45 }),
+      new THREE.LineBasicMaterial({ vertexColors: false, color: THREE_COLORS.accent, transparent: true, opacity: 0.45 }),
     );
     this.group.add(this.marker, this.radiusSphere, this.targetMark, this.drop, this.axes);
     this.group.visible = false;

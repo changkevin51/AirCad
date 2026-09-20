@@ -121,6 +121,8 @@ export interface TrackerClientHandlers {
   onSpatial?(message: SpatialMessage): void;
   onConnection?(state: ConnectionState): void;
   onSessionReset?(streamId: string, sourceRunId: string | null): void;
+  /** Every successful GET /api/tracker refresh, not just the first. */
+  onSnapshot?(snapshot: TrackerSnapshot): void;
 }
 
 export const SPATIAL_VERSION = 2;
@@ -405,6 +407,7 @@ export class TrackerClient {
     this.lastSnapshot = result.snapshot;
     this.clock.observe(result.c0, result.c1, result.snapshot.serverTimeMs);
     this.noteSession(result.snapshot.streamId, result.snapshot.sourceRunId);
+    this.handlers.onSnapshot?.(result.snapshot);
     return this.clock.synced;
   }
 

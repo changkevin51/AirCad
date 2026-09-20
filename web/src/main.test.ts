@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as THREE from 'three';
 import type { AirCadApi } from './main';
 import { adaptiveGridStep } from './model/snap';
-import { makeRect } from './model/sketch';
+import { makeRect, rectFrame } from './model/sketch';
 import { v2, v3, type Vec2, type Vec3 } from './model/vec';
 import type { HandsMessage, SpatialMessage, TrackedHandMessage } from './input/tracker-client';
 
@@ -16,9 +16,14 @@ const state = vi.hoisted(() => ({
   viewport: null as any,
   planeVisual: null as any,
   toasts: [] as string[],
+  flashes: [] as string[],
+  panel: null as any,
+  panelHandlers: null as any,
+  trackerClient: null as any,
   resolveCalls: 0,
   rafCb: null as ((time: number) => void) | null,
   windowListeners: {} as Record<string, ((event: Record<string, unknown>) => void)[]>,
+  commands: null as any,
 }));
 
 vi.mock('./scene/viewport', async () => {
@@ -168,6 +173,9 @@ vi.mock('./ui/hud', async (importOriginal) => {
     setKeys(keys: unknown) {
       this.keys = keys;
     }
+    flash(text: string) {
+      state.flashes.push(text);
+    }
   }
   return { ...actual, Hud: MockHud };
 });
@@ -230,11 +238,16 @@ vi.mock('./ui/measure-input', () => {
 
 vi.mock('./ui/pip', () => {
   class CameraPip {
+    visible = true;
+    source: string | null = null;
     setThumb() {}
     setCameraState() {}
     setHands() {}
     setSpatial() {}
     setStream() {}
+    setSource(source: string) {
+      this.source = source;
+    }
     toggle() {
       return false;
     }
@@ -249,12 +262,118 @@ vi.mock('./ui/cursor-glyph', () => {
   return { CursorGlyph };
 });
 
-vi.mock('./ui/input-panel', () => {
+vi.mock('./ui/input-panel', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./ui/input-panel')>();
   class InputPanel {
+    constructor(_root: unknown, handlers: unknown) {
+      state.panelHandlers = handlers;
+    }
+    update(next: unknown) {
+      state.panel = next;
+    }
+  }
+  return { ...actual, InputPanel };
+});
+
+const fakeRegionElement = () => {
+  const element: Record<string, any> = {
+    className: '',
+    tabIndex: 0,
+    style: {},
+    dataset: {},
+    children: [] as unknown[],
+    appendChild(child: unknown) {
+      element.children.push(child);
+      return child;
+    },
+    append(...children: unknown[]) {
+      element.children.push(...children);
+    },
+    addEventListener() {},
+    removeEventListener() {},
+    focus() {},
+    setAttribute() {},
+    getAttribute() {
+      return null;
+    },
+    querySelector() {
+      return null;
+    },
+    closest() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 800, height: 600 };
+    },
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+  };
+  return element;
+};
+
+vi.mock('./ui/workspace', () => {
+  class WorkspaceShell {
+    readonly regions = {
+      appBar: fakeRegionElement(),
+      commandBar: fakeRegionElement(),
+      modelBrowser: fakeRegionElement(),
+      viewControls: fakeRegionElement(),
+      viewport: fakeRegionElement(),
+      viewportOverlay: fakeRegionElement(),
+      inspector: fakeRegionElement(),
+      input: fakeRegionElement(),
+      cameraPreview: fakeRegionElement(),
+      statusBar: fakeRegionElement(),
+      notifications: fakeRegionElement(),
+      dialogs: fakeRegionElement(),
+    };
+    readonly layout = { browserVisible: true, inspectorVisible: true, inspectorTab: 'properties' as const };
+    onLayoutChange() {
+      return () => {};
+    }
+    setLayout() {}
+    setEntityCount() {}
+  }
+  return { WorkspaceShell };
+});
+
+vi.mock('./ui/command-bar', () => {
+  class AppBar {
+    constructor(_host: unknown, callbacks: unknown) {
+      state.commands = callbacks;
+    }
     update() {}
   }
-  return { InputPanel };
+  class CommandBar {
+    constructor(_host: unknown, callbacks: unknown) {
+      state.commands = callbacks;
+    }
+    update() {}
+  }
+  return { AppBar, CommandBar };
 });
+
+vi.mock('./ui/view-controls', () => ({
+  ViewControls: class {
+    constructor() {}
+    update() {}
+  },
+}));
+
+// Browser/inspector render against the real DOM in the browser; in Node the
+// stub elements can't carry them, so they are covered by dispatcher tests.
+vi.mock('./ui/model-browser', () => ({
+  ModelBrowser: class {
+    constructor(_host: unknown, _callbacks: unknown) {}
+    update() {}
+  },
+}));
+
+vi.mock('./ui/inspector', () => ({
+  Inspector: class {
+    constructor(_host: unknown, _callbacks: unknown) {}
+    update() {}
+  },
+}));
 
 vi.mock('./scene/spatial-cursor-visual', () => {
   class SpatialCursorVisual {
@@ -268,10 +387,11 @@ vi.mock('./input/tracker-client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./input/tracker-client')>();
   class MockTracker {
     clock = { synced: true, offsetLower: 0, rttMs: 1 };
-    lastSnapshot = null;
+    lastSnapshot: Record<string, unknown> | null = null;
     lastStatus = null;
     constructor(_url: string, handlers: unknown) {
       state.tracker = handlers;
+      state.trackerClient = this;
     }
     connect() {}
     close() {}
@@ -430,6 +550,7 @@ beforeEach(() => {
   if (api.planeMode() === 'manual') api.press('toggleAutoPlane');
   setGrid(true);
   state.toasts.length = 0;
+  state.flashes.length = 0;
   state.resolveCalls = 0;
 });
 
@@ -539,7 +660,8 @@ describe('app stroke flows', () => {
     expect(api.sketch.size).toBe(1);
     strokeThrough(loop);
     expect(api.sketch.size).toBe(1);
-    expect(state.toasts.some((message) => message.includes('already exists'))).toBe(true);
+    // Routine feedback now lands in the status-bar flash, not the toast stack.
+    expect([...state.toasts, ...state.flashes].some((message) => message.includes('already exists'))).toBe(true);
     api.commands.undo();
     expect(api.sketch.size).toBe(0);
     expect(api.commands.undo()).toBeNull();
@@ -880,14 +1002,38 @@ describe('stroke guards', () => {
     }
   });
 
-  it('treats a focused panel button as CAD input, not a typing field', () => {
+  it('ignores Space and Enter when the target is inside CAD chrome', () => {
     setCursorWorld(v3(0, 0, 0));
-    dispatchWindow('keydown', keyEvent('Space', { target: { tagName: 'BUTTON' } }));
+    const chromeTarget = { closest: (selector: string) => (selector === '[data-cad-ui]' ? {} : null) };
+    dispatchWindow('keydown', keyEvent('Space', { target: chromeTarget }));
+    dispatchWindow('keydown', keyEvent('Enter', { target: chromeTarget }));
+    tick();
+    expect(state.hud.last?.mode).toBe('READY');
+    dispatchWindow('keyup', keyEvent('Space', { target: chromeTarget }));
+    dispatchWindow('keyup', keyEvent('Enter', { target: chromeTarget }));
+    expect(api.sketch.size).toBe(0);
+  });
+
+  it('still draws when the keydown target is the viewport', () => {
+    setCursorWorld(v3(0, 0, 0));
+    dispatchWindow('keydown', keyEvent('Space', { target: { closest: () => null } }));
     tick();
     expect(state.hud.last?.mode).toBe('DRAWING');
     setCursorWorld(v3(4000, 0, 0));
-    dispatchWindow('keyup', keyEvent('Space', { target: { tagName: 'BUTTON' } }));
+    dispatchWindow('keyup', keyEvent('Space', { target: { closest: () => null } }));
     expect(api.sketch.size).toBe(1);
+  });
+
+  it('releases a hold on keyup even when the target moved into chrome', () => {
+    setCursorWorld(v3(0, 0, 0));
+    dispatchWindow('keydown', keyEvent('Space', { target: { closest: () => null } }));
+    tick();
+    expect(state.hud.last?.mode).toBe('DRAWING');
+    setCursorWorld(v3(4000, 0, 0));
+    const chromeTarget = { closest: (selector: string) => (selector === '[data-cad-ui]' ? {} : null) };
+    dispatchWindow('keyup', keyEvent('Space', { target: chromeTarget }));
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.all[0].type).toBe('line');
   });
 
   it('keeps the stroke alive while any hold source is still down', () => {
@@ -1415,5 +1561,176 @@ describe('depth planar snapping', () => {
       expect(line.b.y).toBeCloseTo(0, 5);
       expect(line.b.z).toBeCloseTo(0, 5);
     }
+  });
+});
+
+describe('workspace dispatcher', () => {
+  it('rejects UI measure/extrude/delete without an explicit selection', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    expect(api.selected()).toBeNull();
+    for (const action of ['measure', 'extrude', 'delete'] as const) {
+      const result = state.commands.dispatch({ type: 'press', action });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBeTruthy();
+    }
+    expect(api.sketch.size).toBe(1);
+    expect(api.extrusion()).toBeNull();
+  });
+
+  it('selects by id, then allows Push/Pull and Dimensions on the selection', () => {
+    const rect = api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    expect(rect.ok).toBe(true);
+    const id = api.sketch.all[0].id;
+    expect(state.commands.dispatch({ type: 'selectEntity', id: 'missing' }).ok).toBe(false);
+    expect(state.commands.dispatch({ type: 'selectEntity', id })).toEqual({ ok: true });
+    expect(api.selected()?.id).toBe(id);
+    expect(state.commands.dispatch({ type: 'press', action: 'extrude' })).toEqual({ ok: true });
+    expect(api.extrusion()).not.toBeNull();
+    api.press('cancel');
+    expect(api.extrusion()).toBeNull();
+    expect(state.commands.dispatch({ type: 'press', action: 'measure' })).toEqual({ ok: true });
+    expect(state.measure.isOpen).toBe(true);
+    state.measure.close();
+  });
+
+  it('pins a manual work plane without moving the camera', () => {
+    const before = state.viewport.perspective.quaternion.clone();
+    expect(state.commands.dispatch({ type: 'setWorkPlane', plane: 'XZ' })).toEqual({ ok: true });
+    expect(api.planeMode()).toBe('manual');
+    expect(api.plane().kind).toBe('XZ');
+    finishTransitions();
+    expect(state.viewport.perspective.quaternion.equals(before)).toBe(true);
+    expect(state.commands.dispatch({ type: 'setWorkPlane', plane: 'auto' })).toEqual({ ok: true });
+    expect(api.planeMode()).toBe('auto');
+  });
+
+  it('rejects setWorkPlane and selection while a stroke is running', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    setCursorWorld(v3(0, 0, 0));
+    api.hold('draw', true);
+    expect(state.commands.dispatch({ type: 'setWorkPlane', plane: 'XZ' }).ok).toBe(false);
+    expect(state.commands.dispatch({ type: 'selectEntity', id: api.sketch.all[0].id }).ok).toBe(false);
+    expect(state.commands.dispatch({ type: 'press', action: 'undo' }).ok).toBe(false);
+    api.hold('draw', false);
+  });
+
+  const frameOf = (id: string) => {
+    const entity = api.sketch.get(id);
+    if (!entity || entity.type === 'line') throw new Error('expected a profile entity');
+    return rectFrame(entity);
+  };
+
+  it('resizes a rectangle via setDimension in exactly one undoable step', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 2000, 1000));
+    const id = api.sketch.all[0].id;
+    expect(state.commands.dispatch({ type: 'selectEntity', id })).toEqual({ ok: true });
+    expect(state.commands.dispatch({ type: 'setDimension', id, spec: '4 m x 300 cm' })).toEqual({ ok: true });
+    const { width, height } = frameOf(id);
+    expect(width).toBeCloseTo(4000);
+    expect(height).toBeCloseTo(3000);
+    api.commands.undo();
+    const back = frameOf(id);
+    expect(back.width).toBeCloseTo(2000);
+    expect(back.height).toBeCloseTo(1000);
+    expect(api.sketch.size).toBe(1);
+    api.commands.undo();
+    expect(api.sketch.size).toBe(0);
+  });
+
+  it('rejects invalid, empty, and non-positive dimensions without touching history', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 2000, 1000));
+    const id = api.sketch.all[0].id;
+    state.commands.dispatch({ type: 'selectEntity', id });
+    for (const spec of ['abc', '', '-5']) {
+      const result = state.commands.dispatch({ type: 'setDimension', id, spec });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBeTruthy();
+    }
+    expect(frameOf(id).width).toBeCloseTo(2000);
+    expect(api.commands.undo()).toBe('add rect');
+    expect(api.sketch.size).toBe(0);
+  });
+
+  it('rejects setDimension for a stale id and while extruding', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 2000, 1000));
+    const id = api.sketch.all[0].id;
+    state.commands.dispatch({ type: 'selectEntity', id });
+    expect(state.commands.dispatch({ type: 'setDimension', id: 'gone', spec: '1000' }).ok).toBe(false);
+    expect(state.commands.dispatch({ type: 'press', action: 'extrude' })).toEqual({ ok: true });
+    expect(state.commands.dispatch({ type: 'setDimension', id, spec: '1000' }).ok).toBe(false);
+    api.press('cancel');
+    expect(api.extrusion()).toBeNull();
+  });
+
+  it('resizes a box base without changing depth, and edits depth without changing the base', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 2000, 1000));
+    const id = api.sketch.all[0].id;
+    expect(api.commands.extrude(id, 600).ok).toBe(true);
+    state.commands.dispatch({ type: 'selectEntity', id });
+    expect(state.commands.dispatch({ type: 'setDimension', id, spec: '5000 x 2000' })).toEqual({ ok: true });
+    let entity = api.sketch.get(id)!;
+    let frame = frameOf(id);
+    expect(frame.width).toBeCloseTo(5000);
+    expect(frame.height).toBeCloseTo(2000);
+    if (entity.type !== 'extrusion') throw new Error('expected extrusion');
+    expect(entity.depth).toBeCloseTo(600);
+    expect(state.commands.dispatch({ type: 'setDimension', id, spec: '-800' })).toEqual({ ok: true });
+    entity = api.sketch.get(id)!;
+    frame = frameOf(id);
+    expect(frame.width).toBeCloseTo(5000);
+    expect(frame.height).toBeCloseTo(2000);
+    if (entity.type !== 'extrusion') throw new Error('expected extrusion');
+    expect(entity.depth).toBeCloseTo(-800);
+  });
+});
+
+describe('tracker snapshot adoption', () => {
+  const snapshot = (source: string, depthai = false) => ({
+    ok: true,
+    config: { source, cameraIndex: 0, target: 'finger', colorPreset: 'green', colorTolerance: 1 },
+    camera: source === 'none' ? 'disabled' : 'ready',
+    message: '',
+    streamId: 's1',
+    sourceRunId: null,
+    capabilities: { sources: ['webcam', 'oak', 'none'], depthTargets: ['finger', 'color'], depthaiInstalled: depthai },
+    serverTimeMs: 0,
+  });
+
+  it('adopts the server config from a snapshot when idle', () => {
+    state.trackerClient.lastSnapshot = snapshot('oak', true);
+    state.tracker.onSnapshot(snapshot('none'));
+    expect(state.panel.source).toBe('none');
+    state.trackerClient.lastSnapshot = snapshot('webcam');
+    state.tracker.onSnapshot(snapshot('webcam'));
+    expect(state.panel.source).toBe('webcam');
+    expect(state.panel.depthaiInstalled).toBe(false);
+  });
+
+  it('ignores snapshots while a config change is in flight and guards duplicates', async () => {
+    state.trackerClient.lastSnapshot = snapshot('none');
+    state.tracker.onSnapshot(snapshot('none'));
+    expect(state.panel.source).toBe('none');
+    // Each onSource fires applyTracker; the POST fails asynchronously, so the
+    // second call lands while the first is still in flight.
+    state.panelHandlers.onSource('webcam');
+    state.panelHandlers.onSource('oak');
+    state.tracker.onSnapshot(snapshot('oak'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(state.flashes).toContain('Still applying the previous change…');
+    expect(state.panel.source).toBe('none');
+  });
+});
+
+describe('chrome boundary for detached targets', () => {
+  it('ignores a keydown whose target was detached mid-dispatch', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 2000, 1000));
+    const id = api.sketch.all[0].id;
+    expect(state.commands.dispatch({ type: 'selectEntity', id })).toEqual({ ok: true });
+    // A row that removed itself mid-dispatch no longer reaches [data-cad-ui].
+    dispatchWindow('keydown', keyEvent('Delete', { target: { isConnected: false, closest: () => null } }));
+    expect(api.sketch.get(id)).toBeTruthy();
+    // A connected non-chrome target still reaches the CAD shortcut.
+    dispatchWindow('keydown', keyEvent('Delete', { target: { isConnected: true, closest: () => null } }));
+    expect(api.sketch.get(id)).toBeUndefined();
   });
 });

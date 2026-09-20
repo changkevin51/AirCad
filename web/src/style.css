@@ -1,17 +1,27 @@
+/* ------------------------------------------------------------------ tokens */
+
 :root {
-  --bg: #14171c;
-  --panel: rgba(22, 26, 32, 0.86);
-  --panel-border: rgba(255, 255, 255, 0.08);
-  --text: #e6e9ef;
-  --muted: #8b95a5;
-  --ok: #6fe3b4;
-  --warn: #ffc857;
-  --error: #ff6b6b;
-  --axis-x: #e5534b;
-  --axis-y: #57ab5a;
-  --axis-z: #539bf5;
+  /* Fallbacks; WorkspaceShell reapplies these from ui/theme.ts on #app. */
+  --cad-canvas: #1c1e21;
+  --cad-app: #24262a;
+  --cad-panel: #292c30;
+  --cad-control: #32363b;
+  --cad-separator: #41454b;
+  --cad-text: #e5e7eb;
+  --cad-text-2: #b0b6bf;
+  --cad-accent: #78a9ed;
+  --cad-hover: #e3c27d;
+  --cad-preview: #91b9ed;
+  --cad-ok: #8ab895;
+  --cad-warn: #d6b474;
+  --cad-error: #e58c85;
+  --cad-axis-x: #e5534b;
+  --cad-axis-y: #57ab5a;
+  --cad-axis-z: #539bf5;
   --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
   --mono: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  --browser-w: 220px;
+  --inspector-w: 280px;
 }
 
 * {
@@ -22,9 +32,10 @@ html,
 body {
   margin: 0;
   height: 100%;
-  background: var(--bg);
-  color: var(--text);
+  background: var(--cad-canvas);
+  color: var(--cad-text);
   font-family: var(--font);
+  font-size: 13px;
   overflow: hidden;
   user-select: none;
 }
@@ -35,12 +46,75 @@ body {
   height: 100vh;
 }
 
+.hidden {
+  display: none !important;
+}
+
+kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--cad-separator);
+  background: var(--cad-control);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  color: var(--cad-text);
+}
+
+/* ------------------------------------------------------------ shell grid */
+
+.workspace {
+  display: grid;
+  grid-template-rows: 36px 42px minmax(0, 1fr) 28px;
+  height: 100%;
+  background: var(--cad-canvas);
+}
+
+.ws-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Explicit columns keep the viewport centered when a hidden panel is removed
+   from grid auto-placement (display:none items are not placed). */
+.ws-main > .ws-panel:first-child {
+  grid-column: 1;
+}
+
+.ws-center {
+  grid-column: 2;
+  display: grid;
+  grid-template-rows: 32px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+.ws-main > .ws-panel:last-child {
+  grid-column: 3;
+}
+
+.ws-viewport-host {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+  background: var(--cad-canvas);
+}
+
 .viewport {
   position: absolute;
   inset: 0;
   outline: none;
   cursor: none;
   touch-action: none;
+}
+
+.viewport:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--cad-accent);
 }
 
 .gl-canvas {
@@ -56,147 +130,551 @@ body {
   pointer-events: none;
 }
 
-.hidden {
-  display: none !important;
-}
-
-kbd {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.06);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--text);
-}
-
-/* ---------------------------------------------------------------- HUD */
-
-.hud {
+.ws-viewport-overlay {
   position: absolute;
-  top: 12px;
-  left: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  inset: 0;
   pointer-events: none;
-  max-width: calc(100vw - 260px);
 }
 
-.chip {
+.ws-notifications {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+  max-width: 420px;
+}
+
+/* --------------------------------------------------------------- app bar */
+
+.ws-app-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px;
+  background: var(--cad-app);
+  border-bottom: 1px solid var(--cad-separator);
+  font-size: 13px;
+}
+
+.ws-app-bar__menus {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ws-app-bar__title {
+  margin: 0 auto;
+  color: var(--cad-text-2);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-app-bar__right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ws-caret {
+  display: inline-flex;
+  margin-left: 4px;
+  vertical-align: -2px;
+}
+.ws-caret svg {
+  width: 10px;
+  height: 10px;
+  transform: rotate(90deg);
+}
+
+.ws-menubtn-wrap {
+  position: relative;
+}
+
+.ws-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  min-width: 220px;
+  padding: 4px;
+  background: var(--cad-panel);
+  border: 1px solid var(--cad-separator);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  z-index: 40;
+}
+
+.ws-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cad-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ws-menu-item:hover:not(:disabled),
+.ws-menu-item:focus-visible {
+  background: var(--cad-control);
+}
+
+.ws-menu-item:disabled {
+  color: var(--cad-text-2);
+  opacity: 0.6;
+  cursor: default;
+}
+
+.ws-menu-item kbd {
+  margin-left: auto;
+}
+
+.ws-menu-note {
+  padding: 4px 10px 6px;
+  color: var(--cad-text-2);
+  font-size: 12px;
+  line-height: 1.4;
+  max-width: 240px;
+  white-space: normal;
+}
+
+.ws-submenu {
+  padding-left: 10px;
+  border-left: 1px solid var(--cad-separator);
+  margin: 2px 0 2px 10px;
+}
+
+/* ------------------------------------------------------------- command bar */
+
+.ws-command-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  background: var(--cad-app);
+  border-bottom: 1px solid var(--cad-separator);
+  position: relative;
+}
+
+.ws-context {
+  color: var(--cad-text-2);
+  font-size: 12px;
+  font-weight: 600;
+  margin-right: 4px;
+  white-space: nowrap;
+}
+
+.ws-command-secondary {
+  display: contents;
+}
+
+.ws-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--cad-separator);
+}
+
+.ws-more {
+  display: none;
+}
+
+/* -------------------------------------------------------------- controls */
+
+.ws-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  font-size: 12px;
-  backdrop-filter: blur(6px);
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--cad-separator);
+  border-radius: 3px;
+  background: var(--cad-control);
+  color: var(--cad-text);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
-.chip__name {
-  color: var(--muted);
-  text-transform: uppercase;
+.ws-command-bar .ws-btn,
+.ws-app-bar .ws-btn {
+  height: 28px;
+}
+
+.ws-btn:hover:not(:disabled) {
+  border-color: var(--cad-text-2);
+}
+
+.ws-btn:disabled {
+  color: var(--cad-text-2);
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ws-btn[aria-pressed='true'] {
+  background: rgba(120, 169, 237, 0.18);
+  border-color: var(--cad-accent);
+  color: var(--cad-accent);
+}
+
+.ws-btn__secondary {
+  color: var(--cad-text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ws-btn[aria-pressed='true'] .ws-btn__secondary {
+  color: var(--cad-accent);
+}
+
+.ws-btn--danger:hover:not(:disabled) {
+  border-color: var(--cad-error);
+  color: var(--cad-error);
+}
+
+.ws-menubtn {
+  border: 0;
+  background: transparent;
+}
+
+.ws-menubtn[aria-expanded='true'] {
+  background: var(--cad-control);
+}
+
+.ws-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cad-text-2);
+  cursor: pointer;
+}
+
+.ws-iconbtn:hover {
+  background: var(--cad-control);
+  color: var(--cad-text);
+}
+
+.ws-iconbtn[aria-pressed='true'] {
+  color: var(--cad-accent);
+  background: rgba(120, 169, 237, 0.16);
+  border-color: var(--cad-accent);
+}
+
+.ws-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--cad-text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ws-field select,
+.ws-panel select,
+.ws-panel input[type='text'],
+.ws-panel input[type='range'] {
+  font: inherit;
+  color: var(--cad-text);
+  background: var(--cad-control);
+  border: 1px solid var(--cad-separator);
+  border-radius: 3px;
+  height: 28px;
+  padding: 0 6px;
+}
+
+.ws-field select:disabled {
+  opacity: 0.55;
+}
+
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible,
+.ws-tab:focus-visible {
+  outline: 2px solid var(--cad-accent);
+  outline-offset: 1px;
+}
+
+/* ------------------------------------------------------------ view header */
+
+.ws-view-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  background: var(--cad-panel);
+  border-bottom: 1px solid var(--cad-separator);
+}
+
+.ws-btn--view {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.ws-btn--view:hover:not(:disabled) {
+  background: var(--cad-control);
+  border-color: var(--cad-separator);
+}
+
+.ws-btn--view kbd {
+  padding: 0 4px;
   font-size: 10px;
-  letter-spacing: 0.06em;
+  line-height: 14px;
 }
 
-.chip__value {
-  font-weight: 600;
+/* ---------------------------------------------------------------- panels */
+
+.ws-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--cad-panel);
+  overflow: hidden;
 }
 
-.chip.muted .chip__value {
-  color: var(--muted);
-  font-weight: 500;
-}
-.chip.ok .chip__value {
-  color: var(--ok);
-}
-.chip.warn .chip__value {
-  color: var(--warn);
-}
-.chip.mode-drawing,
-.chip.mode-extruding {
-  border-color: var(--ok);
-}
-.chip.mode-drawing .chip__value,
-.chip.mode-extruding .chip__value {
-  color: var(--ok);
-}
-.chip.mode-orbit .chip__value,
-.chip.mode-pan .chip__value {
-  color: var(--axis-z);
-}
-.chip.axis-x .chip__value {
-  color: var(--axis-x);
-}
-.chip.axis-y .chip__value {
-  color: var(--axis-y);
-}
-.chip.axis-z .chip__value {
-  color: var(--axis-z);
-}
-.chip.snap-vertex .chip__value,
-.chip.snap-midpoint .chip__value,
-.chip.snap-edge .chip__value {
-  color: var(--warn);
-}
-.chip.snap-axis .chip__value,
-.chip.snap-lock .chip__value {
-  color: var(--ok);
+.ws-main > .ws-panel:first-child {
+  width: var(--browser-w);
 }
 
-.hint {
-  position: absolute;
-  top: 52px;
-  left: 12px;
-  padding: 6px 12px;
-  border-radius: 8px;
-  background: rgba(255, 200, 87, 0.14);
-  border: 1px solid rgba(255, 200, 87, 0.5);
-  color: var(--warn);
+.ws-main > .ws-panel:last-child {
+  width: var(--inspector-w);
+}
+
+.ws-main > .ws-panel:first-child {
+  border-right: 1px solid var(--cad-separator);
+}
+
+.ws-main > .ws-panel:last-child {
+  border-left: 1px solid var(--cad-separator);
+}
+
+.ws-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--cad-separator);
+  flex: none;
+}
+
+.ws-panel__title {
   font-size: 12px;
-  pointer-events: none;
-  max-width: min(640px, calc(100vw - 24px));
+  font-weight: 600;
+  color: var(--cad-text);
+}
+
+.ws-panel__count {
+  color: var(--cad-text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ws-panel__header .ws-iconbtn {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+}
+
+.ws-panel__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+}
+
+.ws-stub {
+  color: var(--cad-text-2);
+  font-size: 12px;
   line-height: 1.5;
 }
 
-.hint--extrusion {
-  color: var(--ok);
-  background: var(--panel);
-  border-color: var(--ok);
-}
-
-.keybar {
-  position: absolute;
-  left: 50%;
-  bottom: 14px;
-  transform: translateX(-50%);
+/* Inspector tab strip replaces the plain header title. */
+.ws-tabs {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 14px;
-  row-gap: 6px;
-  width: max-content;
-  max-width: calc(100vw - 24px);
-  padding: 6px 14px;
-  border-radius: 10px;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-  pointer-events: none;
-  backdrop-filter: blur(6px);
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
 }
 
-.key {
+.ws-tab {
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--cad-text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ws-tab--active {
+  color: var(--cad-text);
+  border-bottom-color: var(--cad-accent);
+}
+
+.ws-inspector__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.ws-inspector__scroll .ws-panel__body {
+  overflow: visible;
+}
+
+.ws-camera-slot {
+  flex: none;
+  border-top: 1px solid var(--cad-separator);
+  padding: 8px;
+}
+
+/* -------------------------------------------------------------- status bar */
+
+.ws-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 10px;
+  background: var(--cad-app);
+  border-top: 1px solid var(--cad-separator);
+  font-size: 12px;
+  color: var(--cad-text-2);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ws-status__left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-status__instruction {
+  color: var(--cad-text);
+}
+
+.ws-status__instruction[data-tone='success'] {
+  color: var(--cad-ok);
+}
+
+/* The hint list shrinks and clips rather than pushing the right side out. */
+.ws-status__hints {
+  display: inline-flex;
+  gap: 10px;
+  color: var(--cad-text-2);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ws-status__hints .key {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+}
+
+.ws-status__right {
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.ws-status__right[data-tone='ok'] {
+  color: var(--cad-ok);
+}
+
+.ws-status__right[data-tone='warn'] {
+  color: var(--cad-warn);
+}
+
+.ws-status__right[data-tone='error'] {
+  color: var(--cad-error);
+}
+
+/* --------------------------------------------------- notices & empty state */
+
+.viewport-notice {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(560px, calc(100% - 24px));
+  padding: 5px 10px;
+  border: 1px solid var(--cad-warn);
+  border-radius: 3px;
+  background: var(--cad-panel);
+  color: var(--cad-warn);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+}
+
+.viewport-notice--action {
+  color: var(--cad-text);
+  border-color: var(--cad-separator);
+}
+
+.empty-state {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--cad-separator);
+  border-radius: 4px;
+  background: var(--cad-panel);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.empty-state__headline {
+  color: var(--cad-text);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.empty-state__sub {
+  color: var(--cad-text-2);
+}
+
+.empty-state__help {
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--cad-accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  pointer-events: auto;
 }
 
 /* ---------------------------------------------------------------- cursor */
@@ -225,39 +703,38 @@ kbd {
   margin: -7px 0 0 -7px;
   border: 2px solid #fff;
   border-radius: 50%;
-  background: rgba(20, 23, 28, 0.4);
+  background: rgba(28, 30, 33, 0.4);
   font: 700 9px/10px var(--mono);
-  color: #14171c;
+  color: #1c1e21;
   text-align: center;
-  transition: border-radius 80ms, transform 80ms;
 }
 
 .cursor__glyph--drawing {
-  border-color: var(--ok);
+  border-color: var(--cad-ok);
 }
 .cursor__glyph--offplane {
   border-style: dashed;
 }
 .cursor__glyph--vertex {
   border-radius: 0;
-  border-color: var(--warn);
-  background: rgba(255, 200, 87, 0.35);
+  border-color: var(--cad-hover);
+  background: rgba(227, 194, 125, 0.35);
 }
 .cursor__glyph--midpoint {
   border-radius: 0;
-  border-color: var(--warn);
+  border-color: var(--cad-hover);
   width: 0;
   height: 0;
   margin: -9px 0 0 -8px;
   border-left: 8px solid transparent;
   border-right: 8px solid transparent;
-  border-bottom: 14px solid var(--warn);
+  border-bottom: 14px solid var(--cad-hover);
   border-top: 0;
   background: transparent;
 }
 .cursor__glyph--edge {
   border-radius: 0;
-  border-color: var(--warn);
+  border-color: var(--cad-hover);
   transform: rotate(45deg) scale(0.85);
 }
 .cursor__glyph--grid {
@@ -267,13 +744,13 @@ kbd {
   background: #fff;
 }
 .cursor__glyph--grid.cursor__glyph--drawing {
-  background: var(--ok);
+  background: var(--cad-ok);
 }
 .cursor__glyph--axis,
 .cursor__glyph--lock {
   border-radius: 3px;
-  border-color: var(--ok);
-  background: var(--ok);
+  border-color: var(--cad-ok);
+  background: var(--cad-ok);
   width: 16px;
   height: 14px;
   margin: -7px 0 0 -8px;
@@ -287,46 +764,55 @@ kbd {
   left: 14px;
   top: 10px;
   padding: 2px 6px;
-  border-radius: 4px;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  background: var(--cad-panel);
+  border: 1px solid var(--cad-separator);
   font: 11px var(--mono);
-  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  color: var(--cad-text-2);
   white-space: nowrap;
+}
+
+.cursor--flip-x .cursor__readout {
+  left: auto;
+  right: 14px;
+}
+
+.cursor--flip-y .cursor__readout {
+  top: auto;
+  bottom: 10px;
 }
 
 /* ---------------------------------------------------------------- labels */
 
 .dim-label {
   padding: 2px 7px;
-  border-radius: 4px;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  font: 12px var(--mono);
-  color: var(--text);
+  border-radius: 2px;
+  background: var(--cad-panel);
+  border: 1px solid var(--cad-separator);
+  font: 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--cad-text);
   white-space: nowrap;
   pointer-events: none;
   margin-top: -18px;
 }
 
 .dim-label--ghost {
-  color: var(--ok);
-  border-color: rgba(111, 227, 180, 0.5);
+  color: var(--cad-preview);
+  border-color: var(--cad-preview);
 }
 .dim-label--hover {
-  color: var(--warn);
-  border-color: rgba(255, 200, 87, 0.5);
+  color: var(--cad-hover);
+  border-color: var(--cad-hover);
 }
 .dim-label--last {
-  color: var(--muted);
+  color: var(--cad-text-2);
 }
 
 /* ---------------------------------------------------------------- toasts */
 
 .toasts {
-  position: absolute;
-  top: 12px;
-  right: 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -336,16 +822,16 @@ kbd {
 }
 
 .toast {
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-left: 3px solid var(--muted);
+  padding: 7px 12px;
+  border-radius: 4px;
+  background: var(--cad-panel);
+  border: 1px solid var(--cad-separator);
+  border-left: 3px solid var(--cad-text-2);
   font-size: 13px;
   opacity: 0;
-  transform: translateY(-6px);
-  transition: opacity 200ms, transform 200ms;
-  backdrop-filter: blur(6px);
+  transform: translateY(-4px);
+  transition: opacity 160ms, transform 160ms;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
 }
 
 .toast--visible {
@@ -353,23 +839,21 @@ kbd {
   transform: translateY(0);
 }
 .toast--success {
-  border-left-color: var(--ok);
+  border-left-color: var(--cad-ok);
 }
 .toast--error {
-  border-left-color: var(--error);
+  border-left-color: var(--cad-error);
 }
 
-/* ---------------------------------------------------------------- PIP */
+/* ------------------------------------------------------------------ PIP */
 
 .pip {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
-  width: 192px;
-  border-radius: 10px;
+  position: relative;
+  width: 100%;
+  border-radius: 4px;
   overflow: hidden;
-  background: #000;
-  border: 1px solid var(--panel-border);
+  background: var(--cad-control);
+  border: 1px solid var(--cad-separator);
   pointer-events: none;
 }
 
@@ -377,12 +861,31 @@ kbd {
   opacity: 0.25;
 }
 
+/* No camera frame yet: a neutral panel, never a black rectangle. */
+.pip__empty {
+  display: none;
+  padding: 26px 10px;
+  background: var(--cad-control);
+  color: var(--cad-text-2);
+  font-size: 12px;
+  text-align: center;
+}
+
+.pip--empty .pip__image,
+.pip--empty .pip__overlay {
+  display: none;
+}
+
+.pip--empty .pip__empty {
+  display: block;
+}
+
 .pip__image {
   display: block;
   width: 100%;
   aspect-ratio: 4 / 3;
   object-fit: cover;
-  background: #0a0c10;
+  background: var(--cad-canvas);
 }
 
 .pip__overlay {
@@ -395,158 +898,221 @@ kbd {
 
 .pip__caption {
   padding: 4px 8px;
-  font-size: 11px;
-  color: var(--muted);
-  background: var(--panel);
+  font-size: 12px;
+  color: var(--cad-text-2);
+  background: var(--cad-panel);
 }
 
-/* ---------------------------------------------------------------- measure */
+/* ----------------------------------------------------------- dialogs layer */
 
-.measure {
+.ws-dialogs {
   position: absolute;
-  left: 50%;
-  bottom: 60px;
-  transform: translateX(-50%);
-  display: flex;
-  flex-wrap: wrap;
-  width: max-content;
-  max-width: calc(100vw - 24px);
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: var(--panel);
-  border: 1px solid var(--ok);
-  font-size: 13px;
-  backdrop-filter: blur(6px);
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
 }
 
-.measure input {
-  width: 170px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--panel-border);
-  background: rgba(0, 0, 0, 0.35);
-  color: var(--text);
-  font: 14px var(--mono);
-  outline: none;
-}
-
-.measure__hint {
-  color: var(--muted);
-  font-size: 11px;
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-/* ---------------------------------------------------------------- help */
-
-.help {
+/* Shared modal chrome (clear-confirm, measure entry, help). */
+.ws-dialog-backdrop {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(8, 10, 14, 0.7);
-  backdrop-filter: blur(4px);
-  z-index: 20;
+  background: rgba(12, 14, 16, 0.55);
+  pointer-events: auto;
 }
 
-.help__panel {
-  width: min(960px, 92vw);
-  max-height: 90vh;
+.ws-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100% - 32px);
+  border: 1px solid var(--cad-separator);
+  border-radius: 4px;
+  background: var(--cad-panel);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  outline: none;
+}
+
+.ws-dialog--wide {
+  width: min(860px, calc(100vw - 32px));
+}
+
+.ws-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 10px 0 14px;
+  flex: none;
+}
+
+.ws-dialog__head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--cad-text);
+}
+
+.ws-dialog__body {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
-  padding: 20px 26px;
-  border-radius: 14px;
-  background: rgba(22, 26, 32, 0.98);
-  border: 1px solid var(--panel-border);
+  padding: 12px 14px;
+  font-size: 13px;
+}
+
+.ws-dialog__body p {
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+
+.ws-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 14px 12px;
+  flex: none;
+}
+
+/* Measure entry form inside the dialog body. */
+.measure-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.measure-form label {
+  font-size: 13px;
+  color: var(--cad-text);
+  line-height: 1.4;
+}
+
+.measure-form input {
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 3px;
+  border: 1px solid var(--cad-separator);
+  background: var(--cad-canvas);
+  color: var(--cad-text);
+  font: 13px var(--mono);
+  font-variant-numeric: tabular-nums;
+  outline: none;
+}
+
+.measure-form input:focus-visible {
+  outline: 2px solid var(--cad-accent);
+  outline-offset: 1px;
+}
+
+.measure-form input[aria-invalid='true'] {
+  border-color: var(--cad-error);
+}
+
+/* ------------------------------------------------------------------ help */
+
+.help-body {
+  display: grid;
+  grid-template-columns: 148px 1fr;
+  gap: 14px;
+  min-height: 320px;
+  min-width: 0;
   user-select: text;
 }
 
-.help header {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.help h2 {
-  margin: 0 0 6px;
-  font-size: 20px;
-  color: var(--text);
-}
-
-.help h3 {
-  margin: 0 0 6px;
-  font-size: 13px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-}
-
-.help__intro {
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--text);
-}
-
-.help__grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 18px 28px;
-}
-
-.help table {
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.help td {
-  padding: 3px 10px 3px 0;
-  vertical-align: top;
-}
-
-.help td:first-child {
-  white-space: nowrap;
-}
-
-.help__walkthrough {
-  grid-column: 1 / -1;
-}
-
-.help__walkthrough ol {
-  margin: 0;
-  padding-left: 20px;
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-/* ---------------------------------------------------------------- input panel */
-
-.input-panel {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 240px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  font-size: 12px;
-  backdrop-filter: blur(6px);
-  z-index: 5;
+.help-nav {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
+  border-right: 1px solid var(--cad-separator);
+  padding-right: 8px;
+}
+
+.help-nav__item {
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cad-text-2);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.help-nav__item:hover {
+  background: var(--cad-control);
+  color: var(--cad-text);
+}
+
+.help-nav__item[aria-current='true'] {
+  background: var(--cad-control);
+  color: var(--cad-text);
+  box-shadow: inset 2px 0 0 var(--cad-accent);
+}
+
+.help-content {
+  min-width: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.help-section h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--cad-text);
+}
+
+.help-section p,
+.help-section li {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--cad-text-2);
+}
+
+.help-section p {
+  margin: 0 0 10px;
+}
+
+.help-section ul,
+.help-section ol {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.help-section table {
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.help-section td {
+  padding: 3px 12px 3px 0;
+  vertical-align: top;
+  color: var(--cad-text-2);
+}
+
+.help-section td:first-child {
+  white-space: nowrap;
+  color: var(--cad-text);
+}
+
+/* ------------------------------------------------------------ input panel */
+
+.input-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
 }
 
 .input-panel__title {
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--cad-text);
 }
 
 .input-panel label {
@@ -554,26 +1120,28 @@ kbd {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  color: var(--muted);
+  color: var(--cad-text-2);
 }
 
 .input-panel select,
 .input-panel input[type='range'],
 .input-panel button {
   font: inherit;
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--panel-border);
-  border-radius: 6px;
+  color: var(--cad-text);
+  background: var(--cad-control);
+  border: 1px solid var(--cad-separator);
+  border-radius: 3px;
 }
 
 .input-panel select {
-  padding: 2px 6px;
-  max-width: 150px;
+  padding: 3px 6px;
+  max-width: 160px;
+  height: 28px;
 }
 
 .input-panel button {
   padding: 4px 8px;
+  height: 30px;
   cursor: pointer;
 }
 
@@ -588,39 +1156,343 @@ kbd {
 
 .input-panel__status,
 .input-panel__hint {
-  color: var(--muted);
+  color: var(--cad-text-2);
   line-height: 1.35;
+}
+
+.input-panel__status[data-tone='ok'] {
+  color: var(--cad-ok);
+}
+
+.input-panel__status[data-tone='warn'] {
+  color: var(--cad-warn);
+}
+
+.input-panel__status[data-tone='error'] {
+  color: var(--cad-error);
+}
+
+.input-panel__status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 22px;
+}
+
+.input-panel__status-row .input-panel__status {
+  flex: 1;
+  min-width: 0;
+}
+
+.input-panel__group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.input-panel__toggle {
+  width: 100%;
+  text-align: left;
+}
+
+.input-panel__toggle[aria-pressed='true'] {
+  border-color: var(--cad-accent);
+  color: var(--cad-accent);
+  box-shadow: inset 2px 0 0 var(--cad-accent);
+}
+
+.input-panel__details summary {
+  cursor: pointer;
+  color: var(--cad-text-2);
+}
+
+.input-panel__diag {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--cad-separator);
+  border-radius: 3px;
+  background: var(--cad-canvas);
+  color: var(--cad-text-2);
+  font: 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: pre-line;
+}
+
+.input-panel select:disabled,
+.input-panel input:disabled,
+.input-panel button:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .input-panel--busy {
   opacity: 0.7;
 }
 
-@media (max-width: 640px) {
-  .hud {
-    max-width: calc(100vw - 24px);
-    gap: 4px;
+/* ------------------------------------------------------------ model browser */
+
+.ws-listbox {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  outline: none;
+}
+
+.ws-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px 0 6px;
+  border-left: 2px solid transparent;
+  color: var(--cad-text);
+  font-size: 12px;
+  cursor: default;
+  outline: none;
+}
+
+.ws-row:hover {
+  background: var(--cad-control);
+}
+
+.ws-row:focus-visible {
+  outline: 2px solid var(--cad-accent);
+  outline-offset: -2px;
+}
+
+/* Selected row: muted accent wash with a left edge marker, no pills. */
+.ws-row--selected,
+.ws-row--selected:hover {
+  background: rgba(120, 169, 237, 0.14);
+  border-left-color: var(--cad-accent);
+}
+
+.ws-row[aria-disabled='true'] {
+  color: var(--cad-text-2);
+}
+
+.ws-row__icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--cad-text-2);
+}
+
+.ws-row--selected .ws-row__icon {
+  color: var(--cad-accent);
+}
+
+.ws-row__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------- inspector */
+
+.insp {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.insp-text,
+.insp-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--cad-text-2);
+}
+
+.insp-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.insp-meta dt {
+  color: var(--cad-text-2);
+}
+
+.insp-meta dd {
+  margin: 0;
+  color: var(--cad-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.insp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.insp-head__icon {
+  display: inline-flex;
+  color: var(--cad-accent);
+}
+
+.insp-head__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--cad-text);
+}
+
+.insp-note {
+  padding: 5px 8px;
+  border-left: 2px solid var(--cad-warn);
+  background: var(--cad-control);
+  color: var(--cad-warn);
+  font-size: 12px;
+}
+
+.insp-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.insp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--cad-text-2);
+}
+
+.insp-field input,
+.insp-field select {
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 3px;
+  border: 1px solid var(--cad-separator);
+  background: var(--cad-canvas);
+  color: var(--cad-text);
+  font: 13px var(--mono);
+  font-variant-numeric: tabular-nums;
+  outline: none;
+}
+
+.insp-field select {
+  font-family: inherit;
+}
+
+.insp-field input:focus-visible,
+.insp-field select:focus-visible {
+  outline: 2px solid var(--cad-accent);
+  outline-offset: 1px;
+}
+
+.insp-field input[aria-invalid='true'] {
+  border-color: var(--cad-error);
+}
+
+.insp-error {
+  min-height: 15px;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--cad-error);
+}
+
+.insp-error:empty {
+  min-height: 0;
+}
+
+.insp-details summary {
+  font-size: 12px;
+  color: var(--cad-text-2);
+  cursor: pointer;
+}
+
+.insp-details__body {
+  padding: 6px 0 0;
+  font: 12px var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--cad-text-2);
+}
+
+.insp-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.insp-target {
+  font-size: 12px;
+  color: var(--cad-text-2);
+}
+
+/* ------------------------------------------------------------- breakpoints */
+
+@media (max-width: 1439px) {
+  :root {
+    --browser-w: 200px;
+    --inspector-w: 260px;
+  }
+}
+
+/* 1024–1279: the shell collapses the browser by default and keeps one side open. */
+@media (max-width: 1279px) {
+  :root {
+    --inspector-w: 260px;
+  }
+}
+
+/* <1024: single user-invoked drawer over the canvas. */
+@media (max-width: 1023px) {
+  .ws-main > .ws-panel {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 30;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
   }
 
-  .chip {
-    padding: 4px 8px;
+  .ws-main > .ws-panel:first-child {
+    left: 0;
+    width: 260px;
   }
 
-  .pip {
-    top: auto;
-    bottom: 110px;
-    width: 130px;
+  .ws-main > .ws-panel:last-child {
+    right: 0;
+    width: 280px;
   }
 
-  .measure {
-    bottom: 120px;
+  .ws-command-secondary {
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 8px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 8px;
+    background: var(--cad-panel);
+    border: 1px solid var(--cad-separator);
+    border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    z-index: 40;
   }
 
-  .measure label {
-    flex-basis: 100%;
+  .ws-command-secondary.open {
+    display: flex;
   }
 
-  .help__grid {
-    grid-template-columns: minmax(0, 1fr);
+  .ws-more {
+    display: inline-flex;
+    margin-left: auto;
+  }
+
+  .ws-app-bar__title {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    transition: none;
   }
 }

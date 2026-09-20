@@ -43,6 +43,9 @@ const h = vi.hoisted(() => ({
   renderer: { extrusions: [] as unknown[], activeFaces: [] as unknown[] },
   help: { visible: false },
   measure: { isOpen: false, submit: null as null | ((text: string) => void) },
+  commands: null as null | {
+    dispatch(action: unknown): { ok: boolean; error?: string };
+  },
   raf: null as null | ((time: number) => void),
   nowMs: 10_000,
 }));
@@ -110,9 +113,110 @@ vi.mock('./scene/spatial-cursor-visual', () => ({
   },
 }));
 
-vi.mock('./ui/input-panel', () => ({
-  InputPanel: class {
-    constructor(_root: unknown, _handlers: unknown) {}
+vi.mock('./ui/input-panel', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./ui/input-panel')>();
+  return {
+    ...actual,
+    InputPanel: class {
+      constructor(_root: unknown, _handlers: unknown) {}
+      update(): void {}
+    },
+  };
+});
+
+vi.mock('./ui/workspace', () => {
+  const mk = () => {
+    const element: Record<string, any> = {
+      className: '',
+      tabIndex: 0,
+      style: {},
+      dataset: {},
+      children: [] as unknown[],
+      appendChild(child: unknown) {
+        element.children.push(child);
+        return child;
+      },
+      append(...children: unknown[]) {
+        element.children.push(...children);
+      },
+      addEventListener() {},
+      removeEventListener() {},
+      focus() {},
+      setAttribute() {},
+      getAttribute() {
+        return null;
+      },
+      querySelector() {
+        return null;
+      },
+      closest() {
+        return null;
+      },
+      getBoundingClientRect() {
+        return { left: 0, top: 0, width: 800, height: 600 };
+      },
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    };
+    return element;
+  };
+  class WorkspaceShell {
+    readonly regions = {
+      appBar: mk(),
+      commandBar: mk(),
+      modelBrowser: mk(),
+      viewControls: mk(),
+      viewport: mk(),
+      viewportOverlay: mk(),
+      inspector: mk(),
+      input: mk(),
+      cameraPreview: mk(),
+      statusBar: mk(),
+      notifications: mk(),
+      dialogs: mk(),
+    };
+    readonly layout = { browserVisible: true, inspectorVisible: true, inspectorTab: 'properties' as const };
+    onLayoutChange(): () => void {
+      return () => {};
+    }
+    setLayout(): void {}
+    setEntityCount(): void {}
+  }
+  return { WorkspaceShell };
+});
+
+vi.mock('./ui/command-bar', () => ({
+  AppBar: class {
+    constructor(_host: unknown, callbacks: unknown) {
+      h.commands = callbacks as typeof h.commands;
+    }
+    update(): void {}
+  },
+  CommandBar: class {
+    constructor(_host: unknown, callbacks: unknown) {
+      h.commands = callbacks as typeof h.commands;
+    }
+    update(): void {}
+  },
+}));
+
+// Browser/inspector need real DOM; dispatcher behavior is asserted directly.
+vi.mock('./ui/model-browser', () => ({
+  ModelBrowser: class {
+    constructor(_host: unknown, _callbacks: unknown) {}
+    update(): void {}
+  },
+}));
+
+vi.mock('./ui/inspector', () => ({
+  Inspector: class {
+    constructor(_host: unknown, _callbacks: unknown) {}
+    update(): void {}
+  },
+}));
+
+vi.mock('./ui/view-controls', () => ({
+  ViewControls: class {
+    constructor(_host: unknown, _callbacks: unknown) {}
     update(): void {}
   },
 }));
@@ -147,6 +251,7 @@ vi.mock('./ui/hud', () => ({
     setKeys(keys: { key: string; label: string }[]): void {
       h.hudKeys.push(keys);
     }
+    flash(): void {}
   },
 }));
 
@@ -166,12 +271,14 @@ vi.mock('./ui/toast', () => ({
 
 vi.mock('./ui/pip', () => ({
   CameraPip: class {
+    visible = true;
     constructor(_root: unknown) {}
     setThumb(): void {}
     setHands(): void {}
     setCameraState(): void {}
     setSpatial(): void {}
     setStream(): void {}
+    setSource(): void {}
     toggle(): boolean {
       return false;
     }
@@ -700,12 +807,14 @@ describe('navigation HUD', () => {
     expect(h.hudStates.at(-1)?.mode).toBe('PAN');
   });
 
-  it('lists orbit and pan hints while extruding', () => {
+  it('keeps extrusion hints to pull, apply, and cancel', () => {
     startExtrusion();
     runFrame();
     const keys = h.hudKeys.at(-1) ?? [];
-    expect(keys).toContainEqual({ key: 'Shift', label: 'orbit' });
-    expect(keys).toContainEqual({ key: 'Ctrl', label: 'pan' });
+    expect(keys).toContainEqual({ key: 'Drag / Space', label: 'pull face' });
+    expect(keys).toContainEqual({ key: 'Enter / Q', label: 'apply' });
+    expect(keys).toContainEqual({ key: 'Esc', label: 'cancel' });
+    expect(keys.length).toBeLessThanOrEqual(4);
   });
 });
 
@@ -864,5 +973,42 @@ describe('face switching during the first extrusion', () => {
       h.projector.project = previousProject;
       h.projector.ray = previousRay;
     }
+  });
+});
+
+describe('workspace extrusion dispatch', () => {
+  const dispatch = (action: Record<string, unknown>) =>
+    (h.commands as { dispatch(a: unknown): { ok: boolean; error?: string } }).dispatch(action);
+
+  it('rejects face switching while dragging and pulls the preview without history', () => {
+    const serialized = startExtrusion();
+    // A flat rectangle profile exposes two faces; index 2 is out of range.
+    expect(dispatch({ type: 'setExtrusionFace', index: 1 }).ok).toBe(true);
+    expect(dispatch({ type: 'setExtrusionFace', index: 2 }).ok).toBe(false);
+
+    api.hold('draw', true);
+    api.setCursor(v2(250, 200));
+    expect(api.extrusion()!.dragging).toBe(true);
+    expect(dispatch({ type: 'setExtrusionFace', index: 0 })).toMatchObject({ ok: false, error: 'Release to switch faces' });
+    api.hold('draw', false);
+
+    // A typed pull updates the preview without committing anything.
+    expect(dispatch({ type: 'setExtrusionPull', text: '500' }).ok).toBe(true);
+    expect(Math.abs(api.extrusion()!.depth)).toBeCloseTo(500);
+    expect(dispatch({ type: 'setExtrusionPull', text: 'abc' }).ok).toBe(false);
+    expect(api.sketch.serialize()).toBe(serialized);
+
+    // With a solid preview all six faces are selectable.
+    expect(dispatch({ type: 'setExtrusionFace', index: 5 }).ok).toBe(true);
+
+    expect(dispatch({ type: 'press', action: 'confirm' }).ok).toBe(true);
+    expect(api.extrusion()).toBeNull();
+    expect(api.sketch.all.some((entity) => entity.type === 'extrusion')).toBe(true);
+  });
+
+  it('rejects extrusion field edits with no active session', () => {
+    api.commands.addRect([v3(0, 0, 0), v3(400, 0, 0), v3(400, 300, 0), v3(0, 300, 0)]);
+    expect(dispatch({ type: 'setExtrusionFace', index: 0 }).ok).toBe(false);
+    expect(dispatch({ type: 'setExtrusionPull', text: '500' }).ok).toBe(false);
   });
 });

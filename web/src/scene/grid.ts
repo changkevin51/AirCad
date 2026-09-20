@@ -24,8 +24,8 @@ export function createGroundGrid(halfSize = 10000, minor = 100, major = 1000): T
     bucket.push(value, -halfSize, 0, value, halfSize, 0);
     bucket.push(-halfSize, value, 0, halfSize, value, 0);
   }
-  group.add(lineSegments(minorPoints, 0x2a3038, 0.5));
-  group.add(lineSegments(majorPoints, 0x3b434f, 0.7));
+  group.add(lineSegments(minorPoints, 0x2a2d31, 0.5));
+  group.add(lineSegments(majorPoints, 0x363a40, 0.7));
   group.add(lineSegments([-halfSize, 0, 0, halfSize, 0, 0], AXIS_COLORS.x, 0.8));
   group.add(lineSegments([0, -halfSize, 0, 0, halfSize, 0], AXIS_COLORS.y, 0.8));
   group.add(lineSegments([0, 0, 0, 0, 0, halfSize / 4], AXIS_COLORS.z, 0.8));

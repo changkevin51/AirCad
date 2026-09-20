@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { WorkPlane } from '../model/plane';
 import { roundTo, type Vec2 } from '../model/vec';
+import { THREE_COLORS } from '../ui/theme';
 import { AXIS_COLORS } from './grid';
 
 /** Translucent work-plane quad with its own adaptive grid, tinted by the plane normal. */
@@ -17,7 +18,7 @@ export class WorkPlaneVisual {
     this.group.name = 'work-plane';
     this.quad = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.05, side: THREE.DoubleSide, depthWrite: false }),
+      new THREE.MeshBasicMaterial({ color: THREE_COLORS.accent, transparent: true, opacity: 0.05, side: THREE.DoubleSide, depthWrite: false }),
     );
     this.quad.renderOrder = -5;
     this.minor = new THREE.LineSegments(
@@ -65,9 +66,10 @@ export class WorkPlaneVisual {
     if (signature === this.signature) return;
     this.signature = signature;
 
+    // The fill stays accent-tinted; the grid and boundary keep the axis color.
     const color = new THREE.Color(AXIS_COLORS[plane.info.normalAxis]);
-    for (const material of [this.quad.material, this.minor.material, this.major.material, this.outline.material]) {
-      (material as THREE.MeshBasicMaterial | THREE.LineBasicMaterial).color.copy(color);
+    for (const material of [this.minor.material, this.major.material, this.outline.material]) {
+      (material as THREE.LineBasicMaterial).color.copy(color);
     }
 
     const half = cells * step;

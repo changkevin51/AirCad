@@ -1,14 +1,24 @@
-/** Inline text input at the status bar for typed measurements (stand-in for voice). */
+import { openDialog, type DialogHandle } from './dialog';
+import type { UiActionResult } from './workspace-state';
+
+/**
+ * Compact exact-entry dialog for typed measurements (stand-in for voice).
+ * `onSubmit` returns a UiActionResult: `{ok:false}` keeps the dialog open
+ * with the inline error and the draft; `{ok:true}`/void closes it.
+ */
 export class MeasureInput {
   private readonly form: HTMLFormElement;
   private readonly label: HTMLLabelElement;
   private readonly input: HTMLInputElement;
-  private onSubmit: ((text: string) => void) | null = null;
+  private readonly error: HTMLDivElement;
+  private dialog: DialogHandle | null = null;
+  private onSubmit: ((text: string) => UiActionResult | void) | null = null;
   private onClose: (() => void) | null = null;
 
-  constructor(root: HTMLElement) {
+  constructor(private readonly host: HTMLElement) {
     this.form = document.createElement('form');
-    this.form.className = 'measure hidden';
+    this.form.className = 'measure-form';
+    this.form.noValidate = true;
     this.label = document.createElement('label');
     this.label.htmlFor = 'measure-input';
     this.input = document.createElement('input');
@@ -17,50 +27,75 @@ export class MeasureInput {
     this.input.autocomplete = 'off';
     this.input.spellcheck = false;
     this.input.placeholder = '4000 or 4000x3000';
-    const hint = document.createElement('span');
-    hint.className = 'measure__hint';
-    hint.innerHTML = '<kbd>Enter</kbd> apply <kbd>Esc</kbd> cancel';
-    this.form.append(this.label, this.input, hint);
-    root.appendChild(this.form);
+    this.error = document.createElement('div');
+    this.error.className = 'insp-error';
+    this.error.id = 'measure-error';
+    this.error.setAttribute('role', 'alert');
+    this.form.append(this.label, this.input, this.error);
 
     this.form.addEventListener('submit', (event) => {
       event.preventDefault();
-      const text = this.input.value.trim();
-      const submit = this.onSubmit;
-      this.close();
-      if (text && submit) submit(text);
+      this.submit();
     });
-    this.input.addEventListener('keydown', (event) => {
-      event.stopPropagation();
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        this.close();
-      } else if (event.key === 'Enter') {
-        event.preventDefault();
-        this.form.requestSubmit();
-      }
-    });
-    this.input.addEventListener('keyup', (event) => event.stopPropagation());
   }
 
   get isOpen(): boolean {
-    return !this.form.classList.contains('hidden');
+    return this.dialog !== null;
   }
 
-  open(label: string, onSubmit: (text: string) => void, onClose?: () => void, initialValue?: string): void {
+  open(label: string, onSubmit: (text: string) => UiActionResult | void, onClose?: () => void, initialValue?: string): void {
+    this.close();
     this.label.textContent = label;
     this.onSubmit = onSubmit;
     this.onClose = onClose ?? null;
     this.input.value = initialValue ?? '';
-    this.form.classList.remove('hidden');
+    this.error.textContent = '';
+    this.input.removeAttribute('aria-invalid');
+    this.input.removeAttribute('aria-describedby');
+    this.dialog = openDialog({
+      host: this.host,
+      title: 'Exact value',
+      body: this.form,
+      initialFocus: this.input,
+      backdropClose: true,
+      actions: [
+        {
+          label: 'Apply',
+          tone: 'primary',
+          onClick: () => {
+            if (!this.submit()) return false;
+          },
+        },
+        { label: 'Cancel', onClick: () => undefined },
+      ],
+      onClose: () => this.closed(),
+    });
     this.input.focus();
     if (initialValue) this.input.select();
   }
 
+  /** Submit the current text; a failed result keeps the dialog open. */
+  private submit(): boolean {
+    const submit = this.onSubmit;
+    if (!submit) return true;
+    const result = submit(this.input.value.trim());
+    if (result && !result.ok) {
+      this.error.textContent = result.error;
+      this.input.setAttribute('aria-invalid', 'true');
+      this.input.setAttribute('aria-describedby', this.error.id);
+      this.input.focus();
+      return false;
+    }
+    this.error.textContent = '';
+    return true;
+  }
+
   close(): void {
-    if (!this.isOpen) return;
-    this.form.classList.add('hidden');
-    this.input.blur();
+    this.dialog?.close();
+  }
+
+  private closed(): void {
+    this.dialog = null;
     this.onSubmit = null;
     const onClose = this.onClose;
     this.onClose = null;

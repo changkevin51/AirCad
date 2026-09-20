@@ -12,6 +12,8 @@ hand_landmarker.task
 # Web frontend
 web/node_modules/
 web/dist/
+web/test-results/
+web/playwright-report/
 
 # OS / editor
 .DS_Store

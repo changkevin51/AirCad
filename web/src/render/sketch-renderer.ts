@@ -10,15 +10,16 @@ import type { ProfileFace } from '../model/faces';
 import { add, lerp, v3 } from '../model/vec';
 import type { Vec3 } from '../model/vec';
 import type { Viewport } from '../scene/viewport';
+import { THREE_COLORS } from '../ui/theme';
 
 export const COLORS = {
-  line: 0xf2f4f8,
-  face: 0x8ab4f8,
-  hover: 0xffc857,
-  ghost: 0x6fe3b4,
+  line: 0xd5d9df,
+  face: THREE_COLORS.accent,
+  hover: THREE_COLORS.hoverSnap,
+  ghost: THREE_COLORS.preview,
   ink: 0x9aa4b2,
-  vertex: 0xffffff,
-  fade: 0xff6b6b,
+  vertex: 0xc8cdd3,
+  fade: THREE_COLORS.textSecondary,
 };
 
 function flatten(points: readonly Vec3[]): number[] {
@@ -77,6 +78,7 @@ export class SketchRenderer {
   private readonly resolution = new THREE.Vector2(1, 1);
   private readonly lineMaterial: LineMaterial;
   private readonly hoverMaterial: LineMaterial;
+  private readonly selectionMaterial: LineMaterial;
   private readonly ghostMaterial: LineMaterial;
   private readonly fadeMaterial: LineMaterial;
   private lines: LineSegments2;
@@ -89,6 +91,10 @@ export class SketchRenderer {
   private ghost: Line2;
   private fadeLine: Line2;
   private fadeUntil = 0;
+  private hoverEntity: Entity | null = null;
+  private lastLabelEntity: Entity | null = null;
+  /** While an extrusion preview is up, its depth label replaces the last-committed one. */
+  private extrusionActive = false;
   private readonly ink: THREE.Line;
   private readonly faces: THREE.Mesh;
   private readonly vertices: THREE.Points;
@@ -99,22 +105,25 @@ export class SketchRenderer {
 
   constructor(private readonly viewport: Viewport) {
     this.group.name = 'sketch';
-    this.lineMaterial = new LineMaterial({ color: COLORS.line, linewidth: 3, resolution: this.resolution });
-    this.hoverMaterial = new LineMaterial({ color: COLORS.hover, linewidth: 5, resolution: this.resolution, depthTest: false });
+    this.lineMaterial = new LineMaterial({ color: COLORS.line, linewidth: 2, resolution: this.resolution });
+    this.hoverMaterial = new LineMaterial({ color: COLORS.hover, linewidth: 3, resolution: this.resolution, depthTest: false });
     this.ghostMaterial = new LineMaterial({
       color: COLORS.ghost,
-      linewidth: 3,
+      linewidth: 2,
       resolution: this.resolution,
       dashed: true,
       dashSize: 40,
       gapSize: 25,
       depthTest: false,
     });
-    this.fadeMaterial = new LineMaterial({ color: COLORS.fade, linewidth: 3, resolution: this.resolution, transparent: true, opacity: 0.9, depthTest: false });
+    this.fadeMaterial = new LineMaterial({ color: COLORS.fade, linewidth: 2, resolution: this.resolution, transparent: true, opacity: 0.9, depthTest: false });
+
+    // Persistent selection reads differently from transient hover: accent, not amber.
+    this.selectionMaterial = new LineMaterial({ color: THREE_COLORS.accent, linewidth: 3, resolution: this.resolution, depthTest: false });
 
     this.lines = new LineSegments2(new LineSegmentsGeometry(), this.lineMaterial);
     this.hover = new LineSegments2(new LineSegmentsGeometry(), this.hoverMaterial);
-    this.selected = new LineSegments2(new LineSegmentsGeometry(), this.hoverMaterial);
+    this.selected = new LineSegments2(new LineSegmentsGeometry(), this.selectionMaterial);
     this.extrusionLines = new LineSegments2(new LineSegmentsGeometry(), this.ghostMaterial);
     this.extrusionFaces = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({
       color: COLORS.ghost, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false,
@@ -156,7 +165,7 @@ export class SketchRenderer {
 
     this.vertices = new THREE.Points(
       new THREE.BufferGeometry(),
-      new THREE.PointsMaterial({ color: COLORS.vertex, size: 9, sizeAttenuation: false, map: circleTexture(), transparent: true, depthTest: false }),
+      new THREE.PointsMaterial({ color: COLORS.vertex, size: 7, sizeAttenuation: false, map: circleTexture(), transparent: true, depthTest: false }),
     );
     this.vertices.visible = false;
     this.vertices.renderOrder = 7;
@@ -171,7 +180,7 @@ export class SketchRenderer {
   private updateResolution(): void {
     this.resolution.set(this.viewport.width, this.viewport.height);
     // LineMaterial copies the vector on assignment, so push the new size to every material.
-    for (const material of [this.lineMaterial, this.hoverMaterial, this.ghostMaterial, this.fadeMaterial]) {
+    for (const material of [this.lineMaterial, this.hoverMaterial, this.selectionMaterial, this.ghostMaterial, this.fadeMaterial]) {
       material.resolution = this.resolution;
     }
   }
@@ -215,18 +224,33 @@ export class SketchRenderer {
   }
 
   setHover(entity: Entity | null): void {
+    this.hoverEntity = entity;
     if (!entity) {
       this.hover.visible = false;
       this.hoverLabel.set(null);
+      this.syncEntityLabels();
       return;
     }
     const positions: number[] = [];
     for (const segment of entitySegments(entity)) positions.push(...flatten([segment.a, segment.b]));
     this.replaceSegments(this.hover, positions);
     this.hoverLabel.set(entityLabel(entity), entityCenter(entity));
+    this.syncEntityLabels();
   }
 
   setLastLabel(entity: Entity | null): void {
+    this.lastLabelEntity = entity;
+    this.syncEntityLabels();
+  }
+
+  /**
+   * Hover and last-committed labels share an entity's center; when they name
+   * the same object keep the hover label and drop the duplicate.
+   */
+  private syncEntityLabels(): void {
+    const duplicate =
+      this.hoverEntity !== null && this.lastLabelEntity !== null && this.hoverEntity.id === this.lastLabelEntity.id;
+    const entity = duplicate || this.extrusionActive ? null : this.lastLabelEntity;
     this.lastLabel.set(entity ? entityLabel(entity) : null, entity ? entityCenter(entity) : undefined);
   }
 
@@ -246,7 +270,8 @@ export class SketchRenderer {
       ? add(lerp(entity.corners[0], entity.corners[2], 0.5), extrusionOffset(entity))
       : undefined;
     this.extrusionLabel.set(entity ? `Depth ${formatMm(entity.depth)}` : null, top);
-    this.lastLabel.object.visible = false;
+    this.extrusionActive = !!entity;
+    this.syncEntityLabels();
   }
 
   /** Highlight the face currently being pushed/pulled during an extrusion. */

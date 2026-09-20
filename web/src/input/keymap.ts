@@ -88,10 +88,10 @@ export const PRESS_BINDINGS: readonly KeyBinding<PressAction>[] = [
   { action: 'extrude', codes: ['KeyQ'], mods: { primary: false, ctrl: false, alt: false }, label: 'Q', help: 'Push/pull the selected rectangle or solid: pick a face, pinch and move', group: 'tools' },
   { action: 'confirm', codes: ['Enter', 'NumpadEnter'], label: 'Enter', help: 'Apply the extrusion preview (Q also applies)', group: 'tools' },
   { action: 'measure', codes: ['KeyL'], label: 'L', help: 'Type a length, rectangle size, or extrusion depth', group: 'tools' },
-  { action: 'export', codes: ['KeyE'], label: 'E', help: 'Export to FreeCAD', group: 'tools' },
+  { action: 'export', codes: ['KeyE'], label: 'E', help: 'Export to FreeCAD (legacy — needs the separate app)', group: 'tools' },
   { action: 'toggleNavAssist', codes: ['KeyN'], label: 'N', help: 'Off-hand palm navigation on / off', group: 'tools' },
   { action: 'togglePip', codes: ['KeyP'], label: 'P', help: 'Camera picture-in-picture', group: 'tools' },
-  { action: 'help', codes: ['KeyH', 'F1'], label: 'H', help: 'Help overlay', group: 'tools' },
+  { action: 'help', codes: ['KeyH', 'F1'], label: 'H', help: 'Help dialog', group: 'tools' },
   { action: 'setOrigin', codes: ['KeyO'], label: 'O', help: 'Set the depth-camera origin (depth mode)', group: 'tools' },
   { action: 'recenter', codes: ['KeyR'], label: 'R', help: 'Recenter mapping on the last endpoint (depth mode)', group: 'tools' },
 ];

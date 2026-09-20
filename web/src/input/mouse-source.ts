@@ -35,6 +35,9 @@ export class MouseSource {
     const { signal } = this.abort;
 
     element.addEventListener('pointerdown', (event) => {
+      // A canvas pointerdown explicitly restores viewport focus so CAD keys
+      // keep working after interacting with docked UI.
+      element.focus?.();
       const action = BUTTON_ACTIONS[event.button];
       if (!action) return;
       event.preventDefault();

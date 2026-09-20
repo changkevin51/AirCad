@@ -1,8 +1,9 @@
 import type { TrackingState } from '../input/cursor';
-import type { CameraState, ConnectionState } from '../input/tracker-client';
+import type { SpatialCursorState } from '../input/spatial-cursor';
+import type { CameraState, ConnectionState, TrackerSource } from '../input/tracker-client';
 import type { PlaneInfo } from '../model/plane';
 import type { SnapType } from '../model/snap';
-import { formatMm } from '../model/sketch';
+import { inputStatus } from './input-panel';
 
 export type Mode = 'READY' | 'DRAWING' | 'EXTRUDING' | 'ORBIT' | 'PAN';
 
@@ -18,16 +19,21 @@ export interface HudState {
   tracking: TrackingState;
   connection: ConnectionState;
   camera: CameraState | null;
+  cameraMessage?: string | null;
+  inputSource: TrackerSource;
+  spatialState?: SpatialCursorState | null;
+  spatialReason?: string | null;
+  collecting?: boolean;
+  calibrationSamples?: number;
+  calibrationGoal?: number;
   projection: 'Persp' | 'Ortho';
   navAssist: boolean;
   edgeOn: boolean;
   entityCount: number;
   selected: string | null;
   extrusion: { depth: number; dragging: boolean; face: string; pulled: number } | null;
-  depthMode?: boolean;
-  spatialLabel?: string | null;
-  scale?: number | null;
-  trackingAgeMs?: number | null;
+  /** A blocking dialog (measure entry, help) owns input right now. */
+  dialogOpen?: boolean;
 }
 
 export interface KeyHint {
@@ -49,101 +55,170 @@ export function formatGridStep(step: number): string {
   return step >= 1000 ? `${step / 1000} m` : `${step} mm`;
 }
 
+/** Status-bar input health: the same labels the Input tab shows. */
 export function trackingLabel(state: HudState): { text: string; tone: string } {
-  if (state.connection !== 'open') return { text: 'Tracker offline · mouse', tone: 'warn' };
-  if (state.camera === 'disabled') return { text: 'Mouse (no camera)', tone: 'muted' };
-  if (state.camera === 'error' || state.camera === 'stopped') {
-    return { text: state.depthMode ? 'Camera error' : 'Camera error · mouse', tone: 'warn' };
-  }
-  if (state.camera === 'starting') return { text: 'Camera starting', tone: 'muted' };
-  if (state.depthMode) {
-    const label = state.spatialLabel ?? 'Acquiring';
-    const tone = label === 'Tracking' ? 'ok' : label === 'Paused' || label === 'Lost' || label === 'Origin needed' ? 'warn' : 'muted';
-    return { text: label, tone };
-  }
-  switch (state.tracking) {
-    case 'hand':
-      return { text: 'Hand', tone: 'ok' };
-    case 'lost':
-      return { text: 'Hand lost', tone: 'warn' };
-    case 'mouse':
-      return { text: 'Mouse', tone: 'muted' };
-    default:
-      return { text: 'Show a hand', tone: 'muted' };
-  }
+  const status = inputStatus({
+    connection: state.connection,
+    camera: state.camera,
+    cameraMessage: state.cameraMessage,
+    source: state.inputSource,
+    tracking: state.tracking,
+    spatialState: state.spatialState,
+    spatialReason: state.spatialReason,
+    collecting: state.collecting,
+    calibrationSamples: state.calibrationSamples,
+    calibrationGoal: state.calibrationGoal,
+  });
+  return { text: status.text, tone: status.tone === 'neutral' ? 'muted' : status.tone };
 }
 
-/** Top-left status chips and the bottom context key bar. */
-export class Hud {
-  private readonly chips: HTMLDivElement;
-  private readonly keyBar: HTMLDivElement;
-  private readonly hint: HTMLDivElement;
-  private lastChips = '';
-  private lastKeys = '';
+const INSTRUCTIONS: Record<Mode, string> = {
+  READY: 'Ready — left-drag to draw, click to select',
+  DRAWING: 'Drawing — release to commit',
+  EXTRUDING: 'Push/Pull — drag or hold Space to pull',
+  ORBIT: 'Orbiting — release to stop',
+  PAN: 'Panning — release to stop',
+};
 
-  constructor(root: HTMLElement) {
-    this.chips = document.createElement('div');
-    this.chips.className = 'hud';
-    this.hint = document.createElement('div');
-    this.hint.className = 'hint hidden';
-    this.hint.setAttribute('role', 'status');
-    this.keyBar = document.createElement('div');
-    this.keyBar.className = 'keybar';
-    root.append(this.chips, this.hint, this.keyBar);
+/**
+ * Status-bar content (left: context instruction plus a few key hints;
+ * right: snap · plane · units · input health), the compact viewport notice
+ * slot, and the empty-state prompt.  Text writes are value-compared and the
+ * right-hand readout is rate-limited so nothing churns per frame.
+ */
+export class Hud {
+  private readonly instruction: HTMLSpanElement;
+  private readonly hints: HTMLSpanElement;
+  private readonly statusRight: HTMLSpanElement;
+  private readonly notice: HTMLDivElement;
+  private readonly empty: HTMLDivElement;
+  private lastHints = '';
+  private lastRight = '';
+  private lastRightAt = 0;
+  private lastNotice = '';
+  private emptyVisible = false;
+  private flashText = '';
+  private flashTone: 'info' | 'success' = 'info';
+  private flashUntil = 0;
+
+  constructor(statusBar: HTMLElement, overlay: HTMLElement, handlers: { onHelp?: () => void } = {}) {
+    const left = document.createElement('div');
+    left.className = 'ws-status__left';
+    this.instruction = document.createElement('span');
+    this.instruction.className = 'ws-status__instruction';
+    this.hints = document.createElement('span');
+    this.hints.className = 'ws-status__hints';
+    left.append(this.instruction, this.hints);
+    this.statusRight = document.createElement('span');
+    this.statusRight.className = 'ws-status__right';
+    statusBar.append(left, this.statusRight);
+
+    this.notice = document.createElement('div');
+    this.notice.className = 'viewport-notice hidden';
+    this.notice.setAttribute('role', 'status');
+
+    this.empty = document.createElement('div');
+    this.empty.className = 'empty-state hidden';
+    this.empty.setAttribute('data-cad-ui', '');
+    const headline = document.createElement('div');
+    headline.className = 'empty-state__headline';
+    headline.textContent = 'Draw a line or closed rectangle';
+    const sub = document.createElement('div');
+    sub.className = 'empty-state__sub';
+    sub.textContent = 'Left-drag or hold Space. Click to select.';
+    const help = document.createElement('button');
+    help.type = 'button';
+    help.className = 'empty-state__help';
+    help.textContent = 'Help';
+    help.addEventListener('click', () => handlers.onHelp?.());
+    this.empty.append(headline, sub, help);
+
+    overlay.append(this.notice, this.empty);
+  }
+
+  /**
+   * Routine feedback (selection, plane/grid toggles, commits) flashes in the
+   * status bar's instruction slot for a moment instead of stacking toasts.
+   */
+  flash(text: string, tone: 'info' | 'success' = 'info', durationMs = 2500): void {
+    this.flashText = text;
+    this.flashTone = tone;
+    this.flashUntil = performance.now() + durationMs;
+    this.instruction.textContent = text;
+    this.instruction.dataset.tone = tone;
   }
 
   update(state: HudState): void {
+    const now = performance.now();
+    let instruction = state.selected && state.mode === 'READY'
+      ? `Selected ${state.selected} — L size · Q push/pull · Del delete`
+      : INSTRUCTIONS[state.mode];
+    if (this.flashText && now < this.flashUntil) {
+      instruction = this.flashText;
+      this.instruction.dataset.tone = this.flashTone;
+    } else {
+      this.flashText = '';
+      delete this.instruction.dataset.tone;
+    }
+    if (this.instruction.textContent !== instruction) this.instruction.textContent = instruction;
+
     const tracking = trackingLabel(state);
-    const snapText = state.snap ? `${SNAP_NAMES[state.snap]}${state.snapAxis ? ` ${state.snapAxis.toUpperCase()}` : ''}` : '–';
-    const chips: [string, string, string][] = [
-      ['Mode', state.mode, `mode-${state.mode.toLowerCase()}`],
-      [
-        'Plane',
-        `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` · ${state.planeReason}` : ''}`,
-        `axis-${state.plane.normalAxis}`,
-      ],
-      ['Snap', snapText, state.snap && state.snap !== 'free' ? `snap-${state.snap}` : 'muted'],
-      ['Grid', state.gridEnabled ? formatGridStep(state.gridStep) : 'off', state.gridEnabled ? '' : 'muted'],
-      ['View', state.projection, ''],
-      ['Tracking', tracking.text, tracking.tone],
-    ];
-    if (state.depthMode) {
-      if (state.scale) chips.push(['Scale', `${state.scale}×`, '']);
-      if (state.trackingAgeMs !== null && state.trackingAgeMs !== undefined) {
-        chips.push(['Age', `${Math.round(state.trackingAgeMs)} ms`, state.trackingAgeMs > 200 ? 'warn' : 'muted']);
+    const snapText = state.snap ? `${SNAP_NAMES[state.snap]}${state.snapAxis ? ` ${state.snapAxis.toUpperCase()}` : ''}` : '—';
+    const right = [
+      `Snap: ${snapText}`,
+      `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` (${state.planeReason})` : ''}`,
+      state.gridEnabled ? `Grid ${formatGridStep(state.gridStep)}` : 'Grid snap off',
+      tracking.text,
+    ].join('  ·  ');
+    if (right !== this.lastRight && now - this.lastRightAt >= 100) {
+      this.lastRight = right;
+      this.lastRightAt = now;
+      this.statusRight.textContent = right;
+      this.statusRight.dataset.tone = tracking.tone;
+    }
+
+    const notice = this.noticeText(state);
+    if (notice !== this.lastNotice) {
+      this.lastNotice = notice;
+      this.notice.textContent = notice;
+      this.notice.classList.toggle('hidden', !notice);
+      this.notice.classList.toggle('viewport-notice--action', !!state.extrusion);
+    }
+
+    const emptyVisible = state.entityCount === 0 && state.mode === 'READY' && !state.dialogOpen;
+    if (emptyVisible !== this.emptyVisible) {
+      this.emptyVisible = emptyVisible;
+      this.empty.classList.toggle('hidden', !emptyVisible);
+    }
+  }
+
+  /** One notice slot: actionable warnings outrank normal instructions. */
+  private noticeText(state: HudState): string {
+    if (state.extrusion) {
+      if (state.tracking === 'lost') {
+        return 'Tracking lost — show your hand to resume pulling.';
       }
+      if (state.mode === 'ORBIT' || state.mode === 'PAN') {
+        return 'Push/Pull paused while you move the view — release to continue.';
+      }
+      return 'Push/Pull — drag the highlighted face · Enter applies · Esc cancels';
     }
-    if (state.navAssist) chips.push(['Palm nav', 'on', 'ok']);
-    if (state.extrusion) chips.push(['Face', state.extrusion.face, 'ok'], ['Depth', formatMm(state.extrusion.depth), 'ok']);
-    else if (state.selected) chips.push(['Selected', state.selected, 'warn']);
-    const html = chips
-      .map(([name, value, tone]) => `<span class="chip ${tone}"><span class="chip__name">${name}</span><span class="chip__value">${value}</span></span>`)
-      .join('');
-    if (html !== this.lastChips) {
-      this.lastChips = html;
-      this.chips.innerHTML = html;
+    if (state.edgeOn) {
+      return `Work plane ${state.plane.label} is edge-on. Press A for auto, Tab or 1 / 2 / 3, or orbit with Shift.`;
     }
-    const hintText = state.extrusion
-      ? state.tracking === 'lost'
-        ? 'Tracking lost — depth paused. Show your hand, release the pinch, then pinch again to continue.'
-        : state.mode === 'ORBIT' || state.mode === 'PAN'
-          ? 'Extrusion paused while you move the view. Release Shift / Ctrl to continue pulling. Enter applies · Esc cancels.'
-          : state.extrusion.dragging
-            ? 'Move to pull the highlighted face out, back to push in. Release to pause. Enter applies · Esc cancels.'
-            : 'Pinch thumb + index and move (or hold Space / left-drag) to pull the highlighted face. Hover another face or press Tab to switch. Enter applies · Esc cancels.'
-      : state.edgeOn ? `Work plane ${state.plane.label} is edge-on. Press A for auto, Tab or 1 / 2 / 3, or orbit with Shift.` : '';
-    this.hint.style.top = `${this.chips.offsetTop + this.chips.offsetHeight + 10}px`;
-    this.hint.classList.toggle('hint--extrusion', !!state.extrusion);
-    if (hintText !== this.hint.textContent) {
-      this.hint.textContent = hintText;
-      this.hint.classList.toggle('hidden', !hintText);
+    if (state.inputSource === 'oak' && state.spatialState === 'origin') {
+      return 'Depth camera needs an origin — press O and hold the tracked tip still.';
     }
+    if (state.tracking === 'lost' && state.inputSource !== 'oak') {
+      return 'Tracking paused — show your hand to resume, or keep using the mouse.';
+    }
+    return '';
   }
 
   setKeys(hints: readonly KeyHint[]): void {
     const html = hints.map((hint) => `<span class="key"><kbd>${hint.key}</kbd>${hint.label}</span>`).join('');
-    if (html === this.lastKeys) return;
-    this.lastKeys = html;
-    this.keyBar.innerHTML = html;
+    if (html === this.lastHints) return;
+    this.lastHints = html;
+    this.hints.innerHTML = html;
   }
 }
