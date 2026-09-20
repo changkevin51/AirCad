@@ -20,7 +20,7 @@ function tracked(cameraMm: [number, number, number], overrides: Partial<SpatialM
     t: 1000,
     sampleTimeMs: 990,
     ageMs: 10,
-    target: 'finger',
+    target: 'keycap',
     trackingEpoch: 0,
     frame: { w: 1280, h: 720, mirrored: true },
     pixel: [640, 360],

@@ -101,9 +101,9 @@ export class HelpOverlay {
         return `<h3>Camera setup</h3>
           ${paragraph('The mouse always works. Tracking is configured in the Input tab of the inspector.')}
           <ul>
-            <li>Webcam tracking follows your index fingertip; pinch thumb and index to draw or click to select. <kbd>P</kbd> toggles the camera preview; <kbd>N</kbd> toggles palm navigation.</li>
+            <li>Camera tracking follows the green keycap center. Hold <kbd>Space</kbd> to draw or grab; release to finish the grab. Press <kbd>S</kbd> to select. Hold <kbd>Shift</kbd> to orbit or <kbd>Ctrl</kbd> to pan; <kbd>+</kbd>/<kbd>−</kbd> zoom. <kbd>P</kbd> toggles the camera preview.</li>
             <li>An OAK-D depth camera draws on the work plane after <kbd>O</kbd> sets the origin; <kbd>R</kbd> recenters on the last endpoint.</li>
-            <li>If tracking pauses, show your hand again to resume — holds always release on focus loss, so nothing stays latched.</li>
+            <li>If tracking pauses, show the green keycap again to resume — holds always release on focus loss, so nothing stays latched.</li>
           </ul>`;
       case 'keys': {
         const groups: BindingGroup[] = ['pen', 'view', 'plane', 'edit', 'tools'];

@@ -132,82 +132,82 @@ describe('extrusion gesture transaction', () => {
 
   it('moves only while grabbed and can be re-grabbed without a depth jump', () => {
     const session = new ExtrusionSession(profile(), 10, 100, 0);
-    session.update(v2(100, 300), false, 'hand:1', UP);
-    session.update(v2(100, 200), false, 'hand:1', UP);
+    session.update(v2(100, 300), false, 'keycap:1', UP);
+    session.update(v2(100, 200), false, 'keycap:1', UP);
     expect(session.depth).toBe(0);
-    session.update(v2(100, 200), true, 'hand:1', UP);
-    session.update(v2(500, 146), true, 'hand:1', UP);
+    session.update(v2(100, 200), true, 'keycap:1', UP);
+    session.update(v2(500, 146), true, 'keycap:1', UP);
     expect(session.depth).toBe(500);
-    session.update(v2(500, 50), false, 'hand:1', UP);
+    session.update(v2(500, 50), false, 'keycap:1', UP);
     expect(session.depth).toBe(500);
     expect(session.dragging).toBe(false);
-    session.update(v2(100, 300), true, 'hand:1', UP);
+    session.update(v2(100, 300), true, 'keycap:1', UP);
     expect(session.depth).toBe(500);
-    session.update(v2(100, 350), true, 'hand:1', UP);
+    session.update(v2(100, 350), true, 'keycap:1', UP);
     expect(session.depth).toBe(0);
-    session.update(v2(100, 375), true, 'hand:1', UP);
+    session.update(v2(100, 375), true, 'keycap:1', UP);
     expect(session.depth).toBe(-200);
   });
 
-  it('freezes on tracking loss or hand switch until a fresh pinch', () => {
+  it('freezes on tracking loss or keycap switch until a fresh Space grab', () => {
     const session = new ExtrusionSession(profile(), 10, 0, 0);
-    session.update(v2(0, 300), true, 'hand:1', UP);
-    session.update(v2(0, 250), true, 'hand:1', UP);
+    session.update(v2(0, 300), true, 'keycap:1', UP);
+    session.update(v2(0, 250), true, 'keycap:1', UP);
     session.update(null, false, null, UP);
-    session.update(v2(0, 0), true, 'hand:1', UP);
+    session.update(v2(0, 0), true, 'keycap:1', UP);
     expect(session.depth).toBe(500);
     expect(session.dragging).toBe(false);
-    session.update(v2(0, 250), false, 'hand:1', UP);
-    session.update(v2(0, 250), true, 'hand:1', UP);
-    session.update(v2(0, 200), true, 'hand:1', UP);
+    session.update(v2(0, 250), false, 'keycap:1', UP);
+    session.update(v2(0, 250), true, 'keycap:1', UP);
+    session.update(v2(0, 200), true, 'keycap:1', UP);
     expect(session.depth).toBe(1000);
-    session.update(v2(0, 0), true, 'hand:2', UP);
+    session.update(v2(0, 0), true, 'keycap:2', UP);
     expect(session.depth).toBe(1000);
     expect(session.dragging).toBe(false);
   });
 
   it('rebases a continuing grip after camera navigation without a pull jump', () => {
     const session = new ExtrusionSession(profile(), 10, 0, 0);
-    session.update(v2(0, 300), true, 'hand:1', UP);
-    session.update(v2(0, 250), true, 'hand:1', UP);
+    session.update(v2(0, 300), true, 'keycap:1', UP);
+    session.update(v2(0, 250), true, 'keycap:1', UP);
     const corners = session.corners;
     session.pause(false);
     expect(session.dragging).toBe(false);
     expect(session.depth).toBe(500);
     expect(session.corners).toBe(corners);
-    session.update(v2(700, 50), true, 'hand:1', UP);
+    session.update(v2(700, 50), true, 'keycap:1', UP);
     expect(session.depth).toBe(500);
     expect(session.dragging).toBe(true);
-    session.update(v2(700, 40), true, 'hand:1', UP);
+    session.update(v2(700, 40), true, 'keycap:1', UP);
     expect(session.depth).toBe(600);
   });
 
   it('does not clear a safety pause when camera navigation pauses the grip', () => {
     const session = new ExtrusionSession(profile(), 10, 0, 0);
-    session.update(v2(0, 300), true, 'hand:1', UP);
-    session.update(v2(0, 250), true, 'hand:1', UP);
+    session.update(v2(0, 300), true, 'keycap:1', UP);
+    session.update(v2(0, 250), true, 'keycap:1', UP);
     session.pause();
     session.pause(false);
-    session.update(v2(700, 50), true, 'hand:1', UP);
+    session.update(v2(700, 50), true, 'keycap:1', UP);
     expect(session.depth).toBe(500);
     expect(session.dragging).toBe(false);
-    session.update(v2(700, 50), false, 'hand:1', UP);
-    session.update(v2(700, 50), true, 'hand:1', UP);
-    session.update(v2(700, 40), true, 'hand:1', UP);
+    session.update(v2(700, 50), false, 'keycap:1', UP);
+    session.update(v2(700, 50), true, 'keycap:1', UP);
+    session.update(v2(700, 40), true, 'keycap:1', UP);
     expect(session.depth).toBe(600);
   });
 
   it('still requires a release when the cursor source changes after a soft pause', () => {
     const session = new ExtrusionSession(profile(), 10, 0, 0);
-    session.update(v2(0, 300), true, 'hand:1', UP);
-    session.update(v2(0, 250), true, 'hand:1', UP);
+    session.update(v2(0, 300), true, 'keycap:1', UP);
+    session.update(v2(0, 250), true, 'keycap:1', UP);
     session.pause(false);
-    session.update(v2(700, 50), true, 'hand:2', UP);
+    session.update(v2(700, 50), true, 'keycap:2', UP);
     expect(session.depth).toBe(500);
     expect(session.dragging).toBe(false);
-    session.update(v2(700, 50), false, 'hand:2', UP);
-    session.update(v2(700, 50), true, 'hand:2', UP);
-    session.update(v2(700, 40), true, 'hand:2', UP);
+    session.update(v2(700, 50), false, 'keycap:2', UP);
+    session.update(v2(700, 50), true, 'keycap:2', UP);
+    session.update(v2(700, 40), true, 'keycap:2', UP);
     expect(session.depth).toBe(600);
   });
 

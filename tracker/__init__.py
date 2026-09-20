@@ -1,1 +1,1 @@
-"""Webcam hand tracking for AirCAD: camera capture, MediaPipe, and the wire protocol."""
+"""Native green keycap camera tracking and wire protocol for AirCAD."""

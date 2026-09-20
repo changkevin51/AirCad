@@ -1,7 +1,7 @@
 import { test as base, type WebSocketRoute } from '@playwright/test';
 import type {
   CameraState,
-  HandsMessage,
+  KeycapMessage,
   SpatialMessage,
   SpatialState,
   StatusMessage,
@@ -20,7 +20,7 @@ export const trackerStatus: TrackerSnapshot = {
   config: {
     source: 'none',
     cameraIndex: 0,
-    target: 'finger',
+    target: 'keycap',
     colorPreset: 'green',
     colorTolerance: 0.18,
   },
@@ -30,7 +30,7 @@ export const trackerStatus: TrackerSnapshot = {
   sourceRunId: 'ui-test-run',
   capabilities: {
     sources: ['webcam', 'oak', 'none'],
-    depthTargets: ['finger', 'color'],
+    depthTargets: ['keycap'],
     depthaiInstalled: false,
   },
   serverTimeMs: 0,
@@ -59,26 +59,19 @@ export const statusMessage = (camera: CameraState, message = ''): StatusMessage 
   message,
 });
 
-/** One right hand mid-frame; tracking reports 'hand' while frames arrive. */
-export const handsMessage = (t: number): HandsMessage => ({
-  type: 'hands',
+/** One green keycap mid-frame; tracking reports 'keycap' while frames arrive. */
+export const keycapMessage = (t: number): KeycapMessage => ({
+  type: 'keycap',
   t,
   frame: { w: 640, h: 480 },
-  hands: [
+  keycaps: [
     {
       id: 1,
-      handedness: 'right',
-      tip: [320, 240],
-      thumb: [300, 250],
-      palm: [310, 260],
-      palmSize: 40,
-      pinching: false,
-      open: false,
-      openArmed: false,
-      landmarks: [],
+      center: [320, 240],
+      confidence: 1,
+
     },
   ],
-  nav: null,
 });
 
 /** A v2 spatial sample; 'tracked' requires fresh + cameraMm + sample/age times. */
@@ -97,7 +90,7 @@ export const spatialMessage = (
   t,
   sampleTimeMs: state === 'tracked' || state === 'held' ? t : null,
   ageMs: state === 'tracked' || state === 'held' ? 0 : null,
-  target: 'finger',
+  target: 'keycap',
   trackingEpoch: 1,
   frame: { w: 640, h: 480, mirrored: true },
   pixel: state === 'tracked' || state === 'held' ? [320, 240] : null,
@@ -108,7 +101,7 @@ export const spatialMessage = (
   quality: { validPixels: 100, roiCount: 1, spreadMm: null, pairSkewMs: null },
 });
 
-type TrackerFrame = StatusMessage | HandsMessage | SpatialMessage | Record<string, unknown>;
+type TrackerFrame = StatusMessage | KeycapMessage | SpatialMessage | Record<string, unknown>;
 
 export interface TrackerFixture {
   /** Push a server-to-client JSON frame through the captured socket route. */

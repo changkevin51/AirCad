@@ -80,12 +80,12 @@ class ServerTests(AioHTTPTestCase):
             first = json.loads((await socket.receive_str()))
             self.assertEqual(first, {"type": "status", "camera": "ready", "message": "Camera ready"})
 
-            broadcaster.publish_threadsafe({"type": "hands", "hands": [], "frame": {"w": 640, "h": 480}, "nav": None, "t": 1})
-            broadcaster.publish_threadsafe({"type": "hands", "hands": [{"id": 1}], "frame": {"w": 640, "h": 480}, "nav": None, "t": 2})
+            broadcaster.publish_threadsafe({"type": "keycap", "keycaps": [], "frame": {"w": 640, "h": 480}, "nav": None, "t": 1})
+            broadcaster.publish_threadsafe({"type": "keycap", "keycaps": [{"id": 1}], "frame": {"w": 640, "h": 480}, "nav": None, "t": 2})
             message = await socket.receive(timeout=2.0)
             self.assertEqual(message.type, WSMsgType.TEXT)
             latest = json.loads(message.data)
-            self.assertEqual(latest["type"], "hands")
+            self.assertEqual(latest["type"], "keycap")
             self.assertEqual(latest["t"], 2)
         self.assertEqual(broadcaster.client_count, 0)
 
@@ -140,7 +140,7 @@ class TrackerApiTests(AioHTTPTestCase):
         config = {
             "source": "webcam",
             "cameraIndex": 0,
-            "target": "finger",
+            "target": "keycap",
             "colorPreset": "green",
             "colorTolerance": 1.0,
         }
@@ -159,21 +159,21 @@ class TrackerApiTests(AioHTTPTestCase):
         self.assertTrue(payload["sourceRunId"])
         self.assertIsInstance(payload["serverTimeMs"], (int, float))
         self.assertEqual(payload["capabilities"]["sources"], ["webcam", "oak", "none"])
-        self.assertEqual(payload["capabilities"]["depthTargets"], ["finger", "color"])
+        self.assertEqual(payload["capabilities"]["depthTargets"], ["keycap"])
         self.assertFalse(payload["capabilities"]["depthaiInstalled"])
         self.assertEqual(len(FakeWorker.instances), 1)
 
     async def test_post_applies_new_config(self) -> None:
         async with self.client.get("/api/tracker") as response:
             stream = (await response.json())["streamId"]
-        body = {"expectedStreamId": stream, "config": self._config(source="oak", target="color", colorPreset="red", colorTolerance=1.5)}
+        body = {"expectedStreamId": stream, "config": self._config(source="oak", target="keycap", colorTolerance=1.5)}
         async with self.client.post("/api/tracker", json=body) as response:
             self.assertEqual(response.status, 200)
             payload = await response.json()
         self.assertTrue(payload["ok"])
         self.assertNotEqual(payload["streamId"], stream)
         self.assertEqual(payload["config"]["source"], "oak")
-        self.assertEqual(payload["config"]["colorPreset"], "red")
+        self.assertEqual(payload["config"]["colorTolerance"], 1.5)
         self.assertEqual(len(FakeWorker.instances), 2)
 
     async def test_post_stale_stream_conflict(self) -> None:
@@ -272,7 +272,7 @@ class TrackerAppSeamTests(AioHTTPTestCase):
             "config": {
                 "source": "oak",
                 "cameraIndex": 0,
-                "target": "finger",
+                "target": "keycap",
                 "colorPreset": "green",
                 "colorTolerance": 1.0,
             },

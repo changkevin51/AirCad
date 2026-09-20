@@ -9,7 +9,7 @@ export const CALIBRATION_WINDOW_MS = 400;
 export const CALIBRATION_TIMEOUT_MS = 5000;
 export const CALIBRATION_MIN_SAMPLES = 8;
 export const CALIBRATION_MAX_SPREAD_MM = 10;
-/** Finger depth from an OAK often jitters more than 10 mm; still accept a cluster. */
+/** Target depth from an OAK often jitters more than 10 mm; still accept a cluster. */
 export const CALIBRATION_FALLBACK_SPREAD_MM = 30;
 export const MAX_DRAW_AGE_MS = 200;
 

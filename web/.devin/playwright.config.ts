@@ -15,6 +15,8 @@ export default defineConfig({
     viewport: { width: 1440, height: 900 },
     deviceScaleFactor: 1,
     reducedMotion: 'reduce',
+    // macOS headless Chromium needs Metal for this WebGL CAD viewport.
+    launchOptions: process.platform === 'darwin' ? { args: ['--use-angle=metal'] } : {},
     trace: 'retain-on-failure',
   },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],

@@ -92,7 +92,7 @@ class Broadcaster:
     def clear_stream(self) -> None:
         """Drop queued per-stream messages at a source/config transition."""
 
-        for message_type in ("hands", "spatial", "thumb"):
+        for message_type in ("keycap", "spatial", "thumb"):
             self._latest.pop(message_type, None)
 
     async def register(self, socket: web.WebSocketResponse) -> None:
@@ -346,8 +346,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--no-camera", action="store_true", help="skip the webcam; drive the cursor with the mouse")
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser automatically")
     parser.add_argument("--source", choices=("webcam", "oak", "none"), default=None, help="input source (default: webcam)")
-    parser.add_argument("--target", choices=("finger", "color"), default="finger", help="depth camera target (default: finger)")
-    parser.add_argument("--color", choices=("green", "red", "blue"), default="green", help="colour target preset (default: green)")
+    parser.add_argument("--target", choices=("keycap",), default="keycap", help="green keycap tracking target")
+    parser.add_argument("--color", choices=("green",), default="green", help="colour target preset (default: green)")
     parser.add_argument("--tracking-debug", action="store_true", help="write bounded tracking diagnostics to .runtime/depth-tracking.jsonl")
     args = parser.parse_args(argv)
 
