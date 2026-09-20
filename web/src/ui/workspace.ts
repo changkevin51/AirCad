@@ -79,6 +79,37 @@ export function resolvePanelVisibility(
   return { browserVisible: side === 'browser', inspectorVisible: side === 'inspector' };
 }
 
+/**
+ * The effective layout: while presenting, both panels collapse without
+ * touching the persisted preferences; on exit the normal band rules apply.
+ */
+export function resolveEffectiveLayout(
+  prefs: WorkspaceLayout,
+  band: PanelBand,
+  open: 'browser' | 'inspector' | null,
+  presenting: boolean,
+): WorkspaceLayout {
+  const panels = presenting
+    ? { browserVisible: false, inspectorVisible: false }
+    : resolvePanelVisibility(prefs, band, open);
+  return { ...panels, inspectorTab: prefs.inspectorTab };
+}
+
+export type CycleTarget = 'appBar' | 'browser' | 'viewport' | 'inspector' | 'viewControls';
+
+/** F6 region order: hidden regions are never focusable while presenting. */
+export function cycleTargets(
+  presenting: boolean,
+  layout: Pick<WorkspaceLayout, 'browserVisible' | 'inspectorVisible'>,
+): CycleTarget[] {
+  if (presenting) return ['viewControls', 'viewport'];
+  const targets: CycleTarget[] = ['appBar'];
+  if (layout.browserVisible) targets.push('browser');
+  targets.push('viewport');
+  if (layout.inspectorVisible) targets.push('inspector');
+  return targets;
+}
+
 const INSPECTOR_TABS: { id: InspectorTab; label: string }[] = [
   { id: 'properties', label: 'Properties' },
   { id: 'input', label: 'Input' },
@@ -95,6 +126,7 @@ export class WorkspaceShell {
   private prefs: WorkspaceLayout;
   private band: PanelBand = 'normal';
   private bandOpen: 'browser' | 'inspector' | null = null;
+  private presentation = false;
   private readonly layoutListeners = new Set<() => void>();
   private readonly browserPanel: HTMLElement;
   private readonly inspectorPanel: HTMLElement;
@@ -197,9 +229,20 @@ export class WorkspaceShell {
     }
   }
 
+  get presenting(): boolean {
+    return this.presentation;
+  }
+
   get layout(): WorkspaceLayout {
-    const panels = resolvePanelVisibility(this.prefs, this.band, this.bandOpen);
-    return { ...panels, inspectorTab: this.prefs.inspectorTab };
+    return resolveEffectiveLayout(this.prefs, this.band, this.bandOpen, this.presentation);
+  }
+
+  /** Transient presentation chrome: never persisted to layout preferences. */
+  setPresentation(active: boolean): void {
+    if (active === this.presentation) return;
+    this.presentation = active;
+    this.apply();
+    for (const listener of this.layoutListeners) listener();
   }
 
   onLayoutChange(listener: () => void): () => void {
@@ -274,6 +317,7 @@ export class WorkspaceShell {
   private apply(): void {
     const layout = this.layout;
     this.root.classList.toggle('ws--narrow', this.band === 'narrow');
+    this.root.classList.toggle('ws--presentation', this.presentation);
     this.browserPanel.classList.toggle('hidden', !layout.browserVisible);
     this.inspectorPanel.classList.toggle('hidden', !layout.inspectorVisible);
     for (const tab of INSPECTOR_TABS) {
@@ -289,11 +333,14 @@ export class WorkspaceShell {
 
   /** F6: app commands → browser → viewport → inspector (skipping hidden panels). */
   private cycleRegion(direction: 1 | -1): void {
-    const layout = this.layout;
-    const targets: HTMLElement[] = [this.regions.appBar];
-    if (layout.browserVisible) targets.push(this.browserPanel);
-    targets.push(this.regions.viewport);
-    if (layout.inspectorVisible) targets.push(this.inspectorPanel);
+    const elements: Record<CycleTarget, HTMLElement> = {
+      appBar: this.regions.appBar,
+      browser: this.browserPanel,
+      viewport: this.regions.viewport,
+      inspector: this.inspectorPanel,
+      viewControls: this.regions.viewControls,
+    };
+    const targets = cycleTargets(this.presentation, this.layout).map((id) => elements[id]);
     const active = (typeof document !== 'undefined' ? document.activeElement : null) as HTMLElement | null;
     const current = targets.findIndex((region) => region === active || region.contains?.(active));
     const next = targets[(current + direction + targets.length) % targets.length] ?? targets[0];

@@ -7,10 +7,12 @@ import { adaptiveGridStep } from './model/snap';
 import { makeRect, rectFrame, type ExtrusionEntity, type RectEntity } from './model/sketch';
 import { add, distance, normalize, scale, sub, v2, v3, type Vec2, type Vec3 } from './model/vec';
 import { OrbitController } from './scene/orbit';
+import { EMPTY_PRESENTATION, PRESENTING_FIRST } from './ui/workspace-state';
 import type { VoiceControlOptions } from './voice/control';
 
 const state = vi.hoisted(() => ({
   renderer: null as any,
+  shell: null as any,
   hud: null as any,
   help: null as any,
   measure: null as any,
@@ -28,7 +30,7 @@ const state = vi.hoisted(() => ({
   windowListeners: {} as Record<string, ((event: Record<string, unknown>) => void)[]>,
   commands: null as any,
   voice: null as VoiceControlOptions | null,
-  voiceControl: null as null | { toggle: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> },
+  voiceControl: null as null | { toggle: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn>; busy: boolean },
   guide: vi.fn(),
   ghost: null as null | { points: Vec3[]; closed: boolean },
   glyph: { update: vi.fn() },
@@ -154,8 +156,16 @@ vi.mock('./render/sketch-renderer', async (importOriginal) => {
     ink: unknown = null;
     ghost: { points: Vec3[]; closed: boolean; label: { text: string; at: Vec3 } | null } | null = null;
     guide: EdgeGuide | null = null;
+    displayStyle: 'xray' | 'shaded' = 'xray';
+    presentation = false;
     constructor() {
       state.renderer = this;
+    }
+    setDisplayStyle(style: 'xray' | 'shaded') {
+      this.displayStyle = style;
+    }
+    setPresentation(active: boolean) {
+      this.presentation = active;
     }
     setSketch(entities: unknown) {
       this.sketch = entities;
@@ -357,7 +367,21 @@ vi.mock('./ui/workspace', () => {
       notifications: fakeRegionElement(),
       dialogs: fakeRegionElement(),
     };
-    readonly layout = { browserVisible: true, inspectorVisible: true, inspectorTab: 'properties' as const };
+    presentation = false;
+    constructor() {
+      state.shell = this;
+    }
+    get presenting() {
+      return this.presentation;
+    }
+    get layout() {
+      return this.presentation
+        ? { browserVisible: false, inspectorVisible: false, inspectorTab: 'properties' as const }
+        : { browserVisible: true, inspectorVisible: true, inspectorTab: 'properties' as const };
+    }
+    setPresentation(active: boolean) {
+      this.presentation = active;
+    }
     onLayoutChange() {
       return () => {};
     }
@@ -434,6 +458,7 @@ vi.mock('./voice/control', () => ({
   VoiceControl: class {
     toggle = vi.fn();
     cancel = vi.fn();
+    busy = false;
     constructor(_root: unknown, options: VoiceControlOptions) {
       state.voice = options;
       state.voiceControl = this;
@@ -468,6 +493,7 @@ class FakeElement {
   readonly children: unknown[] = [];
   clientWidth = 800;
   clientHeight = 600;
+  readonly listeners = new Map<string, EventListener[]>();
   appendChild<T>(child: T): T {
     this.children.push(child);
     return child;
@@ -475,8 +501,15 @@ class FakeElement {
   append(...children: unknown[]): void {
     this.children.push(...children);
   }
-  addEventListener(): void {}
+  addEventListener(type: string, listener: EventListener): void {
+    const list = this.listeners.get(type) ?? [];
+    list.push(listener);
+    this.listeners.set(type, list);
+  }
   removeEventListener(): void {}
+  dispatch(type: string, event: { target?: unknown }): void {
+    for (const listener of this.listeners.get(type) ?? []) listener(event as Event);
+  }
   focus(): void {}
   setPointerCapture(): void {}
   releasePointerCapture(): void {}
@@ -484,6 +517,8 @@ class FakeElement {
     return { left: 0, top: 0, width: 800, height: 600 };
   }
 }
+
+const appRoot = new FakeElement();
 
 let api: AirCadApi;
 let frameTime = 0;
@@ -634,7 +669,7 @@ function useScreenSpaceProjector(): void {
 beforeAll(async () => {
   (globalThis as Record<string, unknown>).document = {
     createElement: () => new FakeElement(),
-    getElementById: () => new FakeElement(),
+    getElementById: () => appRoot,
   };
   (globalThis as Record<string, unknown>).window = {
     addEventListener: (type: string, listener: (event: Record<string, unknown>) => void) => {
@@ -655,9 +690,13 @@ beforeAll(async () => {
 beforeEach(() => {
   if (state.help) state.help.visible = false;
   if (state.measure) state.measure.isOpen = false;
+  if (state.voiceControl) state.voiceControl.busy = false;
   dispatchWindow('blur', {});
   api.setTrackerSource('webcam');
   state.tracker?.onConnection('closed');
+  // A failed test may leave Reveal active; Escape restores editing first.
+  tick();
+  if ((state.hud?.last as { presentation?: boolean } | null)?.presentation) api.press('cancel');
   api.sketch.load({ version: 1, units: 'mm', entities: [] });
   api.press('clear');
   api.press('viewTop');
@@ -2536,6 +2575,306 @@ describe('parallel edge guides', () => {
     expect(guide!.target.y).toBeCloseTo(3600, 3);
     api.press('cancel');
     expect(state.renderer.guide).toBeNull();
+    expect(api.sketch.size).toBe(1);
+  });
+});
+
+describe('presentation and display style', () => {
+  const seedHouse = (): string => {
+    const body = api.commands.addRect([v3(0, 0, 0), v3(4000, 0, 0), v3(4000, 3000, 0), v3(0, 3000, 0)]);
+    if (!body.ok) throw new Error(body.error);
+    const extruded = api.commands.extrude(body.entity.id, 2500);
+    if (!extruded.ok) throw new Error(extruded.error);
+    return api.sketch.serialize();
+  };
+
+  it('rejects Reveal on an empty sketch', () => {
+    api.press('reveal');
+    expect(state.shell.presenting).toBe(false);
+    expect(state.toasts.at(-1)).toBe(EMPTY_PRESENTATION);
+  });
+
+  it('enters and exits Reveal without mutating the model, history, or a pinned plane', () => {
+    const serialized = seedHouse();
+    api.press('viewFront');
+    expect(api.planeMode()).toBe('manual');
+    expect(api.plane().kind).toBe('XZ');
+    const selected = api.selected()?.id ?? null;
+    api.press('reveal');
+    expect(state.shell.presenting).toBe(true);
+    expect(state.renderer.displayStyle).toBe('shaded');
+    expect(state.renderer.presentation).toBe(true);
+    expect(api.sketch.serialize()).toBe(serialized);
+    expect(api.sketch.canUndo).toBe(true);
+    expect(api.selected()?.id ?? null).toBe(selected);
+    api.press('viewTop');
+    expect(api.plane().kind).toBe('XZ');
+    expect(api.planeMode()).toBe('manual');
+    api.press('delete');
+    expect(api.sketch.serialize()).toBe(serialized);
+    expect(state.toasts.at(-1)).toBe(PRESENTING_FIRST);
+    api.press('cancel');
+    expect(state.shell.presenting).toBe(false);
+    expect(state.renderer.displayStyle).toBe('xray');
+    expect(state.renderer.presentation).toBe(false);
+    expect(api.sketch.serialize()).toBe(serialized);
+    expect(api.plane().kind).toBe('XZ');
+    expect(api.planeMode()).toBe('manual');
+    expect(api.selected()?.id ?? null).toBe(selected);
+  });
+
+  it('restores the previous display style after Reveal', () => {
+    seedHouse();
+    expect(state.commands.dispatch({ type: 'setDisplayStyle', style: 'shaded' }).ok).toBe(true);
+    api.press('reveal');
+    api.press('reveal');
+    expect(state.renderer.displayStyle).toBe('shaded');
+    expect(state.shell.presenting).toBe(false);
+  });
+
+  it('blocks typed workspace actions while presenting', () => {
+    seedHouse();
+    api.press('reveal');
+    const serialized = api.sketch.serialize();
+    expect(state.commands.dispatch({ type: 'press', action: 'undo' })).toEqual({ ok: false, error: PRESENTING_FIRST });
+    expect(state.commands.dispatch({ type: 'setDisplayStyle', style: 'xray' })).toEqual({ ok: false, error: PRESENTING_FIRST });
+    expect(api.sketch.serialize()).toBe(serialized);
+    api.press('reveal');
+  });
+
+  it('ignores draw holds and pinch selection while presenting', () => {
+    seedHouse();
+    api.press('reveal');
+    const size = api.sketch.size;
+    api.hold('draw', true);
+    setCursorWorld(v3(100, 100, 0));
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(size);
+    emitHands(handAt(250, 250, { pinching: true }));
+    expect(api.selected()).toBeNull();
+    api.press('reveal');
+    emitHands(handAt(250, 250, { pinching: true }));
+    expect(api.selected()).toBeNull();
+    expect(api.sketch.size).toBe(size);
+  });
+
+  it('preserves a live stroke when a preserve-draft control is focused', () => {
+    dispatchWindow('focus', {});
+    setCursorWorld(v3(0, 0, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(4000, 0, 0));
+    const preserve = {
+      target: {
+        closest: (selector: string) => (selector === '[data-cad-preserve-draft]' || selector === '[data-cad-ui]' ? {} : null),
+      },
+    };
+    appRoot.dispatch('pointerdown', preserve);
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(1);
+  });
+
+  it('still cancels a live stroke when ordinary chrome is focused', () => {
+    dispatchWindow('focus', {});
+    setCursorWorld(v3(0, 0, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(4000, 0, 0));
+    appRoot.dispatch('pointerdown', {
+      target: { closest: (selector: string) => (selector === '[data-cad-ui]' ? {} : null) },
+    });
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(0);
+  });
+});
+
+describe('presentation (Reveal)', () => {
+  const dispatch = (action: unknown): { ok: boolean; error?: string } =>
+    (state.commands as { dispatch: (a: unknown) => { ok: boolean; error?: string } }).dispatch(action);
+
+  const seedRect = (): void => {
+    const added = api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    if (!added.ok) throw new Error(added.error);
+  };
+
+  const presentingNow = (): boolean => {
+    runFrame();
+    return (state.hud?.last as { presentation?: boolean } | null)?.presentation === true;
+  };
+
+  it('does nothing on an empty sketch or while a stroke is active', () => {
+    api.press('reveal');
+    expect(presentingNow()).toBe(false);
+    expect(state.toasts.at(-1)).toContain('Draw something');
+
+    seedRect();
+    // Draw well clear of the seeded rectangle so the stroke commits as a line.
+    setCursorWorld(v3(500, 4000, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(2500, 4000, 0));
+    api.press('reveal');
+    expect(presentingNow()).toBe(false);
+    expect(state.toasts.at(-1)).toContain('stroke');
+    // Releasing the pen still commits the original draft.
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(2);
+    expect(api.sketch.all[1].type).toBe('line');
+  });
+
+  it('is blocked while a voice request is in flight or a dialog is open', () => {
+    seedRect();
+    state.voiceControl!.busy = true;
+    api.press('reveal');
+    expect(presentingNow()).toBe(false);
+    expect(state.toasts.at(-1)).toContain('voice');
+    state.voiceControl!.busy = false;
+
+    state.help.visible = true;
+    api.press('reveal');
+    expect(presentingNow()).toBe(false);
+    expect(state.toasts.at(-1)).toContain('dialog');
+    state.help.visible = false;
+  });
+
+  it('enters Shaded + orthographic fit and hides helpers without touching the model', () => {
+    seedRect();
+    const serialized = api.sketch.serialize();
+    expect(state.viewport.ortho).toBe(false);
+    api.press('reveal');
+    expect(presentingNow()).toBe(true);
+    expect(state.shell.presentation).toBe(true);
+    expect(state.renderer.presentation).toBe(true);
+    expect(state.renderer.displayStyle).toBe('shaded');
+    expect(state.viewport.ortho).toBe(true);
+    expect(api.sketch.serialize()).toEqual(serialized);
+    expect(state.glyph.update).toHaveBeenCalledWith(null, null, false);
+    api.press('cancel');
+  });
+
+  it('blocks every editing action but keeps navigation live without pinning the plane', () => {
+    seedRect();
+    const id = api.sketch.all[0].id;
+    expect(dispatch({ type: 'selectEntity', id }).ok).toBe(true);
+    const serialized = api.sketch.serialize();
+    api.press('reveal');
+    expect(presentingNow()).toBe(true);
+    const planeBefore = api.plane().kind;
+
+    for (const action of [
+      'select', 'move', 'scale', 'extrude', 'confirm', 'measure', 'voice', 'export',
+      'undo', 'redo', 'delete', 'clear', 'cyclePlane', 'toggleAutoPlane', 'toggleGrid',
+      'togglePip', 'toggleNavAssist', 'help', 'setOrigin', 'recenter',
+    ] as const) {
+      api.press(action);
+    }
+    api.hold('draw', true);
+    api.setCursor(v2(300, 300));
+    api.hold('draw', false);
+    emitHands(handAt(200, 150, { pinching: true }));
+    emitHands(emptyHands());
+    for (const action of [
+      { type: 'selectEntity', id },
+      { type: 'setWorkPlane', plane: 'xz' },
+      { type: 'setDisplayStyle', style: 'xray' },
+    ]) {
+      expect(dispatch(action)).toEqual({ ok: false, error: 'Return to editing first (D or Esc).' });
+    }
+    expect(state.toasts.some((message) => message.includes('Return to editing first'))).toBe(true);
+
+    expect(api.sketch.serialize()).toEqual(serialized);
+    expect(api.selected()?.id).toBe(id);
+    expect(api.sketch.canUndo).toBe(true);
+    expect(api.sketch.canRedo).toBe(false);
+    expect(api.planeMode()).toBe('auto');
+    expect(api.plane().kind).toBe(planeBefore);
+
+    // Camera navigation stays live and never pins the plane.
+    api.press('viewTop');
+    api.press('viewFront');
+    api.press('viewRight');
+    api.press('viewIso');
+    api.press('fitAll');
+    api.press('zoomIn');
+    api.press('zoomOut');
+    api.press('toggleProjection');
+    api.press('toggleProjection');
+    api.hold('orbit', true);
+    api.setCursor(v2(320, 260));
+    api.hold('orbit', false);
+    expect(api.plane().kind).toBe(planeBefore);
+    expect(api.planeMode()).toBe('auto');
+    expect(api.sketch.serialize()).toEqual(serialized);
+    api.press('cancel');
+  });
+
+  it('restores style, projection, selection and history on exit without an extra undo step', () => {
+    seedRect();
+    const id = api.sketch.all[0].id;
+    dispatch({ type: 'selectEntity', id });
+    dispatch({ type: 'setDisplayStyle', style: 'shaded' });
+    expect(state.renderer.displayStyle).toBe('shaded');
+    const serialized = api.sketch.serialize();
+
+    api.press('reveal');
+    expect(presentingNow()).toBe(true);
+    expect(state.viewport.ortho).toBe(true);
+
+    api.press('cancel');
+    expect(presentingNow()).toBe(false);
+    expect(state.shell.presentation).toBe(false);
+    expect(state.renderer.presentation).toBe(false);
+    expect(state.renderer.displayStyle).toBe('shaded');
+    expect(state.viewport.ortho).toBe(false);
+    expect(api.selected()?.id).toBe(id);
+    expect(api.sketch.serialize()).toEqual(serialized);
+    expect(api.commands.undo()).toBe('add rect');
+    expect(api.sketch.size).toBe(0);
+  });
+
+  it('exits through D and Escape even from the view-control strip, while Tab stays native', () => {
+    seedRect();
+    api.press('reveal');
+    expect(presentingNow()).toBe(true);
+
+    // Tab is not on the presentation allowlist, so it must not be intercepted.
+    const tab = keyEvent('Tab', { preventDefault: vi.fn() });
+    dispatchWindow('keydown', tab);
+    expect(tab.preventDefault).not.toHaveBeenCalled();
+    expect(api.plane().kind).toBe('XY');
+    expect(presentingNow()).toBe(true);
+
+    // Focus on the non-editable view strip still honours D and Escape.
+    const chromeTarget = { closest: (selector: string) => (selector === '[data-cad-ui]' ? {} : null) };
+    dispatchWindow('keydown', keyEvent('KeyD', { target: chromeTarget }));
+    expect(presentingNow()).toBe(false);
+
+    api.press('reveal');
+    expect(presentingNow()).toBe(true);
+    dispatchWindow('keydown', keyEvent('Escape', { target: chromeTarget }));
+    expect(presentingNow()).toBe(false);
+  });
+
+  it('cannot synthesize a selection from a pinch held across the exit', () => {
+    seedRect();
+    api.press('reveal');
+    expect(presentingNow()).toBe(true);
+    emitHands(handAt(200, 150, { pinching: true }));
+    emitHands(handAt(200, 150, { pinching: true }));
+    api.press('reveal');
+    expect(presentingNow()).toBe(false);
+    // The pinch stays held through the exit: no fresh pinch edge, no selection.
+    emitHands(handAt(200, 150, { pinching: true }));
+    emitHands(emptyHands());
+    expect(api.selected()).toBeNull();
+    expect(api.sketch.size).toBe(1);
+  });
+
+  it('commits nothing when a draw hold was blocked in Reveal and released after exit', () => {
+    seedRect();
+    api.press('reveal');
+    api.hold('draw', true);
+    api.setCursor(v2(200, 200));
+    api.press('reveal');
+    api.hold('draw', false);
+    api.setCursor(v2(400, 400));
     expect(api.sketch.size).toBe(1);
   });
 });

@@ -20,6 +20,7 @@ const h = vi.hoisted(() => ({
     zoom: vi.fn(),
     fit: vi.fn(),
     setView: vi.fn(),
+    setOrtho: vi.fn(),
     toggleProjection: vi.fn(() => true),
     worldPerPixel: vi.fn(() => 1),
     beginOrbit: vi.fn(),
@@ -72,6 +73,7 @@ vi.mock('./scene/viewport', () => ({
       h.resizeCallbacks.push(cb);
       return () => {};
     }
+    resize(): void {}
     render(): void {}
     viewDirection(): Vec3 {
       return h.viewDirection;
@@ -90,6 +92,7 @@ vi.mock('./scene/orbit', () => ({
     readonly fit = h.orbit.fit;
     readonly setView = h.orbit.setView;
     readonly toggleProjection = h.orbit.toggleProjection;
+    readonly setOrtho = h.orbit.setOrtho;
     readonly worldPerPixel = h.orbit.worldPerPixel;
     readonly beginOrbit = h.orbit.beginOrbit;
     readonly endOrbit = h.orbit.endOrbit;
@@ -107,7 +110,7 @@ vi.mock('./scene/grid', () => ({
   AxisTriad: class {
     render(): void {}
   },
-  createGroundGrid: () => ({}),
+  createGroundGrid: () => ({ visible: true }),
 }));
 
 vi.mock('./scene/workplane-visual', () => ({
@@ -187,11 +190,15 @@ vi.mock('./ui/workspace', () => {
       dialogs: mk(),
     };
     readonly layout = { browserVisible: true, inspectorVisible: true, inspectorTab: 'properties' as const };
+    presenting = false;
     onLayoutChange(): () => void {
       return () => {};
     }
     setLayout(): void {}
     setEntityCount(): void {}
+    setPresentation(active: boolean): void {
+      this.presenting = active;
+    }
   }
   return { WorkspaceShell };
 });
@@ -240,6 +247,8 @@ vi.mock('./render/sketch-renderer', async (importOriginal) => ({
     setSketch(entities: readonly Entity[]): void {
       h.renderer.sketches.push([...entities]);
     }
+    setDisplayStyle(): void {}
+    setPresentation(): void {}
     setSelected(): void {}
     setHover(): void {}
     setVisible(): void {}
@@ -346,6 +355,7 @@ vi.mock('./voice/control', () => ({
   VoiceControl: class {
     toggle = vi.fn();
     cancel = vi.fn();
+    busy = false;
     constructor(_root: unknown, _options: unknown) {}
   },
 }));
@@ -2586,5 +2596,25 @@ describe('FreeCAD export snapshots', () => {
     h.help.visible = true;
     pressE();
     expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe('reveal during an active session', () => {
+  it('does nothing while a pull is active', () => {
+    const serialized = startExtrusion();
+    api.hold('draw', true);
+    api.setCursor(v2(250, 200));
+    expect(api.extrusion()?.dragging).toBe(true);
+    h.orbit.setView.mockClear();
+    h.orbit.setOrtho.mockClear();
+    h.orbit.fit.mockClear();
+    api.press('reveal');
+    expect(api.extrusion()).not.toBeNull();
+    expect(api.sketch.serialize()).toBe(serialized);
+    expect(h.orbit.setView).not.toHaveBeenCalled();
+    expect(h.orbit.setOrtho).not.toHaveBeenCalled();
+    expect(h.orbit.fit).not.toHaveBeenCalled();
+    api.hold('draw', false);
+    api.press('cancel');
   });
 });

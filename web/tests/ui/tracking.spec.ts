@@ -29,6 +29,16 @@ async function seedRectangle(page: Page): Promise<void> {
   });
 }
 
+/** Space-hold a live line so the voice panel can capture it; the Speak button is then pointer-operated. */
+async function beginLiveLine(page: Page): Promise<void> {
+  const host = await page.locator('.viewport').boundingBox();
+  expect(host).not.toBeNull();
+  await page.locator('.viewport').focus();
+  await page.mouse.move(host!.x + 120, host!.y + 120);
+  await page.keyboard.down('Space');
+  await page.mouse.move(host!.x + 420, host!.y + 120);
+}
+
 test.describe('input tracking', () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
@@ -182,5 +192,64 @@ test.describe('depth camera without DepthAI', () => {
     await expect(target).toHaveAttribute('title', 'DepthAI is not installed — pip install -r requirements-depth.txt');
     await expect(inputPanel(page)).toContainText('DepthAI is not installed — pip install -r requirements-depth.txt');
     await expect(inputPanel(page).getByRole('button', { name: 'Set origin (O)' })).toBeDisabled();
+  });
+});
+
+test.describe('voice feedback', () => {
+  test.use({ viewport: { width: 1280, height: 720 }, fakeSpeech: true });
+
+  test('pointer capture shows listening and success without covering the triad', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('.voice-control')).toBeVisible();
+    const voice = page.locator('.voice-control');
+    const box = await voice.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(112);
+    expect(box!.width).toBeLessThanOrEqual(420);
+
+    await beginLiveLine(page);
+    await page.locator('.voice-control__record').click();
+    await expect(page.locator('.voice-control__status')).toContainText('Listening');
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'voice-listening-1280x720.png') });
+    await page.evaluate(() => {
+      const speech = (window as any).__aircadSpeech;
+      if (!speech) throw new Error('fake speech was not started');
+      speech.emit(false, '500 millimetres');
+    });
+    await expect(page.locator('.voice-control__status')).toHaveText('Line — 500 mm');
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'voice-success-1280x720.png') });
+  });
+
+  test('long error text wraps inside the dock', async ({ page }) => {
+    await page.goto('/');
+    await beginLiveLine(page);
+    await page.locator('.voice-control__record').click();
+    await expect(page.locator('.voice-control__status')).toContainText('Listening');
+    await page.evaluate(() => {
+      const speech = (window as any).__aircadSpeech;
+      if (!speech) throw new Error('fake speech was not started');
+      speech.emit(false, 'please make this wall a great deal taller than it already is');
+    });
+    await page.locator('.voice-control__record').click();
+    const status = page.locator('.voice-control__status');
+    await expect(status).toContainText('Say one positive distance');
+    const box = await status.boundingBox();
+    expect(box!.width).toBeLessThanOrEqual(420);
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'voice-error-1280x720.png') });
+  });
+});
+
+test.describe('voice feedback at 1440x900', () => {
+  test.use({ viewport: { width: 1440, height: 900 }, fakeSpeech: true });
+
+  test('voice dock stays clear of the triad at the larger review size', async ({ page }) => {
+    await page.goto('/');
+    const voice = page.locator('.voice-control');
+    await expect(voice).toBeVisible();
+    const box = await voice.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(112);
+    expect(box!.width).toBeLessThanOrEqual(420);
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'voice-idle-1440x900.png') });
   });
 });

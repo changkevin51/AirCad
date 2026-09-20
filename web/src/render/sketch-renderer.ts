@@ -25,6 +25,8 @@ export const COLORS = {
   guide: THREE_COLORS.accent,
 };
 
+export type DisplayStyle = 'xray' | 'shaded';
+
 function flatten(points: readonly Vec3[]): number[] {
   const out: number[] = [];
   for (const p of points) out.push(p.x, p.y, p.z);
@@ -86,14 +88,19 @@ export function entityLabel(entity: Entity): string {
 /** Draws committed entities, hover highlight, live ink, the recognition ghost and dimension labels. */
 export class SketchRenderer {
   readonly group = new THREE.Group();
+  /** Transient helpers live here so presentation can hide them all at once. */
+  private readonly overlayGroup = new THREE.Group();
   private readonly resolution = new THREE.Vector2(1, 1);
+  private displayStyle: DisplayStyle = 'xray';
   private readonly lineMaterial: LineMaterial;
+  private readonly wireMaterial: LineMaterial;
   private readonly hoverMaterial: LineMaterial;
   private readonly selectionMaterial: LineMaterial;
   private readonly ghostMaterial: LineMaterial;
   private readonly guideMaterial: LineMaterial;
   private readonly fadeMaterial: LineMaterial;
   private lines: LineSegments2;
+  private readonly wires: LineSegments2;
   private hover: LineSegments2;
   private readonly selected: LineSegments2;
   private readonly extrusionLines: LineSegments2;
@@ -110,6 +117,16 @@ export class SketchRenderer {
   private extrusionActive = false;
   private readonly ink: THREE.Line;
   private readonly faces: THREE.Mesh;
+  private readonly xrayFaceMaterial: THREE.MeshBasicMaterial;
+  private readonly shadedFaceMaterial = new THREE.MeshLambertMaterial({
+    color: 0xbcc6d2,
+    side: THREE.DoubleSide,
+    depthTest: true,
+    depthWrite: true,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
+  });
   private readonly vertices: THREE.Points;
   private readonly ghostLabel = new Label('dim-label--ghost');
   private readonly guideLabel = new Label('dim-label--guide');
@@ -126,6 +143,9 @@ export class SketchRenderer {
   constructor(private readonly viewport: Viewport) {
     this.group.name = 'sketch';
     this.lineMaterial = new LineMaterial({ color: COLORS.line, linewidth: 2, resolution: this.resolution });
+    // Standalone wires keep a light color against shaded faces; profile/solid
+    // outlines darken with the Shaded style instead.
+    this.wireMaterial = new LineMaterial({ color: COLORS.line, linewidth: 2, resolution: this.resolution });
     this.hoverMaterial = new LineMaterial({ color: COLORS.hover, linewidth: 3, resolution: this.resolution, depthTest: false });
     this.ghostMaterial = new LineMaterial({
       color: COLORS.ghost,
@@ -147,6 +167,7 @@ export class SketchRenderer {
     this.selectionMaterial = new LineMaterial({ color: THREE_COLORS.accent, linewidth: 3, resolution: this.resolution, depthTest: false });
 
     this.lines = new LineSegments2(new LineSegmentsGeometry(), this.lineMaterial);
+    this.wires = new LineSegments2(new LineSegmentsGeometry(), this.wireMaterial);
     this.hover = new LineSegments2(new LineSegmentsGeometry(), this.hoverMaterial);
     this.selected = new LineSegments2(new LineSegmentsGeometry(), this.selectionMaterial);
     this.extrusionLines = new LineSegments2(new LineSegmentsGeometry(), this.ghostMaterial);
@@ -172,6 +193,7 @@ export class SketchRenderer {
     this.lineGuide.renderOrder = 5;
     this.fadeLine = new Line2(new LineGeometry(), this.fadeMaterial);
     this.lines.visible = false;
+    this.wires.visible = false;
     this.hover.visible = false;
     this.ghost.visible = false;
     this.fadeLine.visible = false;
@@ -197,10 +219,14 @@ export class SketchRenderer {
     this.ink.visible = false;
     this.ink.renderOrder = 4;
 
-    this.faces = new THREE.Mesh(
-      new THREE.BufferGeometry(),
-      new THREE.MeshBasicMaterial({ color: COLORS.face, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false }),
-    );
+    this.xrayFaceMaterial = new THREE.MeshBasicMaterial({
+      color: COLORS.face,
+      transparent: true,
+      opacity: 0.12,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    this.faces = new THREE.Mesh(new THREE.BufferGeometry(), this.xrayFaceMaterial);
     this.faces.visible = false;
 
     this.vertices = new THREE.Points(
@@ -210,8 +236,15 @@ export class SketchRenderer {
     this.vertices.visible = false;
     this.vertices.renderOrder = 7;
 
-    this.group.add(this.faces, this.lines, this.hover, this.selected, this.ink, this.fadeLine, this.ghost, this.lineGuide, this.vertices, this.extrusionFaces, this.extrusionLines, this.activeFace, this.activeFaceOutline, this.guideLines, this.guideReference);
-    this.group.add(this.ghostLabel.object, this.guideLabel.object, this.hoverLabel.object, this.lastLabel.object, this.extrusionLabel.object, this.edgeGuideLabel.object);
+    this.faces.name = 'committed-faces';
+    this.lines.name = 'committed-edges';
+    this.wires.name = 'committed-wires';
+    this.vertices.name = 'vertex-markers';
+    this.overlayGroup.name = 'sketch-overlays';
+    this.group.add(this.faces, this.lines, this.wires);
+    this.overlayGroup.add(this.hover, this.selected, this.ink, this.fadeLine, this.ghost, this.lineGuide, this.vertices, this.extrusionFaces, this.extrusionLines, this.activeFace, this.activeFaceOutline, this.guideLines, this.guideReference);
+    this.overlayGroup.add(this.ghostLabel.object, this.guideLabel.object, this.hoverLabel.object, this.lastLabel.object, this.extrusionLabel.object, this.edgeGuideLabel.object);
+    this.group.add(this.overlayGroup);
     viewport.scene.add(this.group);
     viewport.onResize(() => this.updateResolution());
     this.updateResolution();
@@ -220,7 +253,7 @@ export class SketchRenderer {
   private updateResolution(): void {
     this.resolution.set(this.viewport.width, this.viewport.height);
     // LineMaterial copies the vector on assignment, so push the new size to every material.
-    for (const material of [this.lineMaterial, this.hoverMaterial, this.selectionMaterial, this.ghostMaterial, this.guideMaterial, this.fadeMaterial, this.edgeGuideMaterial, this.guideReferenceMaterial]) {
+    for (const material of [this.lineMaterial, this.wireMaterial, this.hoverMaterial, this.selectionMaterial, this.ghostMaterial, this.guideMaterial, this.fadeMaterial, this.edgeGuideMaterial, this.guideReferenceMaterial]) {
       material.resolution = this.resolution;
     }
   }
@@ -245,22 +278,41 @@ export class SketchRenderer {
 
   setSketch(entities: readonly Entity[]): void {
     const segmentPositions: number[] = [];
+    const wirePositions: number[] = [];
     const facePositions: number[] = [];
     const vertexPositions: number[] = [];
     for (const entity of entities) {
-      for (const segment of entitySegments(entity)) segmentPositions.push(...flatten([segment.a, segment.b]));
+      const segments = entity.type === 'line' ? wirePositions : segmentPositions;
+      for (const segment of entitySegments(entity)) segments.push(...flatten([segment.a, segment.b]));
       for (const vertex of entityVertices(entity)) vertexPositions.push(vertex.point.x, vertex.point.y, vertex.point.z);
       for (const triangle of entityTriangles(entity)) facePositions.push(...flatten(triangle));
     }
     this.replaceSegments(this.lines, segmentPositions);
+    this.replaceSegments(this.wires, wirePositions);
 
     this.faces.geometry.dispose();
     this.faces.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(facePositions, 3));
+    this.faces.geometry.computeVertexNormals();
     this.faces.visible = facePositions.length > 0;
 
     this.vertices.geometry.dispose();
     this.vertices.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(vertexPositions, 3));
     this.vertices.visible = vertexPositions.length > 0;
+  }
+
+  /** X-ray keeps translucent faces and through-face markers; Shaded is opaque. */
+  setDisplayStyle(style: DisplayStyle): void {
+    if (style === this.displayStyle) return;
+    this.displayStyle = style;
+    const shaded = style === 'shaded';
+    this.faces.material = shaded ? this.shadedFaceMaterial : this.xrayFaceMaterial;
+    this.lineMaterial.color.setHex(shaded ? 0x4d5866 : COLORS.line);
+    (this.vertices.material as THREE.PointsMaterial).depthTest = shaded;
+  }
+
+  /** Presentation hides every transient helper; committed batches stay visible. */
+  setPresentation(active: boolean): void {
+    this.overlayGroup.visible = !active;
   }
 
   setHover(entity: Entity | null): void {

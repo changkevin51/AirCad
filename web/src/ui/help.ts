@@ -72,11 +72,13 @@ export class HelpOverlay {
         return `<h3>Getting started</h3>
           ${paragraph('AirCAD is a sketch-first modeler: you draw on a work plane, then push or pull shapes into solids. Everything is in millimetres; typed values also accept cm and m.')}
           <ol>
-            <li>Left-drag on the canvas — or hold <kbd>Space</kbd> and move — to draw. A straight stroke becomes a line; a closed loop squares up to a rectangle when it is even loosely box-like (including round loops), otherwise a fitted triangle or a polygon. Snapped lines can still assemble an outline.</li>
+            <li>Left-drag on the canvas — or hold <kbd>Space</kbd> and move — to draw. A straight stroke becomes a line; a closed loop squares up to a rectangle when it is even loosely box-like (including round loops), otherwise a fitted triangle or a polygon. Snapped lines can still assemble an outline. A webcam pinch selects or pulls; it does not draw.</li>
             <li>Click a shape (or press <kbd>S</kbd> under the cursor) to select it. The Model panel and the Properties inspector follow the same selection.</li>
             <li>Type exact dimensions with <kbd>L</kbd>, or edit Width/Height/Depth in the Properties inspector. <kbd>M</kbd> moves a selected shape; <kbd>R</kbd> scales from a corner.</li>
             <li><kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> undo and redo; <kbd>Delete</kbd> removes the selected object.</li>
             <li>Clear sketch in the Edit menu asks for confirmation. The shortcut <kbd>Ctrl+Backspace</kbd> clears immediately — both are undoable.</li>
+            <li>Display in the view header switches X-ray (see-through) and Shaded (opaque). <kbd>D</kbd> Reveal hides the editing chrome for a read-only look at the finished model; <kbd>D</kbd> or <kbd>Esc</kbd> returns.</li>
+            <li>AirCAD → Save sketch downloads the model as millimetre JSON. Open sketch… replaces the scene after confirmation and clears undo history. There is no autosave.</li>
           </ol>`;
       case 'drawing':
         return `<h3>Drawing and planes</h3>
@@ -101,8 +103,8 @@ export class HelpOverlay {
         return `<h3>Camera setup</h3>
           ${paragraph('The mouse always works. Tracking is configured in the Input tab of the inspector.')}
           <ul>
-            <li>Webcam tracking follows your index fingertip; pinch thumb and index to draw or click to select. <kbd>P</kbd> toggles the camera preview; <kbd>N</kbd> toggles palm navigation.</li>
-            <li>An OAK-D depth camera draws on the work plane after <kbd>O</kbd> sets the origin; <kbd>R</kbd> recenters on the last endpoint.</li>
+            <li>Webcam tracking follows your index fingertip; pinch thumb and index to select or pull a face. Hold <kbd>Space</kbd> to draw. <kbd>P</kbd> toggles the camera preview; <kbd>N</kbd> toggles palm navigation.</li>
+            <li>An OAK-D depth camera draws on the work plane after <kbd>O</kbd> sets the origin; <kbd>Shift+R</kbd> recenters on the last endpoint.</li>
             <li>If tracking pauses, show your hand again to resume — holds always release on focus loss, so nothing stays latched.</li>
           </ul>`;
       case 'keys': {
@@ -124,7 +126,7 @@ export class HelpOverlay {
         return `<h3>Legacy</h3>
           <details>
             <summary>FreeCAD export</summary>
-            ${paragraph('Press E or use AirCAD → Legacy → "Export to FreeCAD" to send the current sketch to a separately installed FreeCAD application. AirCAD does not require it; all modeling here is native and saved in-session only.')}
+            ${paragraph('Press E or use AirCAD → Legacy → "Export to FreeCAD" to send the current sketch to a separately installed FreeCAD application. AirCAD does not require it. Native modeling is saved with AirCAD → Save sketch (local JSON download); Open sketch… replaces the scene and clears undo history. There is no autosave.')}
           </details>`;
     }
   }

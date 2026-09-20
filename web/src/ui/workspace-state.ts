@@ -1,5 +1,6 @@
 import type { PressAction } from '../input/keymap';
 import type { PlaneKind } from '../model/plane';
+import type { DisplayStyle } from '../render/sketch-renderer';
 import { isExtrudableProfile, isRectangleProfile, type Entity } from '../model/sketch';
 import type { InspectorTab } from './workspace';
 
@@ -10,7 +11,8 @@ export type WorkspaceAction =
   | { type: 'setWorkPlane'; plane: PlaneKind | 'auto' }
   | { type: 'setDimension'; id: string; spec: string }
   | { type: 'setExtrusionFace'; index: number }
-  | { type: 'setExtrusionPull'; text: string };
+  | { type: 'setExtrusionPull'; text: string }
+  | { type: 'setDisplayStyle'; style: DisplayStyle };
 
 export type UiActionResult = { ok: true } | { ok: false; error: string };
 
@@ -57,6 +59,9 @@ export interface UiSnapshot {
   inspectorVisible: boolean;
   inspectorTab: InspectorTab;
   extrusion: ExtrusionSnapshot | null;
+  displayStyle: DisplayStyle;
+  presenting: boolean;
+  sessionBlockReason: string | null;
 }
 
 export interface AvailabilityContext {
@@ -69,6 +74,59 @@ export const EXTRUSION_FIRST = 'Finish or cancel Push/Pull first.';
 export const SELECT_PROFILE = 'Select a closed outline or a solid.';
 export const SELECT_OBJECT = 'Select an object first.';
 export const CIRCLE_READONLY = 'Circle size is read-only; redraw it as a closed outline to edit.';
+export const PRESENTING_FIRST = 'Return to editing first (D or Esc).';
+export const EMPTY_PRESENTATION = 'Draw something before presenting.';
+export const EMPTY_SAVE = 'Draw something before saving.';
+export const FILE_BUSY = 'Wait for the file operation to finish.';
+
+/** Press actions that stay live in the read-only presentation view. */
+export const PRESENTATION_ACTIONS: ReadonlySet<PressAction> = new Set<PressAction>([
+  'reveal',
+  'cancel',
+  'viewTop',
+  'viewFront',
+  'viewRight',
+  'viewIso',
+  'toggleProjection',
+  'fitAll',
+  'zoomIn',
+  'zoomOut',
+]);
+
+export function presentationAllows(action: PressAction): boolean {
+  return PRESENTATION_ACTIONS.has(action);
+}
+
+export interface SessionGuard {
+  presenting: boolean;
+  sessionBlockReason: string | null;
+}
+
+/** The display style select: off while presenting or while a session owns input. */
+export function displayStyleAvailability(ctx: SessionGuard): CommandAvailability {
+  if (ctx.presenting) return { enabled: false, reason: PRESENTING_FIRST };
+  if (ctx.sessionBlockReason) return { enabled: false, reason: ctx.sessionBlockReason };
+  return { enabled: true };
+}
+
+/** Reveal enters only on an idle, nonempty sketch; while presenting it exits. */
+export function revealAvailability(ctx: SessionGuard & { entityCount: number }): CommandAvailability {
+  if (ctx.presenting) return { enabled: true };
+  if (ctx.sessionBlockReason) return { enabled: false, reason: ctx.sessionBlockReason };
+  if (ctx.entityCount === 0) return { enabled: false, reason: EMPTY_PRESENTATION };
+  return { enabled: true };
+}
+
+/** Save needs a nonempty idle sketch; Open needs idle editing. Both are off in Reveal. */
+export function fileAvailability(
+  ctx: SessionGuard & { entityCount: number },
+  action: 'save' | 'open',
+): CommandAvailability {
+  if (ctx.presenting) return { enabled: false, reason: PRESENTING_FIRST };
+  if (ctx.sessionBlockReason) return { enabled: false, reason: ctx.sessionBlockReason };
+  if (action === 'save' && ctx.entityCount === 0) return { enabled: false, reason: EMPTY_SAVE };
+  return { enabled: true };
+}
 
 /** Browser/inspector label: type word plus the entity's stable id. */
 export function entityLabel(entity: Entity): string {
@@ -151,9 +209,18 @@ export function viewAvailability(ctx: AvailabilityContext): CommandAvailability 
  */
 export function pressAvailability(
   action: PressAction,
-  ctx: AvailabilityContext & { selected: Entity | null; canUndo: boolean; canRedo: boolean; entityCount: number },
+  ctx: AvailabilityContext & SessionGuard & { selected: Entity | null; canUndo: boolean; canRedo: boolean; entityCount: number },
 ): CommandAvailability {
+  if (ctx.presenting && !presentationAllows(action)) {
+    return { enabled: false, reason: PRESENTING_FIRST };
+  }
   switch (action) {
+    case 'reveal':
+      return revealAvailability(ctx);
+    case 'saveSketch':
+      return fileAvailability(ctx, 'save');
+    case 'openSketch':
+      return fileAvailability(ctx, 'open');
     case 'undo':
       return undoRedoAvailability(ctx).undo;
     case 'redo':

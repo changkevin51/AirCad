@@ -37,7 +37,17 @@ describe('keymap', () => {
     expect(resolvePress(key('KeyQ', { metaKey: true }), 'mac')).toBeNull();
     expect(resolvePress(key('KeyQ', { ctrlKey: true }), 'other')).toBeNull();
     expect(resolvePress(key('KeyS'), 'other')).toBe('select');
-    expect(resolvePress(key('KeyS', { metaKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyD'), 'other')).toBe('reveal');
+    expect(resolvePress(key('KeyD', { ctrlKey: true }), 'other')).toBeNull();
+    expect(resolvePress(key('KeyD', { shiftKey: true }), 'other')).toBeNull();
+    expect(resolvePress(key('KeyD', { altKey: true }), 'other')).toBeNull();
+    expect(resolvePress(key('KeyD', { metaKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyO'), 'other')).toBe('setOrigin');
+    expect(resolvePress(key('KeyS', { ctrlKey: true }), 'other')).toBe('saveSketch');
+    expect(resolvePress(key('KeyS', { metaKey: true }), 'mac')).toBe('saveSketch');
+    expect(resolvePress(key('KeyO', { ctrlKey: true }), 'other')).toBe('openSketch');
+    expect(resolvePress(key('KeyO', { metaKey: true }), 'mac')).toBe('openSketch');
+    expect(resolvePress(key('KeyO'), 'other')).toBe('setOrigin');
     expect(resolvePress(key('KeyV'), 'other')).toBe('voice');
     expect(resolvePress(key('KeyV', { metaKey: true }), 'mac')).toBeNull();
     expect(resolvePress(key('KeyV', { ctrlKey: true }), 'other')).toBeNull();
@@ -98,6 +108,20 @@ describe('keymap', () => {
     expect(resolvePress(key('KeyY', { ctrlKey: true }), 'mac')).toBe('redo');
     expect(resolveHold(key('KeyY', { metaKey: true }), 'mac')).toBeNull();
     expect(resolvePress(key('KeyY', { metaKey: true }), 'mac')).toBeNull();
+  });
+
+  it('resolves D as reveal only without modifiers', () => {
+    for (const platform of ['mac', 'other'] as const) {
+      expect(resolvePress(key('KeyD'), platform)).toBe('reveal');
+      expect(resolvePress(key('KeyD', { ctrlKey: true }), platform)).toBeNull();
+      expect(resolvePress(key('KeyD', { altKey: true }), platform)).toBeNull();
+      expect(resolvePress(key('KeyD', { shiftKey: true }), platform)).toBeNull();
+      expect(resolveHold(key('KeyD'), platform)).toBeNull();
+    }
+    // Meta is the primary modifier only on macOS; on Windows it is Win+D, which
+    // the OS consumes before the page anyway.
+    expect(resolvePress(key('KeyD', { metaKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyD', { metaKey: true }), 'other')).toBe('reveal');
   });
 
   it('labels primary-modifier bindings per platform', () => {

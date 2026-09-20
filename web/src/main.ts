@@ -72,11 +72,12 @@ import {
   type ExtrusionEntity,
   type SolidEntity,
   type ScaleHandle,
+  type SketchJSON,
   type TriangleEntity,
 } from './model/sketch';
 import { anchorAfterCommit, resolveStroke, StrokeSession, type LineMeasurement, type StrokeResolution } from './model/stroke';
 import { add, closestPointOnLineToRay, distance, distance2, dot, isFinite3, length2, nearlyEqual, normalize2, roundTo, scale, sub, sub2, v2, v3, type Vec2, type Vec3 } from './model/vec';
-import { entityLabel, SketchRenderer } from './render/sketch-renderer';
+import { entityLabel, SketchRenderer, type DisplayStyle } from './render/sketch-renderer';
 import { AxisTriad, createGroundGrid } from './scene/grid';
 import { OrbitController, type ViewPreset } from './scene/orbit';
 import { SpatialCursorVisual } from './scene/spatial-cursor-visual';
@@ -96,14 +97,23 @@ import { Toasts } from './ui/toast';
 import { ViewControls } from './ui/view-controls';
 import { WorkspaceShell, type InspectorTab } from './ui/workspace';
 import {
+  displayStyleAvailability,
   entityLabel as entityName,
+  EXTRUSION_FIRST,
+  FILE_BUSY,
+  fileAvailability,
+  PRESENTING_FIRST,
+  presentationAllows,
   pressAvailability,
+  revealAvailability,
+  STROKE_FIRST,
   workPlaneAvailability,
   type ExtrusionSnapshot,
   type UiActionResult,
   type UiSnapshot,
   type WorkspaceAction,
 } from './ui/workspace-state';
+import { chooseSketchFile, downloadSketchFile } from './ui/sketch-files';
 import { captureVoiceTarget, dispatchVoiceCommand, sameVoiceTarget, type VoiceTarget } from './voice/commands';
 import { VoiceControl } from './voice/control';
 
@@ -296,6 +306,11 @@ class App {
   private modelRevision = 0;
   private lastSnap: SnapResult | null = null;
   private voiceCapture: { target: VoiceTarget; revision: number; cursor: Vec2 | null; snap: SnapResult | null } | null = null;
+  private displayStyle: DisplayStyle = 'xray';
+  private presenting = false;
+  private presentationReturn: { displayStyle: DisplayStyle; ortho: boolean } | null = null;
+  private fileBusy = false;
+  private readonly groundGrid = createGroundGrid();
 
   constructor(root: HTMLElement) {
     this.shell = new WorkspaceShell(root);
@@ -311,7 +326,7 @@ class App {
       this.cameraRevision++;
       this.inference.reset();
     });
-    this.viewport.scene.add(createGroundGrid());
+    this.viewport.scene.add(this.groundGrid);
     this.viewport.scene.add(this.planeVisual.group);
     this.viewport.scene.add(this.spatialVisual.group);
     this.sketchRenderer = new SketchRenderer(this.viewport);
@@ -377,6 +392,9 @@ class App {
     // cancel an unfinished stroke, pause extrusion, release held sources.
     const chromeInput = (event: Event) => {
       const target = event.target as HTMLElement | null;
+      // Guarded chrome (the Display select, the Reveal button) rejects its own
+      // action instead; pointer/focus must not destroy a live draft first.
+      if (target?.closest?.('[data-cad-preserve-draft]')) return;
       if (target?.closest?.('[data-cad-ui]')) this.cancelInteraction();
     };
     root.addEventListener?.('pointerdown', chromeInput, true);
@@ -386,7 +404,10 @@ class App {
       capture: () => this.captureVoiceOperation(),
       isCurrent: (target) => this.isVoiceOperationCurrent(target),
       execute: (command, target) => this.executeVoiceCommand(command, target),
-      notify: (message, error) => this.toasts.show(message, error ? 'error' : 'success', 6000),
+      notify: (message, error) => {
+        if (error) this.toasts.show(message, 'error');
+        else this.hud.flash(message, 'success', 6000);
+      },
     });
 
     this.sketch.onChange(() => {
@@ -551,14 +572,25 @@ class App {
   }
 
   private onKeyDown(event: KeyboardEvent): void {
-    if (this.isChromeTarget(event) || this.measure.isOpen) return;
+    if (this.measure.isOpen) return;
+    const inChrome = this.isChromeTarget(event);
+    if (inChrome && !this.presenting) return;
     const hold = resolveHold(event, this.platform);
+    const press = hold ? null : resolvePress(event, this.platform);
+    if (this.presenting) {
+      if (inChrome) {
+        // The non-editable view strip keeps D / Esc live for exiting Reveal.
+        if (press !== 'reveal' && press !== 'cancel') return;
+      } else if (!hold && (press === null || !presentationAllows(press))) {
+        // Blocked presses fall through to native behavior (Tab focus moves).
+        return;
+      }
+    }
     if (hold) {
       event.preventDefault();
       if (!event.repeat) this.setHold(hold, true, event.code);
       return;
     }
-    const press = resolvePress(event, this.platform);
     if (!press) return;
     event.preventDefault();
     if (!event.repeat || press === 'zoomIn' || press === 'zoomOut') this.doPress(press);
@@ -578,6 +610,9 @@ class App {
       return;
     }
     if (down) {
+      if (this.fileBusy) return;
+      // While presenting only orbit/pan may start; releases still process.
+      if (this.presenting && action !== 'orbit' && action !== 'pan') return;
       if (this.help.visible || this.measure.isOpen) return;
       this.holdSources.set(source, action);
     } else {
@@ -820,7 +855,7 @@ class App {
       this.pauseScale();
     }
     const pinching = this.cursor.hand?.pinching ?? false;
-    if (this.focused && this.cursor.hand && pinching && !this.lastPinching && this.mode === 'READY' && !this.measure.isOpen && !this.help.visible) {
+    if (this.focused && this.cursor.hand && pinching && !this.lastPinching && this.mode === 'READY' && !this.measure.isOpen && !this.help.visible && !this.presenting && !this.fileBusy) {
       this.selectAtCursor();
     }
     if (this.cursor.hand) this.lastPinching = pinching;
@@ -868,6 +903,13 @@ class App {
 
   private doPress(action: PressAction): void {
     this.focused = true;
+    if (this.presenting || action === 'reveal' || action === 'saveSketch' || action === 'openSketch') {
+      const availability = pressAvailability(action, this.uiContext());
+      if (!availability.enabled) {
+        this.toasts.show(availability.reason ?? 'Unavailable', 'error');
+        return;
+      }
+    }
     if ((this.help.visible || this.measure.isOpen) && action !== 'help' && action !== 'cancel') return;
     if (this.voiceCapture && action !== 'voice' && action !== 'cancel' && action !== 'togglePip') {
       this.toasts.show('Voice distance pending: V to send/retry, Esc to cancel');
@@ -917,14 +959,28 @@ class App {
         else if (this.movement) this.commitMove();
         else if (this.extrusion) this.commitExtrusion();
         break;
+      case 'reveal':
+        void this.setPresentation(!this.presenting);
+        break;
+      case 'saveSketch':
+        this.saveSketch();
+        break;
+      case 'openSketch':
+        void this.openSketch();
+        break;
       case 'viewTop':
       case 'viewFront':
       case 'viewRight': {
         const preset = action === 'viewTop' ? 'top' : action === 'viewFront' ? 'front' : 'right';
+        const label = `${preset[0].toUpperCase()}${preset.slice(1)}`;
         this.orbit.setView(preset, true, this.nowMs);
-        this.setPlaneKind(PLANE_FOR_VIEW[preset], false);
-        this.pinManual();
-        this.hud.flash(`${preset[0].toUpperCase()}${preset.slice(1)} view · plane ${this.plane.label}`);
+        if (this.presenting) {
+          this.hud.flash(`${label} view`);
+        } else {
+          this.setPlaneKind(PLANE_FOR_VIEW[preset], false);
+          this.pinManual();
+          this.hud.flash(`${label} view · plane ${this.plane.label}`);
+        }
         break;
       }
       case 'viewIso':
@@ -935,8 +991,8 @@ class App {
         this.hud.flash(this.orbit.toggleProjection() ? 'Orthographic' : 'Perspective');
         break;
       case 'fitAll':
-        if (this.isDepthSource()) this.fitWorkspace();
-        else this.orbit.fit(this.sketch.boundingBox());
+        if (this.presenting || !this.isDepthSource()) this.orbit.fit(this.sketch.boundingBox());
+        else this.fitWorkspace();
         break;
       case 'zoomIn':
         this.zoomAtCursor(1.25, this.cursor.position ?? undefined);
@@ -1017,6 +1073,10 @@ class App {
         break;
       }
       case 'cancel':
+        if (this.presenting) {
+          void this.setPresentation(false);
+          break;
+        }
         if (this.voiceCapture) {
           this.voiceCapture = null;
           this.voice.cancel();
@@ -1130,6 +1190,179 @@ class App {
 
   // ----------------------------------------------------------- workspace chrome
 
+  /** Why a session/modal owns input right now; null when the app is idle. */
+  private sessionBlockReason(): string | null {
+    if (this.stroke) return STROKE_FIRST;
+    if (this.extrusion) return EXTRUSION_FIRST;
+    if (this.movement) return 'Finish the move with Enter or M, or cancel with Esc';
+    if (this.scaling) return 'Finish scaling with Enter or R, or cancel with Esc';
+    if (this.voiceCapture || this.voice.busy) return 'Finish or cancel the voice request first';
+    if (this.measure.isOpen || this.help.visible || this.shell.regions.dialogs.children.length > 0) {
+      return 'Close the open dialog first';
+    }
+    if (this.applyingTracker) return 'Wait for the input change to finish';
+    if (this.spatial.calibration.phase === 'collecting') return 'Finish the calibration capture first';
+    if (this.fileBusy) return FILE_BUSY;
+    return null;
+  }
+
+  private setDisplayStyle(style: DisplayStyle): UiActionResult {
+    const availability = displayStyleAvailability(this.uiContext());
+    if (!availability.enabled) return { ok: false, error: availability.reason ?? 'Unavailable' };
+    if (style !== this.displayStyle) {
+      this.displayStyle = style;
+      this.sketchRenderer.setDisplayStyle(style);
+      this.publishUi();
+    }
+    return { ok: true };
+  }
+
+  private setPresentation(active: boolean): UiActionResult {
+    if (active === this.presenting) return { ok: true };
+    if (active) {
+      const availability = revealAvailability(this.uiContext());
+      if (!availability.enabled) return { ok: false, error: availability.reason ?? 'Unavailable' };
+      this.beginPresentation();
+    } else {
+      this.endPresentation();
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Enter the read-only presentation view: Shaded faces, orthographic fit of
+   * the model, and every editing surface hidden.  Guards ran first, so this
+   * only releases navigation bookkeeping — no model operation is committed.
+   * Fit before the animated preset because `fit()` cancels a transition.
+   */
+  private beginPresentation(): void {
+    this.cancelInteraction();
+    this.presentationReturn = { displayStyle: this.displayStyle, ortho: this.viewport.ortho };
+    this.presenting = true;
+    this.displayStyle = 'shaded';
+    this.sketchRenderer.setDisplayStyle('shaded');
+    this.sketchRenderer.setPresentation(true);
+    this.groundGrid.visible = false;
+    this.shell.setPresentation(true);
+    this.viewport.resize();
+    this.orbit.setOrtho(true);
+    this.orbit.fit(this.sketch.boundingBox(), 1.25);
+    this.orbit.setView('iso', true, this.nowMs);
+    this.publishUi();
+  }
+
+  /** Restore the editing chrome and the saved style/projection; never refit. */
+  private endPresentation(): void {
+    const restore = this.presentationReturn ?? { displayStyle: this.displayStyle, ortho: this.viewport.ortho };
+    this.presentationReturn = null;
+    this.cancelInteraction();
+    this.presenting = false;
+    this.displayStyle = restore.displayStyle;
+    this.sketchRenderer.setDisplayStyle(restore.displayStyle);
+    this.sketchRenderer.setPresentation(false);
+    this.groundGrid.visible = true;
+    this.shell.setPresentation(false);
+    this.viewport.resize();
+    this.orbit.setOrtho(restore.ortho);
+    this.focusViewport();
+    this.publishUi();
+  }
+
+  private saveSketch(): void {
+    const availability = fileAvailability(this.uiContext(), 'save');
+    if (!availability.enabled) {
+      this.toasts.show(availability.reason ?? 'Unavailable', 'error');
+      return;
+    }
+    try {
+      downloadSketchFile(this.sketch.toJSON());
+      this.hud.flash('Sketch downloaded', 'success');
+    } catch (error) {
+      this.toasts.show(error instanceof Error ? error.message : 'Could not save the sketch', 'error');
+    }
+  }
+
+  private async openSketch(): Promise<void> {
+    const availability = fileAvailability(this.uiContext(), 'open');
+    if (!availability.enabled) {
+      this.toasts.show(availability.reason ?? 'Unavailable', 'error');
+      return;
+    }
+    if (this.fileBusy) return;
+    this.fileBusy = true;
+    this.publishUi();
+    this.cancelInteraction();
+    const revision = this.modelRevision;
+    try {
+      const loaded = await chooseSketchFile();
+      if (!loaded) return;
+      if (this.sketch.size > 0) {
+        const accepted = await this.confirmOpenReplace();
+        if (!accepted) return;
+      }
+      if (!this.canFinalizeOpen(revision)) {
+        this.toasts.show('The sketch changed before the file could open. Try Open again.', 'error');
+        return;
+      }
+      this.applyLoadedSketch(loaded.data);
+    } catch (error) {
+      this.toasts.show(error instanceof Error ? error.message : 'Could not open the sketch', 'error');
+    } finally {
+      this.fileBusy = false;
+      this.publishUi();
+    }
+  }
+
+  /** File-busy itself is expected during Open finalization and must not self-reject. */
+  private canFinalizeOpen(revision: number): boolean {
+    if (this.modelRevision !== revision) return false;
+    if (this.presenting || this.stroke || this.extrusion || this.movement || this.scaling) return false;
+    if (this.voiceCapture || this.voice.busy) return false;
+    return true;
+  }
+
+  private confirmOpenReplace(): Promise<boolean> {
+    return new Promise((resolve) => {
+      const message = document.createElement('p');
+      message.textContent = 'Open this file? It replaces the current scene and clears undo history.';
+      const body = document.createElement('div');
+      body.appendChild(message);
+      openDialog({
+        host: this.shell.regions.dialogs,
+        title: 'Open sketch',
+        body,
+        backdropClose: false,
+        actions: [
+          { label: 'Cancel', onClick: () => { resolve(false); }, focus: true },
+          {
+            label: 'Open',
+            tone: 'danger',
+            onClick: () => {
+              resolve(true);
+            },
+          },
+        ],
+        onClose: () => resolve(false),
+      });
+    });
+  }
+
+  private applyLoadedSketch(data: SketchJSON): void {
+    this.selectedId = null;
+    this.hover = null;
+    this.lastCommitted = null;
+    this.sketchRenderer.setHover(null);
+    this.sketchRenderer.setSelected(null);
+    this.sketch.load(data);
+    this.plane = new WorkPlane('XY');
+    this.planeMode = 'auto';
+    this.planeReason = 'current';
+    this.inference.reset();
+    this.orbit.fit(this.sketch.boundingBox(), 1.25);
+    this.hud.flash('Sketch opened', 'success');
+    this.publishUi();
+  }
+
   private uiContext(): UiSnapshot {
     const layout = this.shell.layout;
     return {
@@ -1151,6 +1384,9 @@ class App {
       inspectorVisible: layout.inspectorVisible,
       inspectorTab: layout.inspectorTab,
       extrusion: this.extrusionSnapshot(),
+      displayStyle: this.displayStyle,
+      presenting: this.presenting,
+      sessionBlockReason: this.sessionBlockReason(),
     };
   }
 
@@ -1209,6 +1445,9 @@ class App {
       snapshot.inspectorTab,
       snapshot.pipVisible,
       snapshot.navAssist,
+      snapshot.displayStyle,
+      snapshot.presenting,
+      snapshot.sessionBlockReason,
       this.sketchRevision,
       snapshot.extrusion
         ? `${snapshot.extrusion.faceIndex}:${snapshot.extrusion.dragging}:${snapshot.extrusion.pull}:${snapshot.extrusion.depth}:${snapshot.extrusion.previewValid}:${snapshot.extrusion.faces.length}`
@@ -1235,6 +1474,9 @@ class App {
    */
   dispatchWorkspaceAction(action: WorkspaceAction): UiActionResult {
     const ctx = this.uiContext();
+    if (ctx.presenting && (action.type !== 'press' || !presentationAllows(action.action))) {
+      return { ok: false, error: PRESENTING_FIRST };
+    }
     switch (action.type) {
       case 'press': {
         const availability = pressAvailability(action.action, ctx);
@@ -1242,6 +1484,8 @@ class App {
         this.doPress(action.action);
         return { ok: true };
       }
+      case 'setDisplayStyle':
+        return this.setDisplayStyle(action.style);
       case 'selectEntity': {
         if (ctx.drawing) return { ok: false, error: 'Finish the current stroke first.' };
         if (ctx.extruding) return { ok: false, error: 'Finish or cancel Push/Pull first.' };
@@ -1808,7 +2052,7 @@ class App {
     }
     if (this.mode === 'ORBIT' || this.mode === 'PAN') this.applyNavigationDelta(this.cursor.position ?? { x: 0, y: 0 });
     if (this.stroke) this.samplePlanarDepthStroke();
-    else if (this.spatial.world) this.updateSpatialHover(this.spatial.world);
+    else if (this.spatial.world && !this.presenting) this.updateSpatialHover(this.spatial.world);
     this.refreshPanel();
   }
 
@@ -2633,25 +2877,27 @@ class App {
     const viewDirection = this.viewport.viewDirection();
     const mode = this.mode;
 
-    this.updatePlaneInference(time);
+    if (!this.presenting) this.updatePlaneInference(time);
 
     const cursorRay = cursorPx ? projector.ray(cursorPx) : null;
     const cursorHit = cursorRay ? this.plane.intersectRay(cursorRay.origin, cursorRay.dir) : null;
     const reference: Vec3 = this.stroke ? this.stroke.start.world : cursorHit ?? this.plane.anchor;
     this.gridStep = this.stroke ? this.strokeGridStep : adaptiveGridStep(projector, this.plane, reference, GRID_MIN_PX);
 
-    const snap: SnapResult | null = this.voiceCapture ? this.voiceCapture.snap : cursorPx ? this.computeSnap(cursorPx) : null;
+    const snap: SnapResult | null = this.presenting ? null : this.voiceCapture ? this.voiceCapture.snap : cursorPx ? this.computeSnap(cursorPx) : null;
     this.lastSnap = snap;
 
     if (this.stroke) {
       this.updateGhost(this.stroke);
-    } else if (this.isDepthSource() && this.spatial.world && mode === 'READY') {
-      this.updateSpatialHover(this.spatial.world);
-    } else {
-      const hovered = snap && cursorPx && mode === 'READY' && !this.cursor.isLost ? this.hoveredEntity(snap) ?? pickFace(this.sketch.drawable, cursorPx, projector) : null;
-      if (hovered !== this.hover) {
-        this.hover = hovered;
-        this.sketchRenderer.setHover(hovered);
+    } else if (!this.presenting) {
+      if (this.isDepthSource() && this.spatial.world && mode === 'READY') {
+        this.updateSpatialHover(this.spatial.world);
+      } else {
+        const hovered = snap && cursorPx && mode === 'READY' && !this.cursor.isLost ? this.hoveredEntity(snap) ?? pickFace(this.sketch.drawable, cursorPx, projector) : null;
+        if (hovered !== this.hover) {
+          this.hover = hovered;
+          this.sketchRenderer.setHover(hovered);
+        }
       }
     }
 
@@ -2662,11 +2908,14 @@ class App {
         : snap?.onPlane
           ? snap.plane
           : displayedPlane.toPlane(displayedPlane.anchor);
-    this.planeVisual.setVisible(true);
+    this.planeVisual.setVisible(!this.presenting);
     this.planeVisual.update(displayedPlane, this.gridStep, focus);
     const spatialWorld = this.isDepthSource() ? this.spatial.world : null;
     const spatialScreen = spatialWorld ? projector.project(spatialWorld) : null;
-    if (this.isDepthSource()) {
+    if (this.presenting) {
+      this.spatialVisual.update(null, false);
+      this.glyph.update(null, null, false);
+    } else if (this.isDepthSource()) {
       const preview = this.spatialPreview;
       const cursorWorld = preview?.world ?? spatialWorld;
       this.spatialVisual.update(cursorWorld, !!spatialWorld && !!spatialScreen, {
@@ -2719,12 +2968,13 @@ class App {
       extrusion: this.extrusion ? { depth: this.extrusion.depth, dragging: this.extrusion.dragging, face: this.extrusion.face.label, pulled: this.extrusion.pulled } : null,
       dialogOpen: this.measure.isOpen || this.help.visible,
       voice: this.voiceCapture?.target.description ?? null,
+      presentation: this.presenting,
     });
     this.hud.setKeys(this.keyHints(mode));
     this.publishUiIfChanged();
 
     this.viewport.render();
-    this.triad.render(this.viewport, this.orbit);
+    if (!this.presenting) this.triad.render(this.viewport, this.orbit);
   }
 
   /**
@@ -2745,6 +2995,13 @@ class App {
   private keyHints(mode: Mode): KeyHint[] {
     const key = (action: PressAction | HoldAction) => labelForAction(action, this.platform);
     if (this.measure.isOpen) return [{ key: 'Enter', label: 'apply' }, { key: 'Esc', label: 'cancel' }];
+    if (this.presenting) {
+      return [
+        { key: `${key('reveal')} / ${key('cancel')}`, label: 'back to editing' },
+        { key: key('orbit'), label: 'orbit' },
+        { key: key('pan'), label: 'pan' },
+      ];
+    }
     if (this.voiceCapture) {
       return [
         { key: key('voice'), label: 'confirm / retry' },

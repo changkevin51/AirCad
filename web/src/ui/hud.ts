@@ -36,6 +36,8 @@ export interface HudState {
   dialogOpen?: boolean;
   /** Frozen voice draft, e.g. "Line · XY · 32.0°". */
   voice?: string | null;
+  /** Read-only presentation view: quiet copy, real tracking health only. */
+  presentation?: boolean;
 }
 
 export interface KeyHint {
@@ -83,6 +85,26 @@ const INSTRUCTIONS: Record<Mode, string> = {
   ORBIT: 'Orbiting — release to stop',
   PAN: 'Panning — release to stop',
 };
+
+function instructionFor(state: HudState): string {
+  if (state.presentation && state.mode === 'READY') {
+    return 'Presentation — orbit or pan to inspect · D or Esc returns to editing';
+  }
+  if (state.selected && state.mode === 'READY') {
+    return `Selected ${state.selected} — L size · Q push/pull · Del delete`;
+  }
+  if (state.mode === 'READY') {
+    return state.tracking === 'hand'
+      ? 'Ready — hold Space to draw, pinch to select'
+      : 'Ready — left-drag to draw, click to select';
+  }
+  if (state.mode === 'EXTRUDING') {
+    return state.tracking === 'hand'
+      ? 'Push/Pull — pinch and move to pull'
+      : 'Push/Pull — drag or hold Space to pull';
+  }
+  return INSTRUCTIONS[state.mode];
+}
 
 /**
  * Status-bar content (left: context instruction plus a few key hints;
@@ -154,9 +176,7 @@ export class Hud {
 
   update(state: HudState): void {
     const now = performance.now();
-    let instruction = state.selected && state.mode === 'READY'
-      ? `Selected ${state.selected} — L size · Q push/pull · Del delete`
-      : INSTRUCTIONS[state.mode];
+    let instruction = instructionFor(state);
     if (this.flashText && now < this.flashUntil) {
       instruction = this.flashText;
       this.instruction.dataset.tone = this.flashTone;
@@ -168,12 +188,15 @@ export class Hud {
 
     const tracking = trackingLabel(state);
     const snapText = state.snap ? `${SNAP_NAMES[state.snap]}${state.snapAxis ? ` ${state.snapAxis.toUpperCase()}` : ''}` : '—';
-    const right = [
-      `Snap: ${snapText}`,
-      `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` (${state.planeReason})` : ''}`,
-      state.gridEnabled ? `Grid ${formatGridStep(state.gridStep)}` : 'Grid snap off',
-      tracking.text,
-    ].join('  ·  ');
+    const compact = typeof window !== 'undefined' && window.innerWidth <= 1440;
+    const right = state.presentation
+      ? tracking.text
+      : [
+          ...(!compact ? [`Snap: ${snapText}`] : []),
+          `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` (${state.planeReason})` : ''}`,
+          state.gridEnabled ? `Grid ${formatGridStep(state.gridStep)}` : 'Grid snap off',
+          tracking.text,
+        ].join('  ·  ');
     if (right !== this.lastRight && now - this.lastRightAt >= 100) {
       this.lastRight = right;
       this.lastRightAt = now;
@@ -189,7 +212,7 @@ export class Hud {
       this.notice.classList.toggle('viewport-notice--action', !!state.extrusion);
     }
 
-    const emptyVisible = state.entityCount === 0 && state.mode === 'READY' && !state.dialogOpen;
+    const emptyVisible = state.entityCount === 0 && state.mode === 'READY' && !state.dialogOpen && !state.presentation;
     if (emptyVisible !== this.emptyVisible) {
       this.emptyVisible = emptyVisible;
       this.empty.classList.toggle('hidden', !emptyVisible);
@@ -198,6 +221,11 @@ export class Hud {
 
   /** One notice slot: actionable warnings outrank normal instructions. */
   private noticeText(state: HudState): string {
+    if (state.presentation) {
+      return state.tracking === 'lost' && state.inputSource !== 'oak'
+        ? 'Tracking paused — show your hand to resume, or keep using the mouse.'
+        : '';
+    }
     if (state.voice) {
       return `Voice draft frozen (${state.voice}) — you may release. Say a distance; V confirms or sends it · Esc cancels.`;
     }
@@ -208,7 +236,9 @@ export class Hud {
       if (state.mode === 'ORBIT' || state.mode === 'PAN') {
         return 'Push/Pull paused while you move the view — release to continue.';
       }
-      return 'Push/Pull — drag the highlighted face · Enter applies · Esc cancels';
+      return state.tracking === 'hand'
+        ? 'Push/Pull — pinch the highlighted face · Enter applies · Esc cancels'
+        : 'Push/Pull — drag the highlighted face · Enter applies · Esc cancels';
     }
     if (state.edgeOn) {
       return `Work plane ${state.plane.label} is edge-on. Press A for auto, Tab or 1 / 2 / 3, or orbit with Shift.`;

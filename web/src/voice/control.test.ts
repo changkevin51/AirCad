@@ -148,6 +148,7 @@ describe('VoiceControl', () => {
   let recordButton: FakeEl;
   let cancelButton: FakeEl;
   let statusEl: FakeEl;
+  let helpEl: FakeEl;
   let control: VoiceControl;
   let captureSpy: ReturnType<typeof vi.fn>;
   let infoSpy: ReturnType<typeof vi.spyOn>;
@@ -213,6 +214,7 @@ describe('VoiceControl', () => {
     recordButton = find(root, 'voice-control__record');
     cancelButton = find(root, 'voice-control__cancel');
     statusEl = find(root, 'voice-control__status');
+    helpEl = find(root, 'voice-control__help');
   });
 
   afterEach(() => {
@@ -227,9 +229,13 @@ describe('VoiceControl', () => {
     expect(recordButton.type).toBe('button');
     expect(recordButton.textContent).toBe('Speak distance');
     expect(cancelButton.hidden).toBe(true);
-    expect(statusEl.textContent).toBe(IDLE_STATUS);
+    expect(helpEl.textContent).toBe(IDLE_STATUS);
+    expect(statusEl.hidden).toBe(true);
     expect(statusEl.attrs.get('role')).toBe('status');
     expect(statusEl.attrs.get('aria-live')).toBe('polite');
+    expect(find(root, 'voice-control__hint').textContent).toBe('V');
+    expect(find(root, 'voice-control__engine-select').attrs.get('aria-label')).toBe('Recognizer');
+    expect(root.children[0].attrs.get('data-cad-preserve-draft')).toBe('');
   });
 
   it('captures the operation before starting speech recognition', async () => {
@@ -248,12 +254,45 @@ describe('VoiceControl', () => {
     rec().emit(false, '500 millimetres');
     await pending;
     expect(line()!.b).toEqual(v3(400, 600, 300));
-    expect(statusEl.textContent).toBe('Heard: 500 millimetres\nCreated 500 mm line on XY');
+    expect(statusEl.textContent).toBe('Line — 500 mm');
     expect(notify).toHaveBeenCalledWith('Created 500 mm line on XY', false);
     expect(infoSpy).toHaveBeenCalledWith('[voice] transcript', '500 millimetres');
     expect(infoSpy).toHaveBeenCalledWith('[voice] executed', expect.objectContaining({ kind: 'line' }));
     expect(recordButton.textContent).toBe('Speak distance');
     expect(cancelButton.hidden).toBe(true);
+  });
+
+  it('shows the exact validated distance only after a successful execute', async () => {
+    const pending = control.listen();
+    await flush();
+    rec().emit(false, '12.5 mm');
+    await pending;
+    expect(statusEl.textContent).toBe('Line — 12.5 mm');
+    expect(statusEl.hidden).toBe(false);
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('12.5'), false);
+  });
+
+  it('collapses a success after six seconds but keeps errors visible', async () => {
+    vi.useFakeTimers();
+    const pending = control.listen();
+    rec().emit(false, '500 mm');
+    await pending;
+    expect(statusEl.textContent).toBe('Line — 500 mm');
+    vi.advanceTimersByTime(6000);
+    expect(statusEl.hidden).toBe(true);
+    vi.useRealTimers();
+
+    stroke = drawStroke();
+    const failed = control.listen();
+    await flush();
+    rec().emit(false, 'make it taller');
+    control.stop();
+    await failed;
+    expect(statusEl.textContent).toContain('Say one positive distance');
+    vi.useFakeTimers();
+    vi.advanceTimersByTime(6000);
+    expect(statusEl.textContent).toContain('Say one positive distance');
+    vi.useRealTimers();
   });
 
   it('commits only once even if a final result follows the interim match', async () => {
@@ -447,13 +486,13 @@ describe('VoiceControl', () => {
     expect(line()!.b).toEqual(v3(400, 600, 300));
   });
 
-  it('keeps panel keystrokes away from the CAD keymap and cancels on pagehide', async () => {
+  it('keeps panel keydowns away from the CAD keymap but lets keyup release holds', async () => {
     const pending = control.listen();
     await flush();
     const stop = vi.fn();
     root.children[0].fire('keydown', { stopPropagation: stop });
     root.children[0].fire('keyup', { stopPropagation: stop });
-    expect(stop).toHaveBeenCalledTimes(2);
+    expect(stop).toHaveBeenCalledTimes(1);
     expect(h.pagehide).not.toBeNull();
     h.pagehide!();
     await pending;
@@ -592,7 +631,7 @@ describe('VoiceControl engine setting', () => {
     engineSelect.fire('change', {});
     expect(control.activeEngine).toBe('qwen');
     expect(store.get('aircad.voice.engine')).toBe('qwen');
-    expect(statusEl.textContent).toBe(QWEN_IDLE_STATUS);
+    expect(find(root, 'voice-control__help').textContent).toBe(QWEN_IDLE_STATUS);
     expect(recordButton.textContent).toBe('Record distance');
 
     const restored = build();
@@ -651,7 +690,7 @@ describe('VoiceControl engine setting', () => {
       context: { operation: 'line', units: 'mm' },
     });
     expect(line()!.b).toEqual(v3(400, 600, 300));
-    expect(statusEl.textContent).toBe(`Heard: ${TRANSCRIPT}\nCreated 500 mm line on XY`);
+    expect(statusEl.textContent).toBe('Line — 500 mm');
     expect(recordButton.textContent).toBe('Record distance');
   });
 

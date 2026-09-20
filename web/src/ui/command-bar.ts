@@ -6,6 +6,7 @@ import {
   clearAvailability,
   deleteAvailability,
   dimensionsAvailability,
+  fileAvailability,
   pressAvailability,
   pushPullAvailability,
   viewAvailability,
@@ -146,6 +147,23 @@ export class AppBar {
     const menus = el('div', 'ws-app-bar__menus');
 
     const aircad = this.addDisclosure(menus, 'AirCAD');
+    aircad.button.setAttribute('data-cad-preserve-draft', '');
+    aircad.panel.setAttribute('data-cad-preserve-draft', '');
+    const saveItem = this.bindItem({
+      label: 'Save sketch',
+      shortcut: 'Ctrl+S',
+      availability: (s: UiSnapshot) => fileAvailability(s, 'save'),
+      action: () => cb.dispatch({ type: 'press', action: 'saveSketch' }),
+    }, aircad);
+    const openItem = this.bindItem({
+      label: 'Open sketch…',
+      shortcut: 'Ctrl+O',
+      availability: (s: UiSnapshot) => fileAvailability(s, 'open'),
+      action: () => cb.dispatch({ type: 'press', action: 'openSketch' }),
+    }, aircad);
+    saveItem.setAttribute('data-cad-preserve-draft', '');
+    openItem.setAttribute('data-cad-preserve-draft', '');
+    aircad.panel.append(saveItem, openItem);
     const legacyLabel = document.createElement('button');
     legacyLabel.type = 'button';
     legacyLabel.className = 'ws-menu-item';
@@ -205,8 +223,8 @@ export class AppBar {
     help.panel.appendChild(this.bindItem({ label: 'Keyboard shortcuts', action: () => cb.openHelp('keys') }, help));
 
     const title = el('div', 'ws-app-bar__title');
-    title.textContent = 'Sketch · Session only';
-    title.title = 'This pass does not add saving — reloading discards the in-memory sketch.';
+    title.textContent = 'Sketch · mm';
+    title.title = 'Local millimetre sketch. Save downloads a JSON file; Open replaces the scene and clears undo history. There is no autosave.';
 
     const right = el('div', 'ws-app-bar__right');
     this.browserToggle = this.panelToggle('Model panel', icons.panelLeft, () => cb.togglePanel('browser'));
@@ -308,7 +326,7 @@ export class CommandBar {
     const context = el('span', 'ws-context');
     context.textContent = 'Sketching';
 
-    this.pushPull = commandButton('Push/Pull', 'Push/pull the selected rectangle or box (Q)', () => {
+    this.pushPull = commandButton('Push/Pull', 'Push/pull the selected closed outline or solid (Q)', () => {
       cb.dispatch({ type: 'press', action: 'extrude' });
     }, cb.focusViewport);
     const pushKbd = document.createElement('kbd');

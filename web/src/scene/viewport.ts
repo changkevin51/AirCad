@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import type { Projector } from '../model/snap';
 import { v2, v3, type Vec2, type Vec3 } from '../model/vec';
+import { THREE_COLORS } from '../ui/theme';
 
 // CAD convention: Z is up.  Must run before any camera/object is created.
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
@@ -36,11 +37,19 @@ export class Viewport {
     this.labelRenderer.domElement.className = 'label-layer';
     container.appendChild(this.labelRenderer.domElement);
 
-    this.scene.background = new THREE.Color(0x14171c);
+    this.scene.background = new THREE.Color(THREE_COLORS.canvas);
     this.perspective = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, 1, 10, 1e6);
     this.orthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, -1e6, 1e6);
     this.perspective.up.set(0, 0, 1);
     this.orthographic.up.set(0, 0, 1);
+
+    // A small fixed studio rig for the Shaded display style: hemisphere fill
+    // from +Z (up) plus one key light; Basic-material X-ray ignores both.
+    const fill = new THREE.HemisphereLight(0xffffff, 0x46515f, 0.75);
+    fill.position.set(0, 0, 1);
+    const key = new THREE.DirectionalLight(0xffffff, 1.0);
+    key.position.set(4, -6, 9);
+    this.scene.add(fill, key);
 
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();

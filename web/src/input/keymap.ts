@@ -37,7 +37,10 @@ export type PressAction =
   | 'togglePip'
   | 'help'
   | 'setOrigin'
-  | 'recenter';
+  | 'recenter'
+  | 'reveal'
+  | 'saveSketch'
+  | 'openSketch';
 
 export type BindingGroup = 'pen' | 'view' | 'plane' | 'edit' | 'tools';
 
@@ -45,6 +48,7 @@ export interface Modifiers {
   /** Ctrl on Windows/Linux, Cmd on macOS. */
   primary?: boolean;
   ctrl?: boolean;
+  meta?: boolean;
   shift?: boolean;
   alt?: boolean;
 }
@@ -76,6 +80,7 @@ export const PRESS_BINDINGS: readonly KeyBinding<PressAction>[] = [
   { action: 'viewIso', codes: ['Digit0', 'Numpad0'], label: '0', help: 'Isometric view', group: 'view' },
   { action: 'toggleProjection', codes: ['Digit5', 'Numpad5'], label: '5', help: 'Orthographic / perspective', group: 'view' },
   { action: 'fitAll', codes: ['KeyF'], label: 'F', help: 'Fit the sketch in view', group: 'view' },
+  { action: 'reveal', codes: ['KeyD'], mods: { primary: false, ctrl: false, alt: false, shift: false }, label: 'D', help: 'Reveal the model / return to editing', group: 'view' },
   { action: 'zoomIn', codes: ['Equal', 'NumpadAdd'], label: '=', help: 'Zoom in (or mouse wheel)', group: 'view' },
   { action: 'zoomOut', codes: ['Minus', 'NumpadSubtract'], label: '-', help: 'Zoom out (or mouse wheel)', group: 'view' },
   { action: 'cyclePlane', codes: ['Tab'], label: 'Tab', help: 'Cycle work plane XY -> XZ -> YZ (pins; A returns to auto; while extruding: switch face)', group: 'plane' },
@@ -88,6 +93,8 @@ export const PRESS_BINDINGS: readonly KeyBinding<PressAction>[] = [
   { action: 'clear', codes: ['Backspace'], mods: { primary: true }, label: 'Ctrl+Backspace', help: 'Clear the whole sketch', group: 'edit' },
   { action: 'cancel', codes: ['Escape'], label: 'Esc', help: 'Cancel stroke, move, scale, or extrusion / deselect / close overlays', group: 'edit' },
   { action: 'select', codes: ['KeyS'], mods: { primary: false, ctrl: false, alt: false }, label: 'S', help: 'Select the shape under the cursor (or pinch / click)', group: 'edit' },
+  { action: 'saveSketch', codes: ['KeyS'], mods: { primary: true, alt: false, shift: false }, label: 'Ctrl+S', help: 'Save the sketch as a local JSON download', group: 'edit' },
+  { action: 'openSketch', codes: ['KeyO'], mods: { primary: true, alt: false, shift: false }, label: 'Ctrl+O', help: 'Open a local AirCAD JSON sketch', group: 'edit' },
   { action: 'move', codes: ['KeyM'], mods: { primary: false, ctrl: false, alt: false }, label: 'M', help: 'Move the selected shape: pinch or drag, then Enter or M to apply; Esc cancels', group: 'tools' },
   { action: 'scale', codes: ['KeyR'], mods: { primary: false, ctrl: false, alt: false, shift: false }, label: 'R', help: 'Scale from a corner: pinch or drag it; the opposite corner stays fixed. Enter / R applies; Esc cancels', group: 'tools' },
   { action: 'extrude', codes: ['KeyQ'], mods: { primary: false, ctrl: false, alt: false }, label: 'Q', help: 'Push/pull the selected closed outline or solid: pick a face, pinch and move', group: 'tools' },
@@ -98,7 +105,7 @@ export const PRESS_BINDINGS: readonly KeyBinding<PressAction>[] = [
   { action: 'toggleNavAssist', codes: ['KeyN'], label: 'N', help: 'Off-hand palm navigation on / off', group: 'tools' },
   { action: 'togglePip', codes: ['KeyP'], label: 'P', help: 'Camera picture-in-picture', group: 'tools' },
   { action: 'help', codes: ['KeyH', 'F1'], label: 'H', help: 'Help dialog', group: 'tools' },
-  { action: 'setOrigin', codes: ['KeyO'], label: 'O', help: 'Set the depth-camera origin (depth mode)', group: 'tools' },
+  { action: 'setOrigin', codes: ['KeyO'], mods: { primary: false, ctrl: false, alt: false }, label: 'O', help: 'Set the depth-camera origin (depth mode)', group: 'tools' },
   { action: 'recenter', codes: ['KeyR'], mods: { primary: false, ctrl: false, alt: false, shift: true }, label: 'Shift+R', help: 'Recenter mapping on the last endpoint (depth mode)', group: 'tools' },
 ];
 
@@ -122,6 +129,7 @@ function modifiersMatch(event: KeyLike, mods: Modifiers | undefined, platform: P
   const primary = platform === 'mac' ? event.metaKey : event.ctrlKey;
   if (mods.primary !== undefined && mods.primary !== primary) return false;
   if (mods.ctrl !== undefined && mods.ctrl !== event.ctrlKey) return false;
+  if (mods.meta !== undefined && mods.meta !== event.metaKey) return false;
   if (mods.shift !== undefined && mods.shift !== event.shiftKey) return false;
   if (mods.alt !== undefined && mods.alt !== event.altKey) return false;
   return true;

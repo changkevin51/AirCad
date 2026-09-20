@@ -197,7 +197,7 @@ export class Inspector {
     this.pushPullButton.type = 'button';
     this.pushPullButton.className = 'ws-btn';
     this.pushPullButton.textContent = 'Push/Pull';
-    this.pushPullButton.title = 'Push/pull the selected rectangle or box (Q)';
+    this.pushPullButton.title = 'Push/pull the selected closed outline or solid (Q)';
     this.pushPullButton.addEventListener('click', () => this.press('extrude'));
     this.deleteButton = document.createElement('button');
     this.deleteButton.type = 'button';

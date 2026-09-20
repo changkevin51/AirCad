@@ -20,7 +20,9 @@ export interface VoiceControlOptions {
 }
 
 type VoicePhase = 'idle' | 'listening' | 'opening' | 'recording' | 'sending';
+type VoiceOutcome = { kind: 'success' | 'error'; text: string };
 const FETCH_TIMEOUT_MS = 310_000;
+const SUCCESS_MS = 6_000;
 const STALE_ERROR = 'Operation or geometry changed; press V to retry or Esc to cancel the draft';
 const DISTANCE_ERROR = 'Say one positive distance, such as 500 mm or by 1 m';
 const IDLE_STATUS: Record<VoiceEngine, string> = {
@@ -29,13 +31,20 @@ const IDLE_STATUS: Record<VoiceEngine, string> = {
 };
 const IDLE_LABEL: Record<VoiceEngine, string> = { browser: 'Speak distance', qwen: 'Record distance' };
 
+function appliedLabel(kind: VoiceTarget['operation']['kind'], distanceMm: number): string {
+  return `${kind === 'face_pull' ? 'Pull' : 'Line'} — ${distanceMm} mm`;
+}
+
 export class VoiceControl {
   private readonly recordButton: HTMLButtonElement;
   private readonly cancelButton: HTMLButtonElement;
   private readonly engineSelect: HTMLSelectElement;
+  private readonly help: HTMLParagraphElement;
   private readonly status: HTMLParagraphElement;
   private engine: VoiceEngine;
   private phase: VoicePhase = 'idle';
+  private outcome: VoiceOutcome | null = null;
+  private successTimer: ReturnType<typeof setTimeout> | null = null;
   private controller: AbortController | null = null;
   private listener: SpeechHandle | null = null;
   private recording: MicrophoneRecording | null = null;
@@ -51,20 +60,34 @@ export class VoiceControl {
     const panel = document.createElement('section');
     panel.className = 'voice-control';
     panel.setAttribute('data-cad-ui', '');
+    panel.setAttribute('data-cad-preserve-draft', '');
+
+    const row = document.createElement('div');
+    row.className = 'voice-control__row';
     this.recordButton = document.createElement('button');
     this.recordButton.type = 'button';
     this.recordButton.className = 'voice-control__record';
     this.recordButton.textContent = IDLE_LABEL[this.engine];
+    const hint = document.createElement('kbd');
+    hint.className = 'voice-control__hint';
+    hint.textContent = 'V';
     this.cancelButton = document.createElement('button');
     this.cancelButton.type = 'button';
     this.cancelButton.className = 'voice-control__cancel';
     this.cancelButton.textContent = 'Cancel';
     this.cancelButton.hidden = true;
+    row.append(this.recordButton, hint, this.cancelButton);
+
+    const settings = document.createElement('details');
+    settings.className = 'voice-control__settings';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Settings';
     const engineLabel = document.createElement('label');
     engineLabel.className = 'voice-control__engine';
     engineLabel.textContent = 'Recognizer ';
     this.engineSelect = document.createElement('select');
     this.engineSelect.className = 'voice-control__engine-select';
+    this.engineSelect.setAttribute('aria-label', 'Recognizer');
     for (const engine of VOICE_ENGINES) {
       const option = document.createElement('option');
       option.value = engine;
@@ -73,12 +96,17 @@ export class VoiceControl {
     }
     this.engineSelect.value = this.engine;
     engineLabel.appendChild(this.engineSelect);
+    this.help = document.createElement('p');
+    this.help.className = 'voice-control__help';
+    this.help.textContent = IDLE_STATUS[this.engine];
+    settings.append(summary, engineLabel, this.help);
+
     this.status = document.createElement('p');
     this.status.className = 'voice-control__status';
     this.status.setAttribute('role', 'status');
     this.status.setAttribute('aria-live', 'polite');
-    this.status.textContent = IDLE_STATUS[this.engine];
-    panel.append(this.recordButton, this.cancelButton, engineLabel, this.status);
+    this.status.hidden = true;
+    panel.append(row, settings, this.status);
     host.appendChild(panel);
 
     this.recordButton.addEventListener('click', () => {
@@ -90,14 +118,20 @@ export class VoiceControl {
       this.cancel();
     });
     this.engineSelect.addEventListener('change', () => this.setEngine(this.engineSelect.value));
-    const stopKeys = (event: Event): void => event.stopPropagation();
-    panel.addEventListener('keydown', stopKeys);
-    panel.addEventListener('keyup', stopKeys);
-    window.addEventListener('pagehide', () => this.cancel());
+    panel.addEventListener('keydown', (event) => event.stopPropagation());
+    window.addEventListener('pagehide', () => {
+      this.clearSuccessTimer();
+      this.cancel();
+    });
   }
 
   get activeEngine(): VoiceEngine {
     return this.engine;
+  }
+
+  /** A recognizer/recorder request is in flight until its controller clears. */
+  get busy(): boolean {
+    return this.controller !== null;
   }
 
   /** Switching mid-request would orphan the microphone, so the select is disabled then. */
@@ -109,7 +143,11 @@ export class VoiceControl {
     this.engine = value;
     saveVoiceEngine(value, this.options.storage);
     this.engineSelect.value = value;
-    this.status.textContent = IDLE_STATUS[value];
+    this.clearSuccessTimer();
+    this.outcome = null;
+    this.help.textContent = IDLE_STATUS[value];
+    this.status.textContent = '';
+    this.status.hidden = true;
     this.recordButton.textContent = IDLE_LABEL[value];
   }
 
@@ -124,6 +162,7 @@ export class VoiceControl {
 
   async listen(): Promise<void> {
     if (this.controller) return;
+    this.prepareRequest();
     const controller = new AbortController();
     this.controller = controller;
     this.committed = false;
@@ -179,6 +218,7 @@ export class VoiceControl {
   /** Opt-in `qwen` path: record WAV audio and let the Python server transcribe it. */
   async record(): Promise<void> {
     if (this.controller) return;
+    this.prepareRequest();
     const controller = new AbortController();
     this.controller = controller;
     let timedOut = false;
@@ -222,7 +262,8 @@ export class VoiceControl {
       const result = this.options.execute(command, target);
       if (!result.ok) throw new Error(result.error);
       console.info('[voice] executed', { kind: target.operation.kind, command, message: result.message });
-      this.status.textContent = `Heard: ${typeof data.transcript === 'string' ? data.transcript : ''}\n${result.message}`;
+      this.status.textContent = `Heard: ${typeof data.transcript === 'string' ? data.transcript : ''}\n${appliedLabel(target.operation.kind, command.distance_mm)}`;
+      this.setOutcome('success', appliedLabel(target.operation.kind, command.distance_mm));
       this.options.notify(result.message, false);
     } catch (error) {
       this.reportFailure(controller, error, timedOut);
@@ -265,6 +306,7 @@ export class VoiceControl {
     const detail = aborted ? (timedOut ? 'Voice request timed out' : 'Voice request cancelled')
       : error instanceof Error ? error.message : 'Voice command failed';
     this.status.textContent = aborted ? detail : `${detail} — V retries the frozen draft, Esc cancels it`;
+    this.setOutcome('error', aborted ? detail : `${detail} — V retries the frozen draft, Esc cancels it`);
     console.error('[voice] error', detail);
     this.options.notify('Voice command failed; see the voice panel', true);
   }
@@ -278,7 +320,8 @@ export class VoiceControl {
     if (this.committed) return;
     this.lastTranscript = hypothesis.transcript;
     this.lastAlternatives = hypothesis.alternatives;
-    this.status.textContent = `Heard: ${hypothesis.transcript}\n${target.description} — say units to apply, or press V to confirm a number.`;
+    this.status.hidden = false;
+    this.status.textContent = `${target.description}\nHeard: ${hypothesis.transcript}`;
     const parsed = pickMeasurement(hypothesis.alternatives, hypothesis.isFinal ? 'final' : 'interim');
     if (parsed) this.applyMeasurement(parsed, target, finishOk, finishErr);
   }
@@ -304,12 +347,39 @@ export class VoiceControl {
       this.committed = true;
       console.info('[voice] transcript', this.lastTranscript);
       console.info('[voice] executed', { kind: target.operation.kind, command, message: result.message });
-      this.status.textContent = `Heard: ${this.lastTranscript}\n${result.message}`;
+      this.setOutcome('success', appliedLabel(target.operation.kind, command.distance_mm));
       this.options.notify(result.message, false);
       finishOk();
     } catch (error) {
       finishErr(error);
     }
+  }
+
+  private prepareRequest(): void {
+    this.clearSuccessTimer();
+    this.outcome = null;
+    this.status.hidden = false;
+  }
+
+  private clearSuccessTimer(): void {
+    if (this.successTimer === null) return;
+    clearTimeout(this.successTimer);
+    this.successTimer = null;
+  }
+
+  private setOutcome(kind: VoiceOutcome['kind'], text: string): void {
+    this.outcome = { kind, text };
+    this.status.hidden = false;
+    this.status.textContent = text;
+    this.clearSuccessTimer();
+    if (kind !== 'success') return;
+    this.successTimer = setTimeout(() => {
+      this.successTimer = null;
+      if (this.outcome?.kind !== 'success') return;
+      this.outcome = null;
+      this.status.textContent = '';
+      this.status.hidden = true;
+    }, SUCCESS_MS);
   }
 
   private setPhase(phase: VoicePhase): void {
@@ -321,24 +391,35 @@ export class VoiceControl {
       case 'idle':
         this.recordButton.disabled = false;
         this.recordButton.textContent = IDLE_LABEL[this.engine];
+        if (this.outcome) {
+          this.status.hidden = false;
+          this.status.textContent = this.outcome.text;
+        } else {
+          this.status.textContent = '';
+          this.status.hidden = true;
+        }
         break;
       case 'listening':
         this.recordButton.disabled = false;
         this.recordButton.textContent = 'Confirm number';
+        this.status.hidden = false;
         this.status.textContent = `Listening… ${this.activeTarget?.description ?? ''} — say a distance with units, or press V to confirm a number.`;
         break;
       case 'opening':
         this.recordButton.disabled = true;
         this.recordButton.textContent = 'Opening microphone…';
+        this.status.hidden = false;
         break;
       case 'recording':
         this.recordButton.disabled = false;
         this.recordButton.textContent = 'Stop and send';
+        this.status.hidden = false;
         this.status.textContent = `Recording… ${this.activeTarget?.description ?? ''} — speak, then press V or click Stop and send (10 s maximum).`;
         break;
       case 'sending':
         this.recordButton.disabled = true;
         this.recordButton.textContent = 'Waiting for Qwen…';
+        this.status.hidden = false;
         this.status.textContent = `Waiting for Qwen… ${this.activeTarget?.description ?? ''}`;
         break;
     }

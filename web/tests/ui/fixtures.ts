@@ -119,12 +119,49 @@ export interface TrackerFixture {
   failNextPost(status: number, error: string): void;
 }
 
-export const test = base.extend<{ trackerSnapshot: TrackerSnapshot; tracker: TrackerFixture }>({
+export const test = base.extend<{ trackerSnapshot: TrackerSnapshot; tracker: TrackerFixture; fakeSpeech: boolean }>({
   trackerSnapshot: [trackerStatus, { option: true }],
+  fakeSpeech: [false, { option: true }],
   // Auto: routes must exist before the page navigates, even when a test never
   // touches the tracker fixture directly.
   tracker: [
-    async ({ page, trackerSnapshot }, use) => {
+    async ({ page, trackerSnapshot, fakeSpeech }, use) => {
+      if (fakeSpeech) {
+        await page.addInitScript(() => {
+          type SpeechResult = { isFinal: boolean; length: number; [index: number]: { transcript: string } };
+          class FakeSpeechRecognition {
+            continuous = false;
+            interimResults = false;
+            maxAlternatives = 1;
+            lang = '';
+            onresult: ((event: { resultIndex: number; results: SpeechResult[] }) => void) | null = null;
+            onerror: ((event: { error: string }) => void) | null = null;
+            onend: (() => void) | null = null;
+            start(): void {
+              (window as unknown as { __aircadSpeech: FakeSpeechRecognition | null }).__aircadSpeech = this;
+            }
+            stop(): void {
+              this.onend?.();
+            }
+            abort(): void {
+              this.onerror?.({ error: 'aborted' });
+              this.onend?.();
+            }
+            emit(isFinal: boolean, transcript: string): void {
+              const result = { isFinal, length: 1, 0: { transcript } } as SpeechResult;
+              this.onresult?.({ resultIndex: 0, results: [result] });
+            }
+          }
+          const w = window as unknown as {
+            SpeechRecognition: typeof FakeSpeechRecognition;
+            webkitSpeechRecognition: typeof FakeSpeechRecognition;
+            __aircadSpeech: FakeSpeechRecognition | null;
+          };
+          w.SpeechRecognition = FakeSpeechRecognition;
+          w.webkitSpeechRecognition = FakeSpeechRecognition;
+          w.__aircadSpeech = null;
+        });
+      }
       let socket: WebSocketRoute | null = null;
       let refuseConnections = false;
       let postFailure: { status: number; error: string } | null = null;

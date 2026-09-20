@@ -6,9 +6,17 @@ import {
   CIRCLE_READONLY,
   deleteAvailability,
   dimensionsAvailability,
+  displayStyleAvailability,
   entityLabel,
+  EMPTY_PRESENTATION,
+  EMPTY_SAVE,
+  fileAvailability,
+  PRESENTATION_ACTIONS,
+  PRESENTING_FIRST,
   pressAvailability,
+  presentationAllows,
   pushPullAvailability,
+  revealAvailability,
   undoRedoAvailability,
   viewAvailability,
   workPlaneAvailability,
@@ -32,7 +40,7 @@ const prism: PrismEntity = { id: 'e7', type: 'prism', corners: triangle.corners,
 const idle = { drawing: false, extruding: false };
 const drawing = { drawing: true, extruding: false };
 const extruding = { drawing: false, extruding: true };
-const base = { selected: null as Entity | null, canUndo: false, canRedo: false, entityCount: 0 };
+const base = { selected: null as Entity | null, canUndo: false, canRedo: false, entityCount: 0, presenting: false, sessionBlockReason: null as string | null };
 
 describe('entityLabel', () => {
   it('labels entities with type and stable id', () => {
@@ -127,7 +135,7 @@ describe('command availability', () => {
 });
 
 describe('pressAvailability', () => {
-  const ctx = { ...idle, selected: rect, canUndo: true, canRedo: false, entityCount: 1 };
+  const ctx = { ...base, ...idle, selected: rect, canUndo: true, entityCount: 1 };
 
   it('mirrors the per-command helpers', () => {
     expect(pressAvailability('undo', ctx).enabled).toBe(true);
@@ -146,5 +154,51 @@ describe('pressAvailability', () => {
       expect(result.enabled).toBe(false);
       expect(result.reason).toBeTruthy();
     }
+  });
+});
+
+describe('presentation guards', () => {
+  const presenting = { ...base, ...idle, presenting: true, entityCount: 1 };
+
+  it('keeps only the view allowlist live while presenting', () => {
+    for (const action of ['reveal', 'cancel', 'viewTop', 'viewFront', 'viewRight', 'viewIso', 'toggleProjection', 'fitAll', 'zoomIn', 'zoomOut'] as const) {
+      expect(presentationAllows(action)).toBe(true);
+      expect(pressAvailability(action, presenting).enabled).toBe(true);
+    }
+    for (const action of ['select', 'move', 'scale', 'extrude', 'undo', 'redo', 'delete', 'clear', 'cyclePlane', 'toggleAutoPlane', 'toggleGrid', 'measure', 'voice', 'export', 'togglePip', 'toggleNavAssist', 'help', 'setOrigin', 'recenter', 'confirm', 'saveSketch', 'openSketch'] as const) {
+      expect(presentationAllows(action)).toBe(false);
+      const result = pressAvailability(action, presenting);
+      expect(result.enabled).toBe(false);
+      expect(result.reason).toBe(PRESENTING_FIRST);
+    }
+    expect(PRESENTATION_ACTIONS.size).toBe(10);
+  });
+
+  it('disables the display style select while presenting or in a session', () => {
+    expect(displayStyleAvailability(presenting).reason).toBe(PRESENTING_FIRST);
+    expect(displayStyleAvailability({ presenting: false, sessionBlockReason: STROKE_FIRST }).reason).toBe(STROKE_FIRST);
+    expect(displayStyleAvailability({ presenting: false, sessionBlockReason: null }).enabled).toBe(true);
+  });
+
+  it('reveal requires an idle, nonempty sketch and exits while presenting', () => {
+    expect(revealAvailability({ presenting: false, sessionBlockReason: null, entityCount: 0 }).reason).toBe(EMPTY_PRESENTATION);
+    expect(revealAvailability({ presenting: false, sessionBlockReason: STROKE_FIRST, entityCount: 1 }).reason).toBe(STROKE_FIRST);
+    expect(revealAvailability({ presenting: false, sessionBlockReason: null, entityCount: 1 }).enabled).toBe(true);
+    expect(revealAvailability({ presenting: true, sessionBlockReason: null, entityCount: 1 }).enabled).toBe(true);
+    // A blocked session also stops reveal through the shared press predicate.
+    const blocked = pressAvailability('reveal', { ...base, ...drawing, sessionBlockReason: STROKE_FIRST });
+    expect(blocked.enabled).toBe(false);
+    expect(blocked.reason).toBe(STROKE_FIRST);
+  });
+});
+
+describe('file availability', () => {
+  it('requires an idle nonempty sketch to save and idle editing to open', () => {
+    expect(fileAvailability({ presenting: false, sessionBlockReason: null, entityCount: 0 }, 'save').reason).toBe(EMPTY_SAVE);
+    expect(fileAvailability({ presenting: false, sessionBlockReason: null, entityCount: 0 }, 'open').enabled).toBe(true);
+    expect(fileAvailability({ presenting: false, sessionBlockReason: STROKE_FIRST, entityCount: 1 }, 'save').reason).toBe(STROKE_FIRST);
+    expect(fileAvailability({ presenting: true, sessionBlockReason: null, entityCount: 1 }, 'open').reason).toBe(PRESENTING_FIRST);
+    expect(pressAvailability('saveSketch', { ...base, ...idle, entityCount: 1 }).enabled).toBe(true);
+    expect(pressAvailability('openSketch', { ...base, ...idle, entityCount: 0 }).enabled).toBe(true);
   });
 });

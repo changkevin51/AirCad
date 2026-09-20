@@ -3,8 +3,9 @@ import * as THREE from 'three';
 import type { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import type { EdgeGuide } from '../model/edge-inference';
 import type { Viewport } from '../scene/viewport';
+import { entityTriangles, makeRect, type Entity } from '../model/sketch';
 import { v3 } from '../model/vec';
-import { SketchRenderer } from './sketch-renderer';
+import { COLORS, SketchRenderer } from './sketch-renderer';
 
 vi.mock('three/addons/renderers/CSS2DRenderer.js', async () => {
   const { Object3D } = await import('three');
@@ -181,5 +182,167 @@ describe('edge guide visuals', () => {
       expect(material.resolution.x).toBe(1024);
       expect(material.resolution.y).toBe(768);
     }
+  });
+});
+
+const lineEntity: Entity = { id: 'e1', type: 'line', a: v3(0, 0, 0), b: v3(4000, 0, 0) };
+const rectEntity: Entity = {
+  id: 'e2',
+  type: 'rect',
+  corners: makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000),
+};
+const boxEntity: Entity = { id: 'e3', type: 'extrusion', corners: rectEntity.corners, depth: 2500 };
+const negativeBox: Entity = { id: 'e4', type: 'extrusion', corners: rectEntity.corners, depth: -2500 };
+const triangleEntity: Entity = {
+  id: 'e5',
+  type: 'triangle',
+  corners: [v3(0, 0, 0), v3(4000, 0, 0), v3(2000, 0, 1500)],
+};
+const reversedTriangle: Entity = {
+  id: 'e6',
+  type: 'triangle',
+  corners: [v3(0, 0, 0), v3(2000, 0, 1500), v3(4000, 0, 0)],
+};
+const concaveEntity: Entity = {
+  id: 'e7',
+  type: 'polygon',
+  corners: [v3(0, 0, 0), v3(400, 0, 0), v3(400, 100, 0), v3(100, 100, 0), v3(100, 300, 0), v3(400, 300, 0), v3(400, 400, 0), v3(0, 400, 0)],
+};
+const prismEntity: Entity = { id: 'e8', type: 'prism', corners: triangleEntity.corners, depth: 3000 };
+const circleEntity: Entity = { id: 'e9', type: 'circle', center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 50 };
+
+describe('display style and presentation batches', () => {
+  beforeEach(stubDocument);
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('keeps X-ray faces translucent without depth writes', () => {
+    const { viewport } = makeViewport();
+    const renderer = new SketchRenderer(viewport);
+    renderer.setSketch([boxEntity]);
+    const faces = named(renderer.group, 'committed-faces') as THREE.Mesh;
+    const material = faces.material as THREE.MeshBasicMaterial;
+    expect(material).toBeInstanceOf(THREE.MeshBasicMaterial);
+    expect(material.opacity).toBe(0.12);
+    expect(material.depthWrite).toBe(false);
+    expect(material.transparent).toBe(true);
+    expect((named(renderer.group, 'vertex-markers') as THREE.Points).material).toMatchObject({ depthTest: false });
+  });
+
+  it('switches committed faces to an opaque Lambert material in Shaded', () => {
+    const { viewport } = makeViewport();
+    const renderer = new SketchRenderer(viewport);
+    renderer.setSketch([boxEntity]);
+    const faces = named(renderer.group, 'committed-faces') as THREE.Mesh;
+    const xrayGeometry = faces.geometry;
+    renderer.setDisplayStyle('shaded');
+    const material = faces.material as THREE.MeshLambertMaterial;
+    expect(material).toBeInstanceOf(THREE.MeshLambertMaterial);
+    expect(material.depthWrite).toBe(true);
+    expect(material.depthTest).toBe(true);
+    expect(material.side).toBe(THREE.DoubleSide);
+    expect(material.polygonOffset).toBe(true);
+    expect(material.color.getHex()).toBe(0xbcc6d2);
+    expect((named(renderer.group, 'vertex-markers') as THREE.Points).material).toMatchObject({ depthTest: true });
+    expect(faces.geometry).toBe(xrayGeometry);
+  });
+
+  it('splits standalone wires from profile and solid outlines', () => {
+    const { viewport } = makeViewport();
+    const renderer = new SketchRenderer(viewport);
+    renderer.setSketch([lineEntity, rectEntity, boxEntity]);
+    const wires = named(renderer.group, 'committed-wires') as LineSegments2;
+    const edges = named(renderer.group, 'committed-edges') as LineSegments2;
+    expect(positions(wires).count).toBe(1);
+    expect(positions(wires).start).toEqual([0, 0, 0]);
+    expect(positions(wires).end).toEqual([4000, 0, 0]);
+    expect(positions(edges).count).toBe(4 + 12);
+    renderer.setDisplayStyle('shaded');
+    expect((edges.material as { color: THREE.Color }).color.getHex()).toBe(0x4d5866);
+    expect((wires.material as { color: THREE.Color }).color.getHex()).toBe(COLORS.line);
+  });
+
+  it('computes face normals on buffer replacement for every entity type', () => {
+    const { viewport } = makeViewport();
+    const renderer = new SketchRenderer(viewport);
+    const entities: Entity[] = [rectEntity, boxEntity, negativeBox, triangleEntity, reversedTriangle, concaveEntity, prismEntity, circleEntity];
+    renderer.setSketch(entities);
+    const faces = named(renderer.group, 'committed-faces') as THREE.Mesh;
+    const normals = faces.geometry.getAttribute('normal');
+    const positionsAttr = faces.geometry.getAttribute('position');
+    expect(normals).toBeTruthy();
+    expect(normals.count).toBe(positionsAttr.count);
+    expect(positionsAttr.count).toBeGreaterThan(0);
+    for (let index = 0; index < normals.count * normals.itemSize; index++) {
+      expect(Number.isFinite(normals.array[index])).toBe(true);
+    }
+  });
+
+  it('bakes face positions straight from entityTriangles for signed, reversed and concave entities', () => {
+    const { viewport } = makeViewport();
+    const renderer = new SketchRenderer(viewport);
+    const entities: Entity[] = [negativeBox, reversedTriangle, concaveEntity, prismEntity];
+    renderer.setSketch(entities);
+    const faces = named(renderer.group, 'committed-faces') as THREE.Mesh;
+    const expected = entities.flatMap((entity) =>
+      entityTriangles(entity).flatMap((triangle) => triangle.flatMap((p) => [p.x, p.y, p.z])),
+    );
+    expect(Array.from(faces.geometry.getAttribute('position').array as Float32Array)).toEqual(expected);
+  });
+
+  it('does not rebuild committed geometry when toggling style or Reveal', () => {
+    const { viewport } = makeViewport();
+    const renderer = new SketchRenderer(viewport);
+    renderer.setSketch([lineEntity, boxEntity]);
+    const faces = named(renderer.group, 'committed-faces') as THREE.Mesh;
+    const edges = named(renderer.group, 'committed-edges') as LineSegments2;
+    const wires = named(renderer.group, 'committed-wires') as LineSegments2;
+    const faceGeo = faces.geometry;
+    const edgeGeo = edges.geometry;
+    const wireGeo = wires.geometry;
+    renderer.setDisplayStyle('shaded');
+    renderer.setPresentation(true);
+    renderer.setDisplayStyle('xray');
+    renderer.setPresentation(false);
+    expect(faces.geometry).toBe(faceGeo);
+    expect(edges.geometry).toBe(edgeGeo);
+    expect(wires.geometry).toBe(wireGeo);
+  });
+
+  it('hides the overlay group during presentation even if setters run', () => {
+    const { viewport } = makeViewport();
+    const renderer = new SketchRenderer(viewport);
+    renderer.setSketch([rectEntity]);
+    const overlays = named(renderer.group, 'sketch-overlays');
+    expect(overlays.visible).toBe(true);
+    renderer.setPresentation(true);
+    expect(overlays.visible).toBe(false);
+    renderer.setHover(rectEntity);
+    renderer.setSelected(rectEntity);
+    renderer.setInk([v3(0, 0, 0), v3(10, 0, 0)]);
+    renderer.setGhost([v3(0, 0, 0), v3(10, 0, 0), v3(10, 10, 0)], false, null);
+    expect(overlays.visible).toBe(false);
+    expect(named(renderer.group, 'committed-faces').visible).toBe(true);
+    renderer.setPresentation(false);
+    expect(overlays.visible).toBe(true);
+  });
+
+  it('updates wire material resolution and disposes replaced geometries', () => {
+    const { viewport, raw, resize } = makeViewport();
+    const renderer = new SketchRenderer(viewport);
+    renderer.setSketch([lineEntity, rectEntity]);
+    const wires = named(renderer.group, 'committed-wires') as LineSegments2;
+    const faces = named(renderer.group, 'committed-faces') as THREE.Mesh;
+    const firstWire = wires.geometry;
+    const firstFaces = faces.geometry;
+    const disposeWire = vi.spyOn(firstWire, 'dispose');
+    const disposeFaces = vi.spyOn(firstFaces, 'dispose');
+    renderer.setSketch([lineEntity]);
+    expect(disposeWire).toHaveBeenCalled();
+    expect(disposeFaces).toHaveBeenCalled();
+    raw.width = 1280;
+    raw.height = 720;
+    resize.forEach((cb) => cb());
+    expect((wires.material as { resolution: THREE.Vector2 }).resolution.x).toBe(1280);
+    expect((wires.material as { resolution: THREE.Vector2 }).resolution.y).toBe(720);
   });
 });

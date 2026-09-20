@@ -83,7 +83,7 @@ If Windows or macOS asked for camera access on first launch, allow it and start 
 4. **Tab** until **YZ Right** and repeat the same border-start stroke on a side border; do the same on the remaining borders (Tab back to **XZ** or **YZ** so the plane stands on that border) to raise the other walls.
 5. Roof: hover a wall top corner, hold **Space** and draw a straight line to the opposite wall top. Vertex snaps connect the ends.
 6. **A** switches to optional **Auto** mode, where the work plane follows the view and what you hover — a face interior, an edge, or a vertex. Check the plane preview before drawing and press **Tab** or **1 / 2 / 3** to pick a plane when the choice is ambiguous. The plane locks while you draw and never moves mid-stroke.
-7. Press **L** to type an exact size (`4000` or `4000x3000`) for the selected, hovered, or last entity, **E** to export to FreeCAD.
+7. Press **L** to type an exact size (`4000` or `4000x3000`) for the selected, hovered, or last entity. **Ctrl+S** saves a local JSON download; **Ctrl+O** opens one (replacing the scene and clearing undo). **E** still exports to FreeCAD.
 
 **H** opens the same walkthrough plus the full key list.
 
@@ -125,6 +125,8 @@ Keys stand in for pen buttons. Click the browser window first so it receives inp
 | **1 / 2 / 3** | Top / Front / Right view (also pins the work plane to XY / XZ / YZ) |
 | **0** | Isometric view |
 | **5** | Orthographic / perspective |
+| **Display** | X-ray (see-through) or Shaded (opaque faces) in the view header |
+| **D** | Reveal the finished model / return to editing |
 | **F** | Fit the sketch in view |
 | **= / -** | Zoom in / out around the cursor (or use the mouse wheel) |
 
@@ -159,6 +161,8 @@ Roughly matching adjacent rectangles align along the entire shared border, with 
 | **Enter** | Apply the move, scale, or extrusion preview |
 | **L** | Type a line length, rectangle size (W x H), or extrusion depth; mm/cm/m accepted |
 | **V** | Speak a distance for the active line or face pull (recognizer picked in the voice panel) |
+| **Ctrl+S** / **Cmd+S** | Save the sketch as a local JSON download (no autosave) |
+| **Ctrl+O** / **Cmd+O** | Open a local AirCAD JSON sketch (replaces the scene and clears undo) |
 | **E** | Export to FreeCAD |
 | **P** | Camera picture-in-picture |
 | **H** | Help overlay |

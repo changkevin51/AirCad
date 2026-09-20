@@ -34,12 +34,37 @@ async function ensureVisible(page: Page, toggle: Locator, panel: Locator): Promi
   await expect(panel).toBeVisible();
 }
 
+async function seedHouse(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const api = (window as any).aircad;
+    const rect = api.commands.addRect([
+      { x: 0, y: 0, z: 0 },
+      { x: 4000, y: 0, z: 0 },
+      { x: 4000, y: 3000, z: 0 },
+      { x: 0, y: 3000, z: 0 },
+    ]);
+    if (!rect.ok) throw new Error(rect.error);
+    const body = api.commands.extrude(rect.entity.id, 2500);
+    if (!body.ok) throw new Error(body.error);
+    const roof = api.commands.addTriangle([
+      { x: 0, y: 0, z: 2500 },
+      { x: 4000, y: 0, z: 2500 },
+      { x: 2000, y: 0, z: 4000 },
+    ]);
+    if (!roof.ok) throw new Error(roof.error);
+    const prism = api.commands.extrude(roof.entity.id, 3000);
+    if (!prism.ok) throw new Error(prism.error);
+    api.press('fitAll');
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  });
+}
+
 async function seedRectangle(page: Page): Promise<string> {
   const id = await page.evaluate(async (corners) => {
     const api = (window as any).aircad;
     const result = api.commands.addRect(corners);
     if (!result.ok) throw new Error(`seed failed: ${result.error}`);
-    api.press('viewFit');
+    api.press('fitAll');
     // Let the fit-view transition finish before projecting.
     await new Promise((resolve) => setTimeout(resolve, 700));
     return result.entity.id as string;
@@ -123,7 +148,7 @@ for (const size of SIZES) {
       // Collapsing each panel must not disturb selection or drawing.
       await browserToggle(page).click();
       await inspectorToggle(page).click();
-      await page.evaluate(() => (window as any).aircad.press('escape'));
+      await page.evaluate(() => (window as any).aircad.press('cancel'));
       await clickEntity(page, id);
       await expect.poll(() => selectedId(page)).toBe(id);
     });
@@ -212,7 +237,7 @@ test.describe('workspace layout at 1920x1080', () => {
       const api = (window as any).aircad;
       const line = api.commands.addLine({ x: 0, y: 0, z: 0 }, { x: 4000, y: 0, z: 0 });
       if (!line.ok) throw new Error(`line seed failed: ${line.error}`);
-      api.press('viewFit');
+      api.press('fitAll');
       await new Promise((resolve) => setTimeout(resolve, 700));
     });
     const local = await page.evaluate(() => (window as any).aircad.project({ x: 2000, y: 0, z: 0 }));
@@ -232,12 +257,192 @@ test.describe('workspace layout at 1920x1080', () => {
       if (!rect.ok) throw new Error(`rect seed failed: ${rect.error}`);
       const extruded = api.commands.extrude(rect.entity.id, 800);
       if (!extruded.ok) throw new Error(`extrude failed: ${extruded.error}`);
-      api.press('viewFit');
+      api.press('fitAll');
       await new Promise((resolve) => setTimeout(resolve, 700));
       return rect.entity.id as string;
     });
     await page.getByRole('option', { name: /Box/ }).click();
     await expect.poll(() => selectedId(page)).toBe(boxId);
     await page.screenshot({ path: path.join(REVIEW_DIR, 'selected-box.png'), fullPage: false });
+  });
+});
+
+test.describe('presentation', () => {
+  test.use({ viewport: { width: 1280, height: 720 } });
+
+  test.beforeEach(async ({ page }) => {
+    fs.mkdirSync(REVIEW_DIR, { recursive: true });
+    await page.goto('/');
+    await expect(page.locator('.ws-app-bar')).toBeVisible();
+  });
+
+  test('Reveal is disabled on an empty sketch and Display stays on X-ray', async ({ page }) => {
+    const reveal = page.getByRole('button', { name: /^Reveal/ });
+    await expect(reveal).toBeDisabled();
+    await expect(page.getByRole('combobox', { name: 'Display style' })).toHaveValue('xray');
+  });
+
+  test('enters a read-only Reveal and restores the editing layout', async ({ page }) => {
+    await seedHouse(page);
+    const reveal = page.getByRole('button', { name: /^Reveal/ });
+    await expect(reveal).toBeEnabled();
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'house-xray-1280x720.png') });
+    await page.getByRole('combobox', { name: 'Display style' }).selectOption('shaded');
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'house-shaded-1280x720.png') });
+
+    await reveal.click();
+    await expect(page.locator('.workspace')).toHaveClass(/ws--presentation/);
+    await expect(page.locator('.ws-app-bar')).toBeHidden();
+    await expect(page.locator('.ws-command-bar')).toBeHidden();
+    await expect(browserPanel(page)).toBeHidden();
+    await expect(inspectorPanel(page)).toBeHidden();
+    await expect(page.getByRole('button', { name: /Back to editing/ })).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Display style' })).toBeHidden();
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'reveal-1280x720.png') });
+
+    const size = await page.evaluate(() => (window as any).aircad.sketch.size);
+    await page.keyboard.press('Delete');
+    expect(await page.evaluate(() => (window as any).aircad.sketch.size)).toBe(size);
+
+    await page.getByRole('button', { name: /Back to editing/ }).click();
+    await expect(page.locator('.ws-app-bar')).toBeVisible();
+    await expect(page.locator('.ws-command-bar')).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Display style' })).toHaveValue('shaded');
+    expect(await page.evaluate(() => (window as any).aircad.sketch.size)).toBe(size);
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'restored-editing-1280x720.png') });
+  });
+
+  test('D and Esc toggle Reveal and F6 stays on visible regions', async ({ page }) => {
+    await seedRectangle(page);
+    await page.locator('.viewport').focus();
+    await page.keyboard.press('d');
+    await expect(page.locator('.workspace')).toHaveClass(/ws--presentation/);
+    await page.keyboard.press('F6');
+    await expect(page.locator('.ws-view-header')).toContainText('Back to editing');
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.ws-app-bar')).toBeVisible();
+  });
+
+  test('focusing a guarded control mid-draft does not destroy the stroke', async ({ page }) => {
+    const box = await viewportEl(page).boundingBox();
+    expect(box).not.toBeNull();
+    await page.mouse.move(box!.x + 300, box!.y + 300);
+    await page.mouse.down();
+    await page.mouse.move(box!.x + 520, box!.y + 220, { steps: 5 });
+    // Focus lands on the marked Display select; the draft must survive it.
+    await page.getByRole('combobox', { name: 'Display style' }).focus();
+    await page.mouse.up();
+    await expect.poll(() => page.evaluate(() => (window as any).aircad.sketch.size)).toBeGreaterThan(0);
+  });
+});
+
+test.describe('presentation at 1440x900', () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test.beforeEach(async ({ page }) => {
+    fs.mkdirSync(REVIEW_DIR, { recursive: true });
+    await page.goto('/');
+    await expect(page.locator('.ws-app-bar')).toBeVisible();
+  });
+
+  test('Reveal is read-only for pointer input and restores open panels', async ({ page }) => {
+    await seedHouse(page);
+    await ensureVisible(page, inspectorToggle(page), inspectorPanel(page));
+
+    await page.getByRole('button', { name: /^Reveal/ }).click();
+    await expect(page.locator('.workspace')).toHaveClass(/ws--presentation/);
+    await expect(inspectorPanel(page)).toBeHidden();
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'reveal-readonly-1440x900.png') });
+
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(overflow).toBeLessThanOrEqual(1441);
+
+    const box = await viewportEl(page).boundingBox();
+    expect(box).not.toBeNull();
+    const point = await page.evaluate(() => (window as any).aircad.project({ x: 2000, y: 1500, z: 1250 }));
+    expect(point).not.toBeNull();
+    await page.mouse.click(box!.x + point!.x, box!.y + point!.y);
+    expect(await selectedId(page)).toBeNull();
+
+    const size = await page.evaluate(() => (window as any).aircad.sketch.size);
+    await page.mouse.move(box!.x + 400, box!.y + 300);
+    await page.mouse.down();
+    await page.mouse.move(box!.x + 600, box!.y + 220, { steps: 5 });
+    await page.mouse.up();
+    expect(await page.evaluate(() => (window as any).aircad.sketch.size)).toBe(size);
+
+    const planeBefore = await page.evaluate(() => {
+      const api = (window as any).aircad;
+      return { kind: api.plane().kind, mode: api.planeMode() };
+    });
+    await page.getByRole('button', { name: /^Top/ }).click();
+    const planeAfter = await page.evaluate(() => {
+      const api = (window as any).aircad;
+      return { kind: api.plane().kind, mode: api.planeMode() };
+    });
+    expect(planeAfter).toEqual(planeBefore);
+
+    await page.keyboard.press('d');
+    await expect(page.locator('.ws-app-bar')).toBeVisible();
+    await expect(inspectorPanel(page)).toBeVisible();
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'reveal-restored-1440x900.png') });
+  });
+
+  test('Reveal screenshots at the larger review size', async ({ page }) => {
+    await seedHouse(page);
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'house-xray-1440x900.png') });
+    await page.getByRole('combobox', { name: 'Display style' }).selectOption('shaded');
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'house-shaded-1440x900.png') });
+    await page.getByRole('button', { name: /^Reveal/ }).click();
+    await expect(page.locator('.workspace')).toHaveClass(/ws--presentation/);
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'reveal-1440x900.png') });
+    await page.getByRole('button', { name: /Back to editing/ }).click();
+    await expect(page.locator('.ws-app-bar')).toBeVisible();
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'restored-editing-1440x900.png') });
+  });
+});
+
+test.describe('native sketch files', () => {
+  test.use({ viewport: { width: 1280, height: 720 } });
+
+  test.beforeEach(async ({ page }) => {
+    fs.mkdirSync(REVIEW_DIR, { recursive: true });
+    await page.goto('/');
+    await expect(page.locator('.ws-app-bar')).toBeVisible();
+  });
+
+  test('Save downloads JSON and a confirmed Open replaces the scene', async ({ page }) => {
+    await seedHouse(page);
+    const downloadPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: /^AirCAD/ }).click();
+    await page.getByRole('button', { name: /Save sketch/ }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe('aircad-sketch.aircad.json');
+    const filePath = path.join(REVIEW_DIR, download.suggestedFilename());
+    await download.saveAs(filePath);
+
+    const chooserPromise = page.waitForEvent('filechooser');
+    await page.getByRole('button', { name: /^AirCAD/ }).click();
+    await page.getByRole('button', { name: /Open sketch/ }).click();
+    const chooser = await chooserPromise;
+    await chooser.setFiles(filePath);
+    await expect(page.getByRole('heading', { name: 'Open sketch' })).toBeVisible();
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'native-open-confirm-1280x720.png') });
+    await page.getByRole('button', { name: 'Open', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).aircad.sketch.canUndo)).toBe(false);
+    expect(await page.evaluate(() => (window as any).aircad.sketch.size)).toBeGreaterThan(0);
+  });
+
+  test('invalid Open leaves the sketch unchanged', async ({ page }) => {
+    const id = await seedRectangle(page);
+    const bad = path.join(REVIEW_DIR, 'bad.json');
+    fs.writeFileSync(bad, '{oops');
+    const chooserPromise = page.waitForEvent('filechooser');
+    await page.getByRole('button', { name: /^AirCAD/ }).click();
+    await page.getByRole('button', { name: /Open sketch/ }).click();
+    const chooser = await chooserPromise;
+    await chooser.setFiles(bad);
+    await expect(page.locator('.toast')).toContainText(/JSON|valid/i);
+    expect(await page.evaluate((entityId) => (window as any).aircad.sketch.get(entityId), id)).not.toBeNull();
   });
 });

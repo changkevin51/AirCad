@@ -443,6 +443,43 @@ input:focus-visible,
   line-height: 14px;
 }
 
+.ws-view-header__display {
+  margin-left: auto;
+}
+
+.ws-view-header__reveal {
+  margin-left: 4px;
+}
+
+/* ------------------------------------------------------------ presentation */
+
+/* Reveal drops the app/command bars; explicit rows keep the viewport full. */
+.ws--presentation {
+  grid-template-rows: minmax(0, 1fr) 28px;
+}
+
+.ws--presentation .ws-app-bar,
+.ws--presentation .ws-command-bar {
+  display: none;
+}
+
+.ws--presentation .ws-main {
+  grid-row: 1;
+}
+
+.ws--presentation .ws-status-bar {
+  grid-row: 2;
+}
+
+.ws--presentation .viewport {
+  cursor: default;
+}
+
+.ws--presentation .voice-control,
+.ws--presentation .empty-state {
+  display: none;
+}
+
 /* ---------------------------------------------------------------- panels */
 
 .ws-panel {
@@ -1503,24 +1540,32 @@ input:focus-visible,
 
 .voice-control {
   position: absolute;
-  left: 12px;
+  left: 120px;
+  right: 12px;
   bottom: 12px;
   z-index: 5;
   pointer-events: auto;
-  width: min(280px, calc(100% - 24px));
-  padding: 10px 12px;
+  max-width: 400px;
+  width: min(400px, calc(100% - 132px));
+  padding: 8px 10px;
   border: 1px solid var(--cad-separator);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--cad-panel) 92%, transparent);
-  backdrop-filter: blur(6px);
+  border-radius: 4px;
+  background: var(--cad-panel);
   color: var(--cad-text);
   font-size: 12px;
 }
 
+.voice-control__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 .voice-control button {
-  padding: 6px 10px;
+  padding: 4px 8px;
   border: 1px solid var(--cad-separator);
-  border-radius: 6px;
+  border-radius: 4px;
   background: var(--cad-control);
   color: var(--cad-text);
   font: inherit;
@@ -1537,8 +1582,17 @@ input:focus-visible,
   outline-offset: 2px;
 }
 
-.voice-control__cancel {
-  margin-left: 8px;
+.voice-control__hint {
+  color: var(--cad-text-2);
+}
+
+.voice-control__settings {
+  margin: 6px 0 0;
+}
+
+.voice-control__settings summary {
+  cursor: pointer;
+  color: var(--cad-text-2);
 }
 
 .voice-control__engine {
@@ -1554,7 +1608,7 @@ input:focus-visible,
   min-width: 0;
   padding: 4px 6px;
   border: 1px solid var(--cad-separator);
-  border-radius: 6px;
+  border-radius: 4px;
   background: var(--cad-control);
   color: var(--cad-text);
   font: inherit;
@@ -1571,6 +1625,7 @@ input:focus-visible,
   outline-offset: 2px;
 }
 
+.voice-control__help,
 .voice-control__status {
   margin: 8px 0 0;
   color: var(--cad-text-2);
@@ -1578,4 +1633,8 @@ input:focus-visible,
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
+}
+
+.voice-control__status {
+  color: var(--cad-text);
 }
