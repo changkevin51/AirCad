@@ -18,8 +18,8 @@ import { pickFace } from './model/pick';
 import { nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
 import { adaptiveGridStep, snapCursor, type SnapResult } from './model/snap';
 import { circlePoints, describeEntity, entityMidpoints, entityVertices, formatMm, isExtrudableProfile, Sketch, type Entity, type ExtrusionEntity } from './model/sketch';
-import { anchorAfterCommit, buildEntityFromStroke, StrokeSession } from './model/stroke';
-import { add, length2, nearlyEqual, normalize2, scale, sub2, v2, type Vec2, type Vec3 } from './model/vec';
+import { anchorAfterCommit, buildEntityFromStroke, StrokeSession, type LineMeasurement } from './model/stroke';
+import { add, dot, length2, nearlyEqual, normalize2, scale, sub2, v2, type Vec2, type Vec3 } from './model/vec';
 import { SketchRenderer } from './render/sketch-renderer';
 import { AxisTriad, createGroundGrid } from './scene/grid';
 import { OrbitController, type ViewPreset } from './scene/orbit';
@@ -83,7 +83,7 @@ class App {
   private reportedCameraError = false;
   private lastRecognition: { reason: string; points: Vec2[]; screenExtent: number } | null = null;
   private modelRevision = 0;
-  private voiceCapture: { target: VoiceTarget; revision: number } | null = null;
+  private voiceCapture: { target: VoiceTarget; revision: number; cursor: Vec2 | null; snap: SnapResult | null } | null = null;
 
   constructor(root: HTMLElement) {
     const viewportElement = document.createElement('div');
@@ -131,7 +131,7 @@ class App {
       },
       onHold: (action, down) => this.setHold(action, down),
       onWheel: (deltaY, point) => {
-        if (!this.extrusion?.dragging) this.orbit.zoom(deltaY < 0 ? 1.15 : 1 / 1.15, point);
+        if (!this.voiceCapture && !this.extrusion?.dragging) this.orbit.zoom(deltaY < 0 ? 1.15 : 1 / 1.15, point);
       },
     });
 
@@ -210,8 +210,13 @@ class App {
       if (!this.isVoiceOperationCurrent(this.voiceCapture.target)) throw new Error('Operation or geometry changed; cancel the draft and start again');
       return this.voiceCapture.target;
     }
+    this.sampleStroke();
     const target = captureVoiceTarget(this.stroke, this.extrusion, this.voiceReady());
-    this.voiceCapture = { target, revision: this.modelRevision };
+    this.voiceCapture = {
+      target, revision: this.modelRevision,
+      cursor: this.cursor.position ? { ...this.cursor.position } : null,
+      snap: this.lastSnap ? structuredClone(this.lastSnap) : null,
+    };
     this.extrusion?.pause();
     this.previousCursor = null;
     this.held.clear();
@@ -244,6 +249,7 @@ class App {
       this.extrusion = null;
       this.planeBeforeStroke = null;
       this.sketchRenderer.setInk(null);
+      this.sketchRenderer.setLineGuide(null, null);
       this.sketchRenderer.setGhost(null, false, null);
       this.sketchRenderer.setExtrusion(null);
       this.sketchRenderer.setActiveFace(null);
@@ -283,7 +289,7 @@ class App {
     if (action === 'draw') {
       if (down) this.beginStroke();
       else this.endStroke();
-    }
+    } else if (LOCK_AXES[action] && this.stroke) this.sampleStroke();
   }
 
   private get axisLock(): Axis | null {
@@ -723,6 +729,7 @@ class App {
     this.stroke = null;
     this.sketchRenderer.setGhost(null, false, null);
     this.sketchRenderer.setInk(null);
+    this.sketchRenderer.setLineGuide(null, null);
     if (stroke.screenExtent() < MIN_STROKE_PX) {
       if (this.planeBeforeStroke) this.plane = this.planeBeforeStroke;
       this.planeBeforeStroke = null;
@@ -764,13 +771,29 @@ class App {
     this.planeBeforeStroke = null;
     this.sketchRenderer.setGhost(null, false, null);
     this.sketchRenderer.setInk(null);
+    this.sketchRenderer.setLineGuide(null, null);
     this.toasts.show('Stroke cancelled');
+  }
+
+  private updateLineGuide(stroke: StrokeSession, measurement: LineMeasurement | null, locked = false): void {
+    if (!measurement) {
+      this.sketchRenderer.setLineGuide(null, null);
+      return;
+    }
+    const a = measurement.start;
+    const b = add(a, scale(measurement.direction, measurement.previewLength + this.orbit.worldPerPixel() * 160));
+    const degrees = Math.atan2(dot(measurement.direction, stroke.plane.v), dot(measurement.direction, stroke.plane.u)) * 180 / Math.PI;
+    this.sketchRenderer.setLineGuide([a, b], {
+      text: `${locked ? 'Voice direction locked' : 'Voice aim'} · ${degrees.toFixed(1)}°${locked ? '' : ' · V to lock'}`,
+      at: b,
+    });
   }
 
   private updateGhost(stroke: StrokeSession): void {
     const captured = this.voiceCapture?.target;
     if (captured && captured.source === stroke && captured.operation.kind === 'line') {
       const measurement = captured.operation.measurement;
+      this.updateLineGuide(stroke, measurement, true);
       const a = measurement.start;
       const b = add(a, scale(measurement.direction, measurement.previewLength));
       this.sketchRenderer.setInk(stroke.worldPath());
@@ -780,6 +803,7 @@ class App {
     const result = stroke.recognize();
     this.sketchRenderer.setInk(stroke.worldPath());
     const shape = result.shape;
+    this.updateLineGuide(stroke, !shape || shape.kind === 'line' ? stroke.measurement : null);
     if (!shape) {
       this.sketchRenderer.setGhost(null, false, null);
       return;
@@ -814,7 +838,7 @@ class App {
       this.extrusion?.pause();
       this.previousCursor = null;
     }
-    const cursorPx = this.cursor.position;
+    const cursorPx = this.voiceCapture ? this.voiceCapture.cursor : this.cursor.position;
     const projector = this.viewport.projector();
     const viewDirection = this.viewport.viewDirection();
     const mode = this.mode;
@@ -822,7 +846,7 @@ class App {
     const reference: Vec3 = this.stroke ? this.stroke.start.world : this.lastSnap?.raw ?? this.plane.anchor;
     this.gridStep = adaptiveGridStep(projector, this.plane, reference, GRID_MIN_PX);
 
-    const snap: SnapResult | null = cursorPx ? this.computeSnap(cursorPx) : null;
+    const snap: SnapResult | null = this.voiceCapture ? this.voiceCapture.snap : cursorPx ? this.computeSnap(cursorPx) : null;
     this.lastSnap = snap;
 
     if (this.stroke) {
@@ -906,7 +930,7 @@ class App {
         return [
           { key: key('draw'), label: 'release to commit' },
           { key: 'X / Y / Z', label: 'hold to lock axis' },
-          { key: key('voice'), label: 'voice distance' },
+          { key: key('voice'), label: 'lock aim / voice' },
           { key: key('cancel'), label: 'cancel stroke' },
         ];
       case 'ORBIT':

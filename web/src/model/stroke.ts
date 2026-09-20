@@ -5,6 +5,8 @@ import type { EntityInput, Vertex } from './sketch';
 import { add, distance2, dot, isFinite3, length, normalize, roundTo, scale, sub, type Vec2, type Vec3 } from './vec';
 
 const OBJECT_SNAPS = new Set(['vertex', 'midpoint', 'edge', 'lock']);
+const LINE_AIM_MIN_PX = 32;
+const LINE_AIM_WINDOW = 12;
 
 export const isObjectSnap = (snap: SnapResult): boolean => OBJECT_SNAPS.has(snap.type);
 
@@ -31,7 +33,8 @@ export class StrokeSession {
   private readonly rawScreen: Vec2[] = [];
   private lastSnap: SnapResult;
   private lastScreen: Vec2;
-  private measurementDirection: Vec3 | null = null;
+  private measurementEndpoint: Vec3 | null = null;
+  private measurementScreenDistance = 0;
   /** Set when the plane anchor moved to a snapped vertex at pen-down. */
   readonly anchorMoved: boolean;
 
@@ -54,13 +57,9 @@ export class StrokeSession {
   /** Add a cursor sample.  Returns false when it was too close to the last one. */
   add(snap: SnapResult, rawWorld: Vec3 | null, cursorScreen: Vec2, minScreenDistance = 2): boolean {
     this.lastSnap = snap;
-    const endpoint = snap.onPlane ? snap.world : snap.type === 'lock' ? null : rawWorld;
-    if (!this.measurementDirection && this.plane.contains(this.start.world)
-      && endpoint && isFinite3(endpoint) && this.plane.contains(endpoint)
-      && distance2(cursorScreen, this.start.screen) >= 12) {
-      const delta = sub(this.plane.project(endpoint), this.start.world);
-      if (length(delta) > 1e-6) this.measurementDirection = normalize(delta);
-    }
+    const endpoint = isObjectSnap(snap) && snap.onPlane ? snap.world : snap.type === 'lock' ? null : rawWorld;
+    this.measurementEndpoint = endpoint && isFinite3(endpoint) && this.plane.contains(endpoint) ? this.plane.project(endpoint) : null;
+    this.measurementScreenDistance = distance2(cursorScreen, this.start.screen);
     if (distance2(cursorScreen, this.lastScreen) < minScreenDistance) return false;
     this.lastScreen = cursorScreen;
     const raw = rawWorld ?? snap.world;
@@ -69,13 +68,24 @@ export class StrokeSession {
     return true;
   }
 
-  /** Signed direction and rough length for a voice-measured line, or null until the stroke clearly moves. */
   get measurement(): LineMeasurement | null {
-    const direction = this.measurementDirection;
-    if (!direction || !isFinite3(this.start.world) || !isFinite3(direction)) return null;
-    const end = this.rawPlane.length ? this.rawPlane[this.rawPlane.length - 1] : this.start.plane;
-    const previewLength = distance2(end, this.start.plane);
-    if (!Number.isFinite(end.x) || !Number.isFinite(end.y) || !Number.isFinite(previewLength)) return null;
+    const endpoint = this.measurementEndpoint;
+    if (!endpoint || !isFinite3(this.start.world) || !this.plane.contains(this.start.world)
+      || !Number.isFinite(this.measurementScreenDistance) || this.measurementScreenDistance < LINE_AIM_MIN_PX) return null;
+    const delta = sub(endpoint, this.start.world);
+    if (!isFinite3(delta) || length(delta) <= 1e-6) return null;
+    let combined = delta;
+    if (!(isObjectSnap(this.lastSnap) && this.lastSnap.onPlane)) {
+      combined = { x: 0, y: 0, z: 0 };
+      for (const point of this.rawPlane.slice(-LINE_AIM_WINDOW)) {
+        const sample = sub(this.plane.toWorld(point), this.start.world);
+        if (isFinite3(sample) && dot(sample, delta) > 0) combined = add(combined, sample);
+      }
+      if (length(combined) <= 1e-6) combined = delta;
+    }
+    const direction = normalize(combined);
+    const previewLength = dot(delta, direction);
+    if (!isFinite3(direction) || !Number.isFinite(previewLength) || previewLength <= 1e-6) return null;
     return {
       start: { ...this.start.world },
       direction: { ...direction },

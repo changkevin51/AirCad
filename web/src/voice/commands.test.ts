@@ -3,11 +3,11 @@ import { Commands } from '../model/commands';
 import { ExtrusionSession } from '../model/extrusion';
 import { profileFaces, type ProfileFace } from '../model/faces';
 import { WorkPlane, type PlaneKind } from '../model/plane';
-import { makeRect, rectFrame, Sketch, type ExtrusionEntity, type LineEntity, type ProfileEntity, type RectEntity } from '../model/sketch';
+import { makeRect, rectFrame, Sketch, type ExtrusionEntity, type LineEntity, type ProfileEntity } from '../model/sketch';
 import type { SnapResult } from '../model/snap';
 import { StrokeSession } from '../model/stroke';
 import { add, distance, nearlyEqual, scale, v2, v3, type Vec3 } from '../model/vec';
-import { captureVoiceTarget, dispatchVoiceCommand, parseVoiceCommand, sameVoiceTarget, type VoiceTarget } from './commands';
+import { captureVoiceTarget, dispatchVoiceCommand, parseVoiceCommand, sameVoiceTarget } from './commands';
 
 const ORIGIN = v3(100, 200, 300);
 const UP = v2(0, -1);
@@ -33,7 +33,6 @@ const snapOn = (plane: WorkPlane, world: Vec3): SnapResult => ({
   raw: world,
 });
 
-/** A stroke on `kind` through ORIGIN with a `rough`-mm move along `direction` (1 px/mm screen). */
 function strokeOn(kind: PlaneKind, direction: Vec3, rough = 37): StrokeSession {
   const plane = new WorkPlane(kind, ORIGIN);
   const session = new StrokeSession(plane, snapOn(plane, ORIGIN));
@@ -42,10 +41,6 @@ function strokeOn(kind: PlaneKind, direction: Vec3, rough = 37): StrokeSession {
   return session;
 }
 
-/**
- * An extrusion session on a 200x100 profile at ORIGIN after one grab and a
- * `movePx`-pixel pull (positive = outward/up-screen, negative = inward).
- */
 function pullFixture(options: { depth?: number; flat?: boolean; faceIndex?: number; movePx?: number; step?: number; u?: Vec3; v?: Vec3 } = {}) {
   const sketch = new Sketch();
   const commands = new Commands(sketch);
@@ -66,7 +61,6 @@ function pullFixture(options: { depth?: number; flat?: boolean; faceIndex?: numb
 const faceOn = (profile: ProfileEntity, axis: ProfileFace['axis'], sign: ProfileFace['sign']): ProfileFace =>
   profileFaces(profile).find((face) => face.axis === axis && face.sign === sign)!;
 
-/** The moved face travelled `signed` mm along its normal; the opposite face and untouched sizes are fixed. */
 function expectFaceMove(before: ProfileEntity, after: ProfileEntity, faceIndex: number, signed: number): void {
   const face = profileFaces(before)[faceIndex];
   const moved = faceOn(after, face.axis, face.sign);
@@ -201,6 +195,22 @@ describe('dispatchVoiceCommand: line', () => {
     }
   });
 
+  it('uses the raw in-plane ray point of a grid-only snap for the voice direction', () => {
+    const plane = new WorkPlane('XY', ORIGIN);
+    const session = new StrokeSession(plane, snapOn(plane, ORIGIN));
+    const raw = v3(130, 240, 300);
+    const snap: SnapResult = { ...snapOn(plane, v3(200, 200, 300)), type: 'grid', raw };
+    session.add(snap, raw, v2(130, 240), 0);
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const target = captureVoiceTarget(session, null, true);
+    const result = dispatchVoiceCommand({ distance_mm: 500 }, target, commands, target);
+    expect(result.ok).toBe(true);
+    const line = sketch.last as LineEntity;
+    expect(nearlyEqual(line.b, v3(400, 600, 300), 1e-9)).toBe(true);
+    expect(distance(line.a, line.b)).toBeCloseTo(500, 9);
+  });
+
   it('rejects stale, missing or tampered captures before any commit hook or model write', () => {
     const session = strokeOn('XY', v3(1, 0, 0));
     const sketch = new Sketch();
@@ -215,6 +225,46 @@ describe('dispatchVoiceCommand: line', () => {
     if (target.operation.kind !== 'line') throw new Error('expected line');
     target.operation.measurement.start = v3(0, 0, 0);
     expect(dispatchVoiceCommand({ distance_mm: 100 }, target, commands, target, beforeCommit).ok).toBe(false);
+    expect(beforeCommit).not.toHaveBeenCalled();
+    expect(sketch.size).toBe(0);
+  });
+
+  it.each(['XY', 'XZ', 'YZ'] as const)('uses a refined near-axis free angle for an exact 5000 mm line on %s', (kind) => {
+    const plane = new WorkPlane(kind, ORIGIN);
+    const session = new StrokeSession(plane, snapOn(plane, ORIGIN));
+    const wobble = add(ORIGIN, add(scale(plane.u, 8), scale(plane.v, 18)));
+    session.add(snapOn(plane, wobble), wobble, plane.toPlane(wobble), 0);
+    for (let i = 1; i <= 12; i += 1) {
+      const along = 50 + 5 * i;
+      const raw = add(ORIGIN, add(scale(plane.u, along), scale(plane.v, along * 0.07)));
+      const snapped = add(ORIGIN, scale(plane.u, along));
+      session.add({ ...snapOn(plane, snapped), type: 'axis', axis: 'u', raw }, raw, plane.toPlane(raw), 0);
+    }
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const before = sketch.serialize();
+    const target = captureVoiceTarget(session, null, true);
+    expect(dispatchVoiceCommand({ distance_mm: 5000 }, target, commands, captureVoiceTarget(session, null, true)).ok).toBe(true);
+    const line = sketch.last as LineEntity;
+    const direction = directionAt(kind, Math.atan2(7, 100) * 180 / Math.PI);
+    expect(nearlyEqual(line.b, add(ORIGIN, scale(direction, 5000)), 1e-8)).toBe(true);
+    expect(distance(line.a, line.b)).toBeCloseTo(5000, 9);
+    expect(line.b[PLANE_AXES[kind].normal]).toBe(ORIGIN[PLANE_AXES[kind].normal]);
+    commands.undo();
+    expect(sketch.serialize()).toBe(before);
+  });
+
+  it('rejects a capture if further aiming changes its source session', () => {
+    const session = strokeOn('XY', v3(0.6, 0.8, 0));
+    const target = captureVoiceTarget(session, null, true);
+    const next = add(ORIGIN, v3(-40, 60, 0));
+    session.add(snapOn(session.plane, next), next, session.plane.toPlane(next), 0);
+    const current = captureVoiceTarget(session, null, true);
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const beforeCommit = vi.fn();
+    expect(sameVoiceTarget(target, current)).toBe(false);
+    expect(dispatchVoiceCommand({ distance_mm: 5000 }, target, commands, current, beforeCommit).ok).toBe(false);
     expect(beforeCommit).not.toHaveBeenCalled();
     expect(sketch.size).toBe(0);
   });

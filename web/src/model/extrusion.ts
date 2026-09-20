@@ -55,7 +55,6 @@ export class ExtrusionSession {
   /** Total outward distance the active face has been pulled so far (mm). */
   get pulled(): number { return this.pull; }
 
-  /** Frozen grab baseline + first clear pull direction for voice, or null before 12 px of movement. */
   get measurement(): FacePullMeasurement | null {
     return this.measurementState ? structuredClone(this.measurementState) : null;
   }

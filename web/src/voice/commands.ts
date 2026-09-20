@@ -4,7 +4,7 @@ import { profileFaces, pushPull, type ProfileFace } from '../model/faces';
 import { PLANES } from '../model/plane';
 import { isExtrudableProfile, rectFrame, type ProfileEntity } from '../model/sketch';
 import { type LineMeasurement, type StrokeSession } from '../model/stroke';
-import { add, distance, dot, isFinite3, length, nearlyEqual, scale, type Vec3 } from '../model/vec';
+import { add, distance, dot, isFinite3, length, nearlyEqual, scale } from '../model/vec';
 
 export const MAX_DIMENSION_MM = 1_000_000;
 export const MIN_DIMENSION_MM = 1e-6;
@@ -37,9 +37,11 @@ const validDistance = (value: unknown): value is number => typeof value === 'num
 export function parseVoiceCommand(value: unknown): VoiceCommand {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalidDistance();
   const command = value as Record<string, unknown>;
-  if (Object.keys(command).length !== 1 || !Object.hasOwn(command, 'distance_mm')) invalidDistance();
-  if (!validDistance(command.distance_mm)) invalidDistance();
-  return { distance_mm: command.distance_mm };
+  const distance_mm = command.distance_mm;
+  if (Object.keys(command).length !== 1 || !Object.hasOwn(command, 'distance_mm') || !validDistance(distance_mm)) {
+    throw new Error('Say one positive distance, such as 500 mm or by 1 m');
+  }
+  return { distance_mm };
 }
 
 function validateProfile(profile: ProfileEntity): void {

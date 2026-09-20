@@ -72,6 +72,7 @@ export class VoiceControl {
       const target = this.options.capture();
       this.activeTarget = target;
       this.recording = await recordMicrophone(controller.signal);
+      controller.signal.throwIfAborted();
       this.setPhase('recording');
       const audio = await this.recording.audio;
       controller.signal.throwIfAborted();
@@ -157,7 +158,7 @@ export class VoiceControl {
       case 'sending':
         this.recordButton.disabled = true;
         this.recordButton.textContent = 'Waiting for Yibu…';
-        this.status.textContent = 'Waiting for Yibu…';
+        this.status.textContent = `Waiting for Yibu… ${this.activeTarget?.description ?? ''}`;
         break;
     }
   }

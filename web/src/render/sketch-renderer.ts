@@ -18,6 +18,7 @@ export const COLORS = {
   ink: 0x9aa4b2,
   vertex: 0xffffff,
   fade: 0xff6b6b,
+  guide: 0x8ab4f8,
 };
 
 function flatten(points: readonly Vec3[]): number[] {
@@ -78,6 +79,7 @@ export class SketchRenderer {
   private readonly lineMaterial: LineMaterial;
   private readonly hoverMaterial: LineMaterial;
   private readonly ghostMaterial: LineMaterial;
+  private readonly guideMaterial: LineMaterial;
   private readonly fadeMaterial: LineMaterial;
   private lines: LineSegments2;
   private hover: LineSegments2;
@@ -87,12 +89,14 @@ export class SketchRenderer {
   private readonly activeFace: THREE.Mesh;
   private readonly activeFaceOutline: LineSegments2;
   private ghost: Line2;
+  private readonly lineGuide: Line2;
   private fadeLine: Line2;
   private fadeUntil = 0;
   private readonly ink: THREE.Line;
   private readonly faces: THREE.Mesh;
   private readonly vertices: THREE.Points;
   private readonly ghostLabel = new Label('dim-label--ghost');
+  private readonly guideLabel = new Label('dim-label--guide');
   private readonly hoverLabel = new Label('dim-label--hover');
   private readonly lastLabel = new Label('dim-label--last');
   private readonly extrusionLabel = new Label('dim-label--ghost');
@@ -109,6 +113,11 @@ export class SketchRenderer {
       dashSize: 40,
       gapSize: 25,
       depthTest: false,
+    });
+    this.guideMaterial = new LineMaterial({
+      color: COLORS.guide, linewidth: 2, resolution: this.resolution,
+      dashed: true, dashSize: 40, gapSize: 25,
+      depthTest: false, transparent: true, opacity: 0.8,
     });
     this.fadeMaterial = new LineMaterial({ color: COLORS.fade, linewidth: 3, resolution: this.resolution, transparent: true, opacity: 0.9, depthTest: false });
 
@@ -133,6 +142,9 @@ export class SketchRenderer {
     this.activeFace.renderOrder = 6;
     this.activeFaceOutline.renderOrder = 6;
     this.ghost = new Line2(new LineGeometry(), this.ghostMaterial);
+    this.lineGuide = new Line2(new LineGeometry(), this.guideMaterial);
+    this.lineGuide.visible = false;
+    this.lineGuide.renderOrder = 5;
     this.fadeLine = new Line2(new LineGeometry(), this.fadeMaterial);
     this.lines.visible = false;
     this.hover.visible = false;
@@ -161,8 +173,8 @@ export class SketchRenderer {
     this.vertices.visible = false;
     this.vertices.renderOrder = 7;
 
-    this.group.add(this.faces, this.lines, this.hover, this.selected, this.ink, this.fadeLine, this.ghost, this.vertices, this.extrusionFaces, this.extrusionLines, this.activeFace, this.activeFaceOutline);
-    this.group.add(this.ghostLabel.object, this.hoverLabel.object, this.lastLabel.object, this.extrusionLabel.object);
+    this.group.add(this.faces, this.lines, this.hover, this.selected, this.ink, this.fadeLine, this.ghost, this.lineGuide, this.vertices, this.extrusionFaces, this.extrusionLines, this.activeFace, this.activeFaceOutline);
+    this.group.add(this.ghostLabel.object, this.guideLabel.object, this.hoverLabel.object, this.lastLabel.object, this.extrusionLabel.object);
     viewport.scene.add(this.group);
     viewport.onResize(() => this.updateResolution());
     this.updateResolution();
@@ -171,7 +183,7 @@ export class SketchRenderer {
   private updateResolution(): void {
     this.resolution.set(this.viewport.width, this.viewport.height);
     // LineMaterial copies the vector on assignment, so push the new size to every material.
-    for (const material of [this.lineMaterial, this.hoverMaterial, this.ghostMaterial, this.fadeMaterial]) {
+    for (const material of [this.lineMaterial, this.hoverMaterial, this.ghostMaterial, this.guideMaterial, this.fadeMaterial]) {
       material.resolution = this.resolution;
     }
   }
@@ -274,6 +286,16 @@ export class SketchRenderer {
     this.ink.geometry.dispose();
     this.ink.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(flatten(path), 3));
     this.ink.visible = true;
+  }
+
+  setLineGuide(points: readonly Vec3[] | null, label: { text: string; at: Vec3 } | null): void {
+    if (!points || points.length < 2) {
+      this.lineGuide.visible = false;
+      this.guideLabel.set(null);
+      return;
+    }
+    this.replacePolyline(this.lineGuide, flatten(points));
+    this.guideLabel.set(label?.text ?? null, label?.at);
   }
 
   /** Dashed recognition preview with a dimension label. */

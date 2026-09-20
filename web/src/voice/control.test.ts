@@ -94,7 +94,6 @@ const snapOn = (plane: WorkPlane, world: ReturnType<typeof v3>): SnapResult => (
   raw: world,
 });
 
-/** A stroke on XY with a 50 mm (50 px) move along (0.6, 0.8, 0). */
 function drawStroke(): StrokeSession {
   const plane = new WorkPlane('XY', ORIGIN);
   const session = new StrokeSession(plane, snapOn(plane, ORIGIN));
@@ -208,7 +207,7 @@ describe('VoiceControl', () => {
     const created = line();
     expect(created).not.toBeNull();
     expect(created!.a).toEqual(ORIGIN);
-    expect(created!.b).toEqual(v3(400, 500, 300));
+    expect(created!.b).toEqual(v3(400, 600, 300));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('/api/voice/command');
@@ -265,7 +264,7 @@ describe('VoiceControl', () => {
     expect(vi.mocked(recordMicrophone).mock.calls).toHaveLength(1);
     resolveAudio(wavBlob());
     await first;
-    expect(line()!.b).toEqual(v3(400, 500, 300));
+    expect(line()!.b).toEqual(v3(400, 600, 300));
   });
 
   it('toggle() starts recording when idle and stops while recording', async () => {
@@ -280,7 +279,7 @@ describe('VoiceControl', () => {
     resolveAudio(wavBlob());
     await flush();
     await flush();
-    expect(line()!.b).toEqual(v3(400, 500, 300));
+    expect(line()!.b).toEqual(v3(400, 600, 300));
   });
 
   it('routes the record button through toggle()', async () => {
@@ -397,6 +396,56 @@ describe('VoiceControl', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('cancels a microphone promise that resolves after the request was cancelled', async () => {
+    let resolveMic: (recording: NonNullable<typeof h.recording>) => void = () => {};
+    vi.mocked(recordMicrophone).mockImplementationOnce(async () => new Promise((resolve) => { resolveMic = resolve; }));
+    const first = control.record();
+    await flush();
+    expect(recordButton.textContent).toBe('Opening microphone…');
+    control.cancel();
+    let resolveAudio: (blob: Blob) => void = () => {};
+    const audio = new Promise<Blob>((resolve) => { resolveAudio = resolve; });
+    h.recording = { audio, stop: vi.fn(), cancel: vi.fn() };
+    try {
+      resolveMic(h.recording);
+      await flush();
+      expect(h.recording.cancel).toHaveBeenCalledTimes(1);
+      expect(statusEl.textContent).toContain('Voice request cancelled');
+      expect(recordButton.textContent).toBe('Record distance');
+      expect(recordButton.disabled).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(line()).toBeNull();
+    } finally {
+      resolveAudio(wavBlob());
+      await first;
+    }
+  });
+
+  it('aborts a stalled API request after the fetch timeout and restores idle', async () => {
+    vi.useFakeTimers();
+    try {
+      h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
+      fetchMock.mockImplementation((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+        (init.signal as AbortSignal).addEventListener('abort', () => reject(new DOMException('The user aborted a request.', 'AbortError')));
+      }));
+      const first = control.record();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(statusEl.textContent).toContain('Waiting for Yibu…');
+      expect(statusEl.textContent).toContain('Line · XY');
+      await vi.advanceTimersByTimeAsync(310_000);
+      await first;
+      expect(statusEl.textContent).toContain('Voice request timed out');
+      expect(h.recording.cancel).toHaveBeenCalled();
+      expect(recordButton.textContent).toBe('Record distance');
+      expect(recordButton.disabled).toBe(false);
+      expect(cancelButton.hidden).toBe(true);
+      expect(line()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports an invalid JSON response and restores idle', async () => {
     h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
     fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token'); } });
@@ -426,7 +475,7 @@ describe('VoiceControl', () => {
     expect(h.recording.stop).toHaveBeenCalledTimes(1);
     resolveAudio(wavBlob());
     await first;
-    expect(line()!.b).toEqual(v3(400, 500, 300));
+    expect(line()!.b).toEqual(v3(400, 600, 300));
   });
 
   it('keeps panel keystrokes away from the CAD keymap and cancels on pagehide', async () => {

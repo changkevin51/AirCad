@@ -125,6 +125,7 @@ def parse_reply(text: str, context: dict[str, Any]) -> tuple[str, dict[str, Any]
     parsed = _explicit_measurement(reply["transcript"])
     if parsed is None:
         raise VoiceError("Say one positive distance, such as 500 mm or by 1 m", 422)
+    parsed = validate_command(parsed)
     if not math.isclose(parsed["distance_mm"], command["distance_mm"], rel_tol=1e-12, abs_tol=1e-9):
         raise VoiceError("The spoken amount does not match the returned command", 422)
     return reply["transcript"], parsed

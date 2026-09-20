@@ -151,6 +151,26 @@ class ExplicitMeasurementTests(unittest.TestCase):
                 with self.assertRaises(voice_api.VoiceError):
                     voice_api.parse_reply(json.dumps(declined), CONTEXT)
 
+    def test_parsed_transcript_distance_must_stay_in_bounds(self) -> None:
+        for transcript, returned in [
+            ("0.000001 mm", 0.0000010001),
+            ("0.0000009999 mm", 0.0000010001),
+            ("1000000.0000001 mm", 1000000),
+        ]:
+            with self.subTest(transcript=transcript):
+                reply = {"transcript": transcript, "command": {"distance_mm": returned}, "error": None}
+                with self.assertRaises(voice_api.VoiceError):
+                    voice_api.parse_reply(json.dumps(reply), CONTEXT)
+        for transcript, returned in [
+            ("0.0000010001 mm", 0.0000010001),
+            ("1000000 mm", 1000000),
+        ]:
+            with self.subTest(transcript=transcript):
+                reply = {"transcript": transcript, "command": {"distance_mm": returned}, "error": None}
+                heard, command = voice_api.parse_reply(json.dumps(reply), CONTEXT)
+                self.assertEqual(heard, transcript)
+                self.assertEqual(command["distance_mm"], returned)
+
     def test_recovery_does_not_replace_a_malformed_non_null_command(self) -> None:
         invalid = {"transcript": "500 millimetres",
                    "command": {"distance_mm": 500, "axis": "x"}, "error": None}
