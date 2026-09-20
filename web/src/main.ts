@@ -10,7 +10,7 @@ import {
   type PressAction,
 } from './input/keymap';
 import { MouseSource } from './input/mouse-source';
-import { remoteButtonForCode, RemoteSource, type RemoteButton, type RemoteMode } from './input/remote';
+import { remoteButtonForCode, remoteCodeForButton, RemoteSource, type RemoteButton, type RemoteMode } from './input/remote';
 import { CALIBRATION_MIN_SAMPLES, SCALE_PRESETS, SpatialCursorSource, type ScalePreset } from './input/spatial-cursor';
 import {
   ClockSync,
@@ -396,15 +396,32 @@ class App {
       },
     });
 
+    // Every gesture logs what it resolved to, so a button that "does nothing"
+    // can be told apart from a button whose event never arrived.
     this.remote = new RemoteSource({
-      hold: (action, down) => this.setHold(action, down, `remote:${action}`),
-      press: (action) => this.doPress(action),
-      voice: (down) => this.setVoiceHold(down),
-      move: (down) => this.setMoveHold(down),
+      hold: (action, down) => {
+        console.info('[remote] hold', action, down ? 'down' : 'up');
+        this.setHold(action, down, `remote:${action}`);
+      },
+      press: (action) => {
+        console.info('[remote] press', action);
+        this.doPress(action);
+      },
+      voice: (down) => {
+        console.info('[remote] voice', down ? 'start' : 'finalize');
+        this.setVoiceHold(down);
+      },
+      move: (down) => {
+        console.info('[remote] move', down ? 'start' : 'apply');
+        this.setMoveHold(down);
+      },
       discardStroke: () => {
         if (this.stroke) this.cancelStroke(false);
       },
-      releaseAll: () => this.releaseAllInput(),
+      releaseAll: () => {
+        console.info('[remote] release everything');
+        this.releaseAllInput();
+      },
       modeChanged: (mode) => this.onRemoteModeChanged(mode),
     });
 
@@ -594,7 +611,10 @@ class App {
     const press = resolvePress(event, this.platform);
     if (!press) {
       // Diagnostic for pairing a new remote: report function keys nothing claims.
-      if (/^F\d+$/.test(event.code) && !event.repeat) this.hud.flash(`Unmapped key ${event.code}`);
+      if (/^F\d+$/.test(event.code) && !event.repeat) {
+        console.warn(`[remote] unmapped key ${event.code} — the remote expects F17-F20`);
+        this.hud.flash(`Unmapped key ${event.code}`);
+      }
       return;
     }
     event.preventDefault();
@@ -618,8 +638,13 @@ class App {
    * so a button cannot interrupt typing.
    */
   private onRemoteKey(button: RemoteButton, down: boolean): void {
-    this.remoteLastCode = `F${12 + button}`;
-    if (this.measure.isOpen) return;
+    this.remoteLastCode = remoteCodeForButton(button);
+    console.info(`[remote] button ${button} ${down ? 'down' : 'up'} (${this.remoteLastCode})`,
+      { mode: this.remote.mode, gesturing: this.remote.gesturing, drawing: !!this.stroke, cursor: this.cursor.position });
+    if (this.measure.isOpen) {
+      console.info('[remote] ignored: the measure dialog owns input');
+      return;
+    }
     this.focused = true;
     if (!this.remoteSeen) {
       this.remoteSeen = true;

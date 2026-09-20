@@ -2,7 +2,7 @@
  * Four-button BLE pen remote ("Smart Pen").
  *
  * The firmware is a dumb transport: it reports button 1-4 press/release as
- * F13-F16 and nothing else.  Every mode, threshold and chord lives here, so the
+ * F17-F20 and nothing else.  Every mode, threshold and chord lives here, so the
  * HUD can show the current mode and the timings can be tuned without
  * reflashing.  Each gesture resolves to an action the keymap already defines;
  * this module never invents CAD behavior.
@@ -29,19 +29,32 @@ export const REMOTE_MODE_LABELS: Record<RemoteMode, string> = {
 };
 
 /**
- * `KeyboardEvent.code` to button.  F13-F16 are unbound in the keymap, are not
- * printable (so they cannot type into the measure dialog or the inspector) and
- * are not claimed by macOS or Windows by default.
+ * Button to `KeyboardEvent.code`.  F17-F20 are unbound in the keymap and are
+ * not printable, so a button can never type into the measure dialog or the
+ * inspector.  Deliberately not F13-F16: macOS assigns F13 to Print Screen and
+ * F14/F15 to screen brightness, so those arrive as system actions rather than
+ * as key events.  F17-F20 carry no default macOS or Windows binding, and they
+ * still have macOS virtual key codes (unlike F21+), so the browser reports them
+ * as proper `code` values.
  */
-export const REMOTE_CODES: Readonly<Record<string, RemoteButton>> = {
-  F13: 1,
-  F14: 2,
-  F15: 3,
-  F16: 4,
+export const REMOTE_BUTTON_CODES: Readonly<Record<RemoteButton, string>> = {
+  1: 'F17',
+  2: 'F18',
+  3: 'F19',
+  4: 'F20',
 };
 
+// Derived, so the two directions cannot drift apart.
+const CODE_TO_BUTTON = new Map<string, RemoteButton>(
+  Object.entries(REMOTE_BUTTON_CODES).map(([button, code]) => [code, Number(button) as RemoteButton]),
+);
+
 export function remoteButtonForCode(code: string): RemoteButton | null {
-  return REMOTE_CODES[code] ?? null;
+  return CODE_TO_BUTTON.get(code) ?? null;
+}
+
+export function remoteCodeForButton(button: RemoteButton): string {
+  return REMOTE_BUTTON_CODES[button];
 }
 
 export interface RemoteTimings {

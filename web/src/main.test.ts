@@ -2499,7 +2499,7 @@ describe('parallel edge guides', () => {
 describe('pen remote', () => {
   useScreenSpaceProjector();
 
-  const CODES = { 1: 'F13', 2: 'F14', 3: 'F15', 4: 'F16' } as const;
+  const CODES = { 1: 'F17', 2: 'F18', 3: 'F19', 4: 'F20' } as const;
   type Button = keyof typeof CODES;
 
   const advance = (ms: number): void => {
@@ -2531,20 +2531,33 @@ describe('pen remote', () => {
     runFrame();
   };
 
+  let logs: { mockRestore(): void }[] = [];
+
   beforeEach(() => {
+    // The remote traces every gesture to the console for hardware debugging;
+    // silence it here so the suite output stays readable.
+    logs = [
+      vi.spyOn(console, 'info').mockImplementation(() => {}),
+      vi.spyOn(console, 'warn').mockImplementation(() => {}),
+    ];
     // The app instance is shared, so the mode survives between tests.
     for (let i = 0; i < 3 && api.remote().mode !== 'draw'; i++) tap(2);
     expect(api.remote().mode).toBe('draw');
     state.flashes.length = 0;
   });
 
-  it('claims F13-F16 and reports the code it saw, for pairing a new remote', () => {
+  afterEach(() => {
+    while (logs.length) logs.pop()!.mockRestore();
+  });
+
+  it('claims F17-F20 and reports the code it saw, for pairing a new remote', () => {
     tap(3);
     expect(api.remote().seen).toBe(true);
-    expect(api.remote().lastCode).toBe('F15');
-    dispatchWindow('keydown', keyEvent('F17'));
-    expect(api.remote().lastCode).toBe('F15');
-    expect(state.flashes).toContain('Unmapped key F17');
+    expect(api.remote().lastCode).toBe('F19');
+    // macOS eats F13 as Print Screen, so it must not be one of ours.
+    dispatchWindow('keydown', keyEvent('F13'));
+    expect(api.remote().lastCode).toBe('F19');
+    expect(state.flashes).toContain('Unmapped key F13');
   });
 
   it('draws with button 1 held in draw mode', () => {

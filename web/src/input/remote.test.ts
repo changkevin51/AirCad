@@ -4,6 +4,7 @@ import {
   REMOTE_MODE_LABELS,
   REMOTE_MODES,
   remoteButtonForCode,
+  remoteCodeForButton,
   RemoteSource,
   type RemoteHandlers,
   type RemoteTimings,
@@ -28,13 +29,20 @@ const { holdMs, tapMs, doubleTapMs, chordMs } = DEFAULT_REMOTE_TIMINGS;
 const LONG = Math.max(holdMs, tapMs) + 50;
 
 describe('remote key codes', () => {
-  it('claims F13-F16 and nothing else', () => {
-    expect(remoteButtonForCode('F13')).toBe(1);
-    expect(remoteButtonForCode('F14')).toBe(2);
-    expect(remoteButtonForCode('F15')).toBe(3);
-    expect(remoteButtonForCode('F16')).toBe(4);
-    for (const code of ['Digit1', 'Digit4', 'Space', 'KeyQ', 'Tab', 'F1', 'F12', 'F17']) {
+  it('claims F17-F20 and nothing else', () => {
+    expect(remoteButtonForCode('F17')).toBe(1);
+    expect(remoteButtonForCode('F18')).toBe(2);
+    expect(remoteButtonForCode('F19')).toBe(3);
+    expect(remoteButtonForCode('F20')).toBe(4);
+    // F13 is Print Screen on macOS and F14/F15 are brightness, so they must stay unclaimed.
+    for (const code of ['Digit1', 'Digit4', 'Space', 'KeyQ', 'Tab', 'F1', 'F12', 'F13', 'F14', 'F15', 'F16', 'F21']) {
       expect(remoteButtonForCode(code)).toBeNull();
+    }
+  });
+
+  it('maps buttons back to codes without drifting from the forward map', () => {
+    for (const button of [1, 2, 3, 4] as const) {
+      expect(remoteButtonForCode(remoteCodeForButton(button))).toBe(button);
     }
   });
 });
