@@ -3,13 +3,15 @@ import {
   formatMm,
   extrusionOffset,
   isExtrudableProfile,
-  isValidCircle,
+  isRectangleProfile,
   lineLength,
   makeRect,
   rectFrame,
   type Entity,
+  type LineLoopProfile,
   type Sketch,
 } from './sketch';
+import { polygonFrame } from './polygon';
 import { add, distance, nearlyEqual, normalize, scale, sub, toArray, type Vec3 } from './vec';
 
 export interface DimensionSpec {
@@ -26,7 +28,7 @@ export type CommandResult<T = Entity> =
   | { ok: false; error: string };
 
 export type ExportEntity =
-  | { type: 'line' | 'rect' | 'extrusion'; points: [number, number, number][]; vector?: [number, number, number] }
+  | { type: 'line' | 'rect' | 'extrusion' | 'polygon'; points: [number, number, number][]; vector?: [number, number, number] }
   | { type: 'circle'; center: [number, number, number]; normal: [number, number, number]; radius: number };
 
 export interface ExportPayload {
@@ -96,17 +98,33 @@ export class Commands {
     return { ok: true, entity, message: `Added ${describeEntity(entity)}` };
   }
 
-  addCircle(center: Vec3, normal: Vec3, radius: number): CommandResult {
-    if (!isValidCircle({ center, normal, radius })) return { ok: false, error: 'A circle needs a finite center, a non-zero normal, and a positive radius' };
-    const entity = this.sketch.addEntity({ type: 'circle', center, normal, radius });
+  addPolygon(corners: Vec3[]): CommandResult {
+    if (!polygonFrame(corners)) return { ok: false, error: 'A closed outline needs at least three corners forming a simple planar loop' };
+    const entity = this.sketch.addEntity({ type: 'polygon', corners });
     return { ok: true, entity, message: `Added ${describeEntity(entity)}` };
+  }
+
+  private unsharedSourceIds(loop: LineLoopProfile): string[] {
+    const shared = new Set(
+      this.sketch.closedLineProfiles
+        .filter((other) => other.id !== loop.id)
+        .flatMap((other) => other.sourceIds),
+    );
+    return loop.sourceIds.filter((id) => !shared.has(id));
   }
 
   deleteEntity(id: string): CommandResult {
     const entity = this.sketch.get(id);
-    if (!entity) return { ok: false, error: 'nothing to delete' };
-    this.sketch.removeEntity(id);
-    return { ok: true, entity, message: `Deleted ${describeEntity(entity)}` };
+    if (entity) {
+      this.sketch.removeEntity(id);
+      return { ok: true, entity, message: `Deleted ${describeEntity(entity)}` };
+    }
+    const loop = this.sketch.closedLineProfiles.find((profile) => profile.id === id);
+    if (!loop) return { ok: false, error: 'nothing to delete' };
+    const sourceIds = this.unsharedSourceIds(loop);
+    if (!sourceIds.length) return { ok: false, error: 'This outline shares all its edges; select an individual boundary line to delete it' };
+    this.sketch.replaceEntities(sourceIds, null, `delete ${describeEntity(loop)}`);
+    return { ok: true, entity: loop, message: `Deleted ${describeEntity(loop)}` };
   }
 
   deleteLast(): CommandResult {
@@ -114,46 +132,71 @@ export class Commands {
     return entity ? this.deleteEntity(entity.id) : { ok: false, error: 'nothing to delete' };
   }
 
-  extrude(id: string, depth: number, corners?: [Vec3, Vec3, Vec3, Vec3]): CommandResult {
-    const entity = this.sketch.get(id);
-    if (!entity) return { ok: false, error: 'Select a rectangle to extrude' };
-    if (entity.type === 'line') return { ok: false, error: 'A line cannot be extruded. Draw a closed rectangle first.' };
-    if (entity.type === 'circle') return { ok: false, error: 'Circle extrusion is not supported yet' };
+  extrude(id: string, depth: number, corners?: Vec3[]): CommandResult {
+    const profile = this.sketch.getProfile(id);
+    if (!profile) {
+      const entity = this.sketch.get(id);
+      if (entity?.type === 'line') return { ok: false, error: 'A line cannot be extruded. Draw a closed planar outline first.' };
+      if (entity?.type === 'circle') return { ok: false, error: 'A circle cannot be extruded. Draw a closed planar outline instead.' };
+      return { ok: false, error: 'Select a closed planar outline to extrude' };
+    }
     if (!Number.isFinite(depth) || Math.abs(depth) < 1e-6) return { ok: false, error: 'Extrusion depth must be a non-zero distance' };
-    const base = corners ?? entity.corners;
-    if (!isExtrudableProfile(base)) return { ok: false, error: 'Extrusion needs a planar rectangle with non-zero sides' };
+    const base = corners ?? profile.corners;
+    if (!isExtrudableProfile(base)) return { ok: false, error: 'Extrusion needs a simple closed planar outline' };
     const unchanged =
-      entity.type === 'extrusion' &&
-      entity.depth === depth &&
-      entity.corners.every((corner, index) => nearlyEqual(corner, base[index], 1e-6));
-    if (unchanged) return { ok: true, entity, message: 'Extrusion depth unchanged' };
-    const next = this.sketch.replaceEntity(id, { type: 'extrusion', corners: base, depth }, `extrude ${formatMm(depth)}`);
+      profile.type === 'extrusion' &&
+      profile.depth === depth &&
+      profile.corners.length === base.length &&
+      profile.corners.every((corner, index) => nearlyEqual(corner, base[index], 1e-6));
+    if (unchanged) return { ok: true, entity: profile, message: 'Extrusion depth unchanged' };
+    const label = `extrude ${formatMm(depth)}`;
+    if (this.sketch.get(profile.id)) {
+      const next = this.sketch.replaceEntity(profile.id, { type: 'extrusion', corners: base, depth }, label);
+      return next ? { ok: true, entity: next, message: `Extruded to ${formatMm(depth)}` } : { ok: false, error: 'entity vanished' };
+    }
+    const loop = profile as LineLoopProfile;
+    const removed = loop.sourceIds ? this.unsharedSourceIds(loop) : [];
+    const next = this.sketch.replaceEntities(removed, { type: 'extrusion', corners: base, depth }, label);
     return next ? { ok: true, entity: next, message: `Extruded to ${formatMm(depth)}` } : { ok: false, error: 'entity vanished' };
   }
 
   setDimension(id: string, spec: DimensionSpec | string): CommandResult {
     const entity = this.sketch.get(id);
-    if (!entity) return { ok: false, error: 'no entity selected' };
-    if (entity.type === 'extrusion' && typeof spec === 'string') {
-      const depth = parseDepth(spec);
-      if (depth !== null) return this.extrude(id, depth);
-    }
-    const parsed = typeof spec === 'string' ? parseDimensionSpec(spec) : spec;
-    if (!parsed) return { ok: false, error: `could not read "${spec}" (try 4000 or 4000x3000)` };
-    if (Object.values(parsed).some((value) => !Number.isFinite(value) || value <= 0)) return { ok: false, error: 'Dimensions must be positive finite distances' };
-    if (entity.type === 'extrusion' && parsed.length !== undefined) return this.extrude(id, parsed.length);
+    const profile = entity && entity.type !== 'line' && entity.type !== 'circle'
+      ? entity
+      : entity ? null : this.sketch.getProfile(id);
+    if (!entity && !profile) return { ok: false, error: 'no entity selected' };
+    if (entity?.type === 'circle') return { ok: false, error: 'Circle size is read-only; redraw it as a closed outline to edit' };
 
-    if (entity.type === 'circle') {
-      if (parsed.length === undefined || parsed.width !== undefined || parsed.height !== undefined) {
-        return { ok: false, error: 'a circle takes one diameter, e.g. 50 or 5 cm' };
+    if (profile) {
+      if ((profile.type === 'extrusion' || profile.type === 'polygon') && typeof spec === 'string') {
+        const depth = parseDepth(spec);
+        if (depth !== null) return this.extrude(profile.id, depth);
       }
-      const radius = parsed.length / 2;
-      if (!isValidCircle({ ...entity, radius })) return { ok: false, error: 'Circle diameter is too small' };
-      const next = this.sketch.replaceEntity(id, { ...entity, radius }, `set diameter ${formatMm(parsed.length)}`);
-      return next ? { ok: true, entity: next, message: `Circle diameter set to ${formatMm(parsed.length)}` } : { ok: false, error: 'entity vanished' };
+      const parsed = typeof spec === 'string' ? parseDimensionSpec(spec) : spec;
+      if (!parsed) return { ok: false, error: `could not read "${spec}" (try 4000 or 4000x3000)` };
+      if (Object.values(parsed).some((value) => !Number.isFinite(value) || value <= 0)) return { ok: false, error: 'Dimensions must be positive finite distances' };
+      if (parsed.length !== undefined && profile.type !== 'rect') return this.extrude(profile.id, parsed.length);
+      if (profile.type === 'polygon' || !isRectangleProfile(profile.corners)) {
+        return { ok: false, error: 'a closed outline or non-rectangular solid takes one depth, e.g. 4000 or -250' };
+      }
+      if (parsed.width === undefined || parsed.height === undefined) {
+        return { ok: false, error: 'a rectangle takes width x height, e.g. 4000x3000' };
+      }
+      const frame = rectFrame(profile);
+      const input = profile.type === 'extrusion'
+        ? { type: 'extrusion' as const, corners: makeRect(frame.origin, frame.uDir, frame.vDir, parsed.width, parsed.height), depth: profile.depth }
+        : { type: 'rect' as const, corners: makeRect(frame.origin, frame.uDir, frame.vDir, parsed.width, parsed.height) };
+      const next = this.sketch.replaceEntity(profile.id, input, `set size ${formatMm(parsed.width)} x ${formatMm(parsed.height)}`);
+      return next
+        ? { ok: true, entity: next, message: `Rectangle set to ${formatMm(parsed.width)} x ${formatMm(parsed.height)}` }
+        : { ok: false, error: 'entity vanished' };
     }
 
-    if (entity.type === 'line') {
+    if (entity?.type === 'line') {
+      const parsed = typeof spec === 'string' ? parseDimensionSpec(spec) : spec;
+      if (!parsed) return { ok: false, error: `could not read "${spec}" (try 4000 or 4000x3000)` };
+      if (Object.values(parsed).some((value) => !Number.isFinite(value) || value <= 0)) return { ok: false, error: 'Dimensions must be positive finite distances' };
       if (parsed.length === undefined) return { ok: false, error: 'a line takes one length, e.g. 4000' };
       const current = lineLength(entity);
       if (current < 1e-9) return { ok: false, error: 'line has no direction' };
@@ -167,19 +210,7 @@ export class Commands {
         ? { ok: true, entity: next, message: `Line length set to ${formatMm(parsed.length)}` }
         : { ok: false, error: 'entity vanished' };
     }
-
-    if (parsed.width === undefined || parsed.height === undefined) {
-      return { ok: false, error: 'a rectangle takes width x height, e.g. 4000x3000' };
-    }
-    const frame = rectFrame(entity);
-    const next = this.sketch.replaceEntity(
-      id,
-      { ...entity, corners: makeRect(frame.origin, frame.uDir, frame.vDir, parsed.width, parsed.height) },
-      `set size ${formatMm(parsed.width)} x ${formatMm(parsed.height)}`,
-    );
-    return next
-      ? { ok: true, entity: next, message: `Rectangle set to ${formatMm(parsed.width)} x ${formatMm(parsed.height)}` }
-      : { ok: false, error: 'entity vanished' };
+    return { ok: false, error: 'no entity selected' };
   }
 
   undo(): string | null {

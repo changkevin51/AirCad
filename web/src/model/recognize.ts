@@ -1,3 +1,4 @@
+import { isSimplePolygon } from './polygon';
 import { cross2, distance2, dot2, length2, sub2, v2, type Vec2 } from './vec';
 
 export interface RecognizedLine {
@@ -20,13 +21,12 @@ export interface RecognizedRect {
   angle: number;
 }
 
-export interface RecognizedCircle {
-  kind: 'circle';
-  center: Vec2;
-  radius: number;
+export interface RecognizedPolygon {
+  kind: 'polygon';
+  corners: Vec2[];
 }
 
-export type RecognizedShape = RecognizedLine | RecognizedRect | RecognizedCircle;
+export type RecognizedShape = RecognizedLine | RecognizedRect | RecognizedPolygon;
 
 export interface RecognizeResult {
   shape: RecognizedShape | null;
@@ -43,14 +43,12 @@ export interface RecognizeOptions {
   lineDeviationFrac: number;
   /** Lines within this many degrees of a plane axis are aligned to it. */
   axisSnapDeg: number;
-  /** A stroke is closed when start/end are within this fraction of the bbox diagonal. */
+  /** A rectangle candidate is closed when start/end are within this fraction of the bbox diagonal. */
   closureFrac: number;
   /** RDP tolerance as a fraction of the bbox diagonal. */
   rdpFrac: number;
   /** Corners below this turn (degrees) are treated as points along an edge. */
   collinearDeg: number;
-  minCorners: number;
-  maxCorners: number;
   /** Allowed deviation of total turning from 2π, as a fraction of 2π. */
   turningTolerance: number;
   /** Minimum polygon area / oriented-bounding-box area. */
@@ -59,13 +57,10 @@ export interface RecognizeOptions {
   orientedDeg: number;
   /** Strokes whose bbox diagonal is smaller than this are ignored. */
   minSize: number;
-  circleRmsFrac: number;
-  circleMaxDeviationFrac: number;
-  circleCircularityMin: number;
-  circleSmoothFrac: number;
-  circleMaxGapDeg: number;
-  circleMaxTravelTurns: number;
-  circleRectangleEdgeFrac: number;
+  rectangleTurnDeg: number;
+  rectangleEdgeFrac: number;
+  outlineRdpFrac: number;
+  outlineClosureFrac: number;
 }
 
 export const DEFAULT_RECOGNIZE_OPTIONS: RecognizeOptions = {
@@ -76,19 +71,14 @@ export const DEFAULT_RECOGNIZE_OPTIONS: RecognizeOptions = {
   closureFrac: 0.15,
   rdpFrac: 0.06,
   collinearDeg: 22,
-  minCorners: 4,
-  maxCorners: 6,
   turningTolerance: 0.3,
   areaRatioMin: 0.75,
   orientedDeg: 12,
   minSize: 1e-6,
-  circleRmsFrac: 0.18,
-  circleMaxDeviationFrac: 0.45,
-  circleCircularityMin: 0.55,
-  circleSmoothFrac: 0.08,
-  circleMaxGapDeg: 135,
-  circleMaxTravelTurns: 1.75,
-  circleRectangleEdgeFrac: 0.025,
+  rectangleTurnDeg: 12,
+  rectangleEdgeFrac: 0.025,
+  outlineRdpFrac: 0.0025,
+  outlineClosureFrac: 0.03,
 };
 
 const TWO_PI = Math.PI * 2;
@@ -284,126 +274,33 @@ function normalizeAngle90(angle: number): number {
   return a;
 }
 
-function fitCircle(points: readonly Vec2[], smoothed: readonly Vec2[], size: number, opts: RecognizeOptions): RecognizedCircle | null {
-  if (points.length < 8 || !Number.isFinite(size) || size <= 0) return null;
-  const origin = points[0];
-  const local = points.map((point) => v2((point.x - origin.x) / size, (point.y - origin.y) / size));
-  const weights = local.map((point, i) => (
-    (i > 0 ? distance2(point, local[i - 1]) : 0)
-    + (i + 1 < local.length ? distance2(point, local[i + 1]) : 0)
-  ) / 2);
-  const total = weights.reduce((sum, weight) => sum + weight, 0);
-  if (total <= 1e-12) return null;
-  const mean = v2(
-    local.reduce((sum, point, i) => sum + point.x * weights[i], 0) / total,
-    local.reduce((sum, point, i) => sum + point.y * weights[i], 0) / total,
-  );
-  let xx = 0;
-  let xy = 0;
-  let yy = 0;
-  let xq = 0;
-  let yq = 0;
-  for (const [i, point] of local.entries()) {
-    const x = point.x - mean.x;
-    const y = point.y - mean.y;
-    const w = weights[i];
-    const q = x * x + y * y;
-    xx += w * x * x;
-    xy += w * x * y;
-    yy += w * y * y;
-    xq += w * x * q / 2;
-    yq += w * y * q / 2;
-  }
-  const determinant = xx * yy - xy * xy;
-  if (Math.abs(determinant) <= 1e-12) return null;
-  const center = v2(mean.x + (xq * yy - yq * xy) / determinant, mean.y + (yq * xx - xq * xy) / determinant);
-  const radii = local.map((point) => distance2(point, center));
-  const radius = radii.reduce((sum, value, i) => sum + value * weights[i], 0) / total;
-  if (!Number.isFinite(radius) || radius <= 0 || radius * size < opts.minSize) return null;
-  const errors = radii.map((value) => Math.abs(value - radius));
-  const rms = Math.sqrt(errors.reduce((sum, value, i) => sum + value * value * weights[i], 0) / total);
-  if (rms > radius * opts.circleRmsFrac || errors.some((error) => error > radius * opts.circleMaxDeviationFrac)) return null;
-  const ring = smoothed.map((point) => v2((point.x - origin.x) / size, (point.y - origin.y) / size));
-  if (ring.length < 4) return null;
-  const perimeter = pathLength(ring) + distance2(ring[0], ring[ring.length - 1]);
-  if (perimeter <= 1e-12 || 4 * Math.PI * Math.abs(polygonArea(ring)) / (perimeter * perimeter) < opts.circleCircularityMin) return null;
-  let winding = 0;
-  let travel = 0;
-  for (let i = 0; i < ring.length; i++) {
-    const a = sub2(ring[i], center);
-    const b = sub2(ring[(i + 1) % ring.length], center);
-    const angle = Math.atan2(cross2(a, b), dot2(a, b));
-    if (Math.abs(angle) > opts.circleMaxGapDeg * DEG + 1e-8) return null;
-    winding += angle;
-    travel += Math.abs(angle);
-  }
-  if (Math.abs(Math.abs(winding) - TWO_PI) > opts.turningTolerance * TWO_PI || travel > opts.circleMaxTravelTurns * TWO_PI) return null;
-  const obb = minAreaRect(convexHull(local));
-  if (obb) {
-    const aligned = local.map((point) => rotate(point, -obb.angle));
-    const [uLo, uHi] = robustExtent(aligned.map((point) => point.x));
-    const [vLo, vHi] = robustExtent(aligned.map((point) => point.y));
-    const edgeErrors = aligned.map((point) => Math.min(
-      Math.abs(point.x - uLo), Math.abs(point.x - uHi),
-      Math.abs(point.y - vLo), Math.abs(point.y - vHi),
-    ));
-    if (percentile(edgeErrors, 0.85) <= opts.circleRectangleEdgeFrac) return null;
-  }
-  return { kind: 'circle', center: v2(origin.x + center.x * size, origin.y + center.y * size), radius: radius * size };
-}
-
-/**
- * Recognise a pen stroke (2D plane coordinates, mm) as a straight line or a
- * rectangle.  Anything else returns `shape: null` with a reason.
- */
-export function recognizeStroke(input: readonly Vec2[], options: Partial<RecognizeOptions> = {}): RecognizeResult {
-  const opts = { ...DEFAULT_RECOGNIZE_OPTIONS, ...options };
-  const points = dedupePoints(input);
-  if (points.length < 2) return { shape: null, reason: 'too few points' };
-  const box = boundingBox2(points);
-  if (box.diagonal < opts.minSize) return { shape: null, reason: 'too small' };
-
-  const first = points[0];
-  const last = points[points.length - 1];
-  const chord = distance2(first, last);
-  // Dense, slightly jittered samples inflate the raw path length; measure it
-  // on a lightly simplified copy so slow strokes still read as straight.
-  const smoothed = simplifyRdp(points, opts.smoothFrac * box.diagonal);
-  const path = pathLength(smoothed);
-
-  if (chord > 0 && path / chord <= opts.lineRatioMax) {
-    let deviation = 0;
-    for (const p of points) deviation = Math.max(deviation, perpendicularDistance(p, first, last));
-    if (deviation / chord <= opts.lineDeviationFrac) {
-      return { shape: alignLineToAxis(first, last, opts.axisSnapDeg), reason: 'line' };
-    }
-  }
-
-  const circleOutline = simplifyRdp(points, opts.circleSmoothFrac * box.diagonal);
-  const circle = fitCircle(points, circleOutline, box.diagonal, opts);
-  if (circle) return { shape: circle, reason: 'circle' };
-
-  if (chord > opts.closureFrac * box.diagonal) return { shape: null, reason: 'open stroke' };
-
-  const simplified = simplifyRdp(points, opts.rdpFrac * box.diagonal);
+function recognizeRectangle(points: readonly Vec2[], diagonal: number, opts: RecognizeOptions, first: Vec2): RecognizeResult | null {
+  const simplified = simplifyRdp(points, opts.rdpFrac * diagonal);
   let ring = simplified;
-  if (ring.length > 1 && distance2(ring[0], ring[ring.length - 1]) <= opts.closureFrac * box.diagonal) {
+  if (ring.length > 1 && distance2(ring[0], ring[ring.length - 1]) <= opts.closureFrac * diagonal) {
     ring = ring.slice(0, -1);
   }
   ring = removeShallowCorners(ring, opts.collinearDeg * DEG);
-  if (ring.length < opts.minCorners || ring.length > opts.maxCorners) {
-    return { shape: null, reason: `${ring.length} corners` };
-  }
+  if (ring.length !== 4) return null;
 
-  const turning = turningAngles(ring).reduce((sum, t) => sum + t, 0);
-  if (Math.abs(Math.abs(turning) - TWO_PI) > opts.turningTolerance * TWO_PI) {
-    return { shape: null, reason: 'not a simple loop' };
-  }
+  const turns = turningAngles(ring);
+  if (turns.some((turn) => Math.abs(Math.abs(turn) - Math.PI / 2) > opts.rectangleTurnDeg * DEG)) return null;
+  const turning = turns.reduce((sum, t) => sum + t, 0);
+  if (Math.abs(Math.abs(turning) - TWO_PI) > opts.turningTolerance * TWO_PI) return null;
 
   const area = Math.abs(polygonArea(points));
   const obb = minAreaRect(convexHull(points));
-  if (!obb || obb.area < 1e-12) return { shape: null, reason: 'degenerate' };
-  if (area / obb.area < opts.areaRatioMin) return { shape: null, reason: 'not rectangular' };
+  if (!obb || obb.area < 1e-12) return null;
+  if (area / obb.area < opts.areaRatioMin) return null;
+
+  const obbAligned = points.map((p) => rotate(p, -obb.angle));
+  const [suLo, suHi] = robustExtent(obbAligned.map((p) => p.x));
+  const [svLo, svHi] = robustExtent(obbAligned.map((p) => p.y));
+  const edgeErrors = obbAligned.map((p) => Math.min(
+    Math.abs(p.x - suLo), Math.abs(p.x - suHi),
+    Math.abs(p.y - svLo), Math.abs(p.y - svHi),
+  ));
+  if (percentile(edgeErrors, 0.85) > opts.rectangleEdgeFrac * diagonal) return null;
 
   const tilt = normalizeAngle90(obb.angle);
   const oriented = Math.abs(tilt) > opts.orientedDeg * DEG;
@@ -414,7 +311,7 @@ export function recognizeStroke(input: readonly Vec2[], options: Partial<Recogni
   const [vLo, vHi] = robustExtent(local.map((p) => p.y));
   const width = uHi - uLo;
   const height = vHi - vLo;
-  if (width < opts.minSize || height < opts.minSize) return { shape: null, reason: 'degenerate' };
+  if (width < opts.minSize || height < opts.minSize) return null;
 
   let corners = [v2(uLo, vLo), v2(uHi, vLo), v2(uHi, vHi), v2(uLo, vHi)].map((c) => rotate(c, angle));
   if (turning < 0) corners = [corners[0], corners[3], corners[2], corners[1]];
@@ -442,4 +339,50 @@ export function recognizeStroke(input: readonly Vec2[], options: Partial<Recogni
     },
     reason: oriented ? 'oriented rectangle' : 'rectangle',
   };
+}
+
+/**
+ * Recognise a pen stroke (2D plane coordinates, mm) as a straight line, a
+ * rectangle, or any other simple closed outline (a polygon whose corners are
+ * stroke samples).  Open strokes return `shape: null` with a reason.
+ */
+export function recognizeStroke(input: readonly Vec2[], options: Partial<RecognizeOptions> = {}): RecognizeResult {
+  const opts = { ...DEFAULT_RECOGNIZE_OPTIONS, ...options };
+  const points = dedupePoints(input);
+  if (points.length < 2) return { shape: null, reason: 'too few points' };
+  const box = boundingBox2(points);
+  if (box.diagonal < opts.minSize) return { shape: null, reason: 'too small' };
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  const chord = distance2(first, last);
+  // Dense, slightly jittered samples inflate the raw path length; measure it
+  // on a lightly simplified copy so slow strokes still read as straight.
+  const smoothed = simplifyRdp(points, opts.smoothFrac * box.diagonal);
+  const path = pathLength(smoothed);
+
+  if (chord > 0 && path / chord <= opts.lineRatioMax) {
+    let deviation = 0;
+    for (const p of points) deviation = Math.max(deviation, perpendicularDistance(p, first, last));
+    if (deviation / chord <= opts.lineDeviationFrac) {
+      return { shape: alignLineToAxis(first, last, opts.axisSnapDeg), reason: 'line' };
+    }
+  }
+
+  if (chord <= opts.closureFrac * box.diagonal) {
+    const rect = recognizeRectangle(points, box.diagonal, opts, first);
+    if (rect) return rect;
+  }
+
+  if (chord > opts.outlineClosureFrac * box.diagonal) return { shape: null, reason: 'open stroke' };
+
+  const closed = points.map((p) => v2(p.x, p.y));
+  closed[closed.length - 1] = v2(first.x, first.y);
+  let ring = simplifyRdp(closed, opts.outlineRdpFrac * box.diagonal);
+  if (ring.length > 1 && distance2(ring[0], ring[ring.length - 1]) <= Math.max(1e-9, opts.outlineClosureFrac * box.diagonal)) {
+    ring = ring.slice(0, -1);
+  }
+  if (ring.length < 3) return { shape: null, reason: 'too few corners' };
+  if (!isSimplePolygon(ring)) return { shape: null, reason: 'not a simple loop' };
+  return { shape: { kind: 'polygon', corners: ring }, reason: 'closed outline' };
 }

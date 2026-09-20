@@ -3,7 +3,7 @@ import { ExtrusionSession } from './extrusion';
 import { defaultFaceIndex, labelForNormal, pickProfileFace, profileFaces, pushPull } from './faces';
 import { entityCenter, makeRect, type ExtrusionEntity, type RectEntity } from './sketch';
 import { topViewProjector } from './test-helpers';
-import { dot, normalize, scale, sub, v2, v3 } from './vec';
+import { add, dot, normalize, scale, sub, v2, v3 } from './vec';
 
 const rect: RectEntity = { id: 'r', type: 'rect', corners: makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300) };
 const solid: ExtrusionEntity = { ...rect, id: 's', type: 'extrusion', depth: 300 };
@@ -163,6 +163,143 @@ describe('ExtrusionSession faces', () => {
     expect(session.pulled).toBe(250);
     session.setPull(-80);
     expect(session.depth).toBe(-80);
+  });
+});
+
+describe('profileFaces: generic outlines', () => {
+  const triangle = { id: 't', type: 'polygon' as const, corners: [v3(0, 0, 0), v3(400, 0, 0), v3(100, 300, 0)] };
+  const triangleSolid: ExtrusionEntity = { id: 'ts', type: 'extrusion', corners: triangle.corners, depth: 250 };
+  const concave = { id: 'c', type: 'polygon' as const, corners: [v3(0, 0, 0), v3(400, 0, 0), v3(400, 100, 0), v3(100, 100, 0), v3(100, 300, 0), v3(0, 300, 0)] };
+  const concaveSolid: ExtrusionEntity = { id: 'cs', type: 'extrusion', corners: concave.corners, depth: -200 };
+
+  it('returns 2 flat caps and n+2 solid faces with stable edge indices', () => {
+    expect(profileFaces(triangle)).toHaveLength(2);
+    const faces = profileFaces(triangleSolid);
+    expect(faces).toHaveLength(5);
+    expect(faces.slice(0, 2).map((f) => `${f.axis}${f.sign}`)).toEqual(['n1', 'n-1']);
+    expect(faces.slice(2).map((f) => f.edgeIndex)).toEqual([0, 1, 2]);
+    expect(faces.slice(2).every((f) => f.axis === 'edge' && f.sign === 1)).toBe(true);
+    const flipped = profileFaces(concaveSolid);
+    expect(flipped).toHaveLength(8);
+    expect(Math.abs(dot(flipped[0].normal, v3(0, 0, 1)))).toBe(1);
+    expect(Math.abs(dot(flipped[1].normal, v3(0, 0, 1)))).toBe(1);
+  });
+
+  it('gives every side a true edge-plane normal, perpendicular to edge and ring normal', () => {
+    for (const face of profileFaces(concaveSolid).slice(2)) {
+      const a = concaveSolid.corners[face.edgeIndex!];
+      const b = concaveSolid.corners[(face.edgeIndex! + 1) % concaveSolid.corners.length];
+      expect(dot(face.normal, sub(b, a))).toBeCloseTo(0, 9);
+      expect(dot(face.normal, v3(0, 0, 1))).toBeCloseTo(0, 9);
+      expect(Math.hypot(face.normal.x, face.normal.y)).toBeCloseTo(1, 9);
+    }
+  });
+
+  it('picks the concave cap but not the notch', () => {
+    const solidUp: ExtrusionEntity = { id: 'c', type: 'extrusion', corners: concave.corners, depth: 200 };
+    const faces = profileFaces(solidUp);
+    const projector = topViewProjector();
+    const hit = (world: { x: number; y: number; z: number }) => {
+      const screen = projector.project(world);
+      return screen ? pickProfileFace(faces, screen, projector) : null;
+    };
+    expect(hit(v3(50, 200, 200))).toBe(0);
+    expect(hit(v3(250, 200, 200))).toBeNull();
+    expect(hit(v3(250, 50, 200))).toBe(0);
+  });
+});
+
+describe('pushPull: generic outlines', () => {
+  const triangle = { id: 't', type: 'polygon' as const, corners: [v3(0, 0, 0), v3(400, 0, 0), v3(100, 300, 0)] };
+  const concave = { id: 'c', type: 'polygon' as const, corners: [v3(0, 0, 0), v3(400, 0, 0), v3(400, 100, 0), v3(100, 100, 0), v3(100, 300, 0), v3(0, 300, 0)] };
+
+  it('moves only the two endpoints of a pulled triangle edge, keeping depth', () => {
+    const solidT: ExtrusionEntity = { id: 'ts', type: 'extrusion', corners: triangle.corners, depth: 200 };
+    const face = profileFaces(solidT).find((f) => f.edgeIndex === 0)!;
+    const result = pushPull(solidT, face, 10, 0);
+    expect(result.corners[0]).toEqual(v3(-10 / 3, -10, 0));
+    expect(result.corners[1]).toEqual(v3(410, -10, 0));
+    expect(result.corners[2]).toEqual(v3(100, 300, 0));
+    expect(result.depth).toBe(200);
+  });
+
+  it('pulls a concave boundary edge into the notch coherently', () => {
+    const solidC: ExtrusionEntity = { id: 'cs', type: 'extrusion', corners: concave.corners, depth: 200 };
+    const face = profileFaces(solidC).find((f) => f.edgeIndex === 2)!;
+    expect(face.normal.y).toBeCloseTo(1);
+    const result = pushPull(solidC, face, 10, 0);
+    expect(result.corners[2]).toEqual(v3(400, 110, 0));
+    expect(result.corners[3]).toEqual(v3(100, 110, 0));
+    for (const i of [0, 1, 4, 5]) expect(result.corners[i]).toEqual(concave.corners[i]);
+    expect(result.depth).toBe(200);
+  });
+
+  it('moves a forward-collinear edge run as one face', () => {
+    const stepped = { id: 'p', type: 'polygon' as const, corners: [v3(0, 0, 0), v3(200, 0, 0), v3(400, 0, 0), v3(400, 300, 0), v3(0, 300, 0)] };
+    const solidS: ExtrusionEntity = { id: 's', type: 'extrusion', corners: stepped.corners, depth: 100 };
+    const face = profileFaces(solidS).find((f) => f.edgeIndex === 0)!;
+    const result = pushPull(solidS, face, 50, 0);
+    expect(result.corners[0]).toEqual(v3(0, -50, 0));
+    expect(result.corners[1]).toEqual(v3(200, -50, 0));
+    expect(result.corners[2]).toEqual(v3(400, -50, 0));
+    expect(result.corners[3]).toEqual(v3(400, 300, 0));
+    expect(result.corners[4]).toEqual(v3(0, 300, 0));
+  });
+
+  it('moves the whole base cap while the far cap stays fixed', () => {
+    const solidT: ExtrusionEntity = { id: 'ts', type: 'extrusion', corners: triangle.corners, depth: 200 };
+    const baseCap = profileFaces(solidT).find((f) => f.axis === 'n' && f.sign === -1)!;
+    const result = pushPull(solidT, baseCap, 30, 0);
+    expect(result.corners).toEqual(triangle.corners.map((c) => add(c, scale(baseCap.normal, 30))));
+    expect(result.depth).toBe(230);
+    const farTop = result.corners.map((c) => add(c, scale(baseCap.normal, -result.depth)));
+    expect(farTop).toEqual(triangle.corners.map((c) => add(c, v3(0, 0, 200))));
+    const farCap = profileFaces(solidT)[0];
+    const grown = pushPull(solidT, farCap, 50, 0);
+    expect(grown.corners).toEqual(triangle.corners);
+    expect(grown.depth).toBe(250);
+  });
+
+  it('rejects an inward pull that collapses or inverts the outline', () => {
+    const solidT: ExtrusionEntity = { id: 'ts', type: 'extrusion', corners: triangle.corners, depth: 200 };
+    const face = profileFaces(solidT).find((f) => f.edgeIndex === 0)!;
+    expect(() => pushPull(solidT, face, -500, 0)).toThrow();
+    expect(() => pushPull(solidT, face, Number.NaN, 0)).toThrow();
+    const cap = profileFaces(solidT)[0];
+    expect(() => pushPull(solidT, cap, -500, 0)).toThrow();
+  });
+});
+
+describe('ExtrusionSession: generic outlines', () => {
+  const UP = v2(0, -1);
+  const triangle = { id: 't', type: 'polygon' as const, corners: [v3(0, 0, 0), v3(400, 0, 0), v3(100, 300, 0)] };
+
+  it('makes side faces selectable once a flat outline gains depth, and Tab still refuses while gripping', () => {
+    const session = new ExtrusionSession(triangle, 10, 0, 0);
+    expect(session.faces).toHaveLength(2);
+    session.setPull(120);
+    expect(session.depth).toBe(120);
+    expect(session.currentFaces()).toHaveLength(5);
+    expect(session.setFace(4)).toBe(true);
+    expect(session.face.edgeIndex).toBe(2);
+    session.update(v2(0, 300), false, 'mouse', UP);
+    session.update(v2(0, 300), true, 'mouse', UP);
+    expect(session.dragging).toBe(true);
+    expect(session.cycleFace()).toBe(false);
+  });
+
+  it('applies an exact typed pull ignoring the grid step, and keeps the last valid preview after a failed pull', () => {
+    const session = new ExtrusionSession(triangle, 10, 100, 0);
+    expect(session.setPull(12.345)).toBe(true);
+    expect(session.depth).toBe(12.345);
+    expect(session.error).toBeNull();
+    expect(session.setPull(-250)).toBe(true);
+    expect(session.depth).toBe(-250);
+    const corners = session.corners;
+    session.setFace(2);
+    expect(session.setPull(-10000)).toBe(false);
+    expect(session.error).toBeTruthy();
+    expect(session.corners).toBe(corners);
   });
 });
 

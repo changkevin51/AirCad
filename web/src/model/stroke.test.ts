@@ -4,7 +4,7 @@ import { snapCursor, type SnapResult } from './snap';
 import { makeRect, Sketch } from './sketch';
 import { alignRectToStart, anchorAfterCommit, buildEntityFromStroke, pullRectCorners, StrokeSession } from './stroke';
 import { circleStroke, rectStroke, topViewProjector } from './test-helpers';
-import { add, dot, normalize, scale, sub, v2, v3, type Vec2, type Vec3 } from './vec';
+import { add, distance, dot, normalize, scale, sub, v2, v3, type Vec2, type Vec3 } from './vec';
 
 const projector = topViewProjector(0.1, 400, 300);
 const plane = new WorkPlane('XY');
@@ -128,44 +128,40 @@ describe('buildEntityFromStroke', () => {
   });
 });
 
-describe('StrokeSession: circles', () => {
-  it.each([
-    ['XY', 81], ['XZ', 81], ['YZ', 81],
-    ['XY', 61], ['XZ', 61], ['YZ', 61],
-  ] as [PlaneKind, number][])('recognises a raw circle on %s from %s samples despite grid-snapped endpoints', (kind, count) => {
-    const circlePlane = new WorkPlane(kind, v3(100, 200, 300));
-    const raw = circleStroke(700, 800, 250).slice(0, count);
+describe('StrokeSession: closed outlines', () => {
+  it.each(['XY', 'XZ', 'YZ'] as const)('recognises a raw closed round stroke on %s as a polygon on the real plane', (kind) => {
+    const outlinePlane = new WorkPlane(kind, v3(100, 200, 300));
+    const raw = circleStroke(700, 800, 250, 60);
     const snapFor = (p: Vec2): SnapResult => ({
       type: 'grid',
-      world: circlePlane.toWorld(v2(p.x + 100, p.y + 100)),
+      world: outlinePlane.toWorld(v2(p.x + 100, p.y + 100)),
       plane: v2(p.x + 100, p.y + 100),
       screen: v2(p.x / 2, p.y / 2),
       onPlane: true,
-      raw: circlePlane.toWorld(p),
+      raw: outlinePlane.toWorld(p),
     });
-    const session = new StrokeSession(circlePlane, snapFor(raw[0]));
+    const session = new StrokeSession(outlinePlane, snapFor(raw[0]));
     for (const p of raw.slice(1)) {
-      session.add(snapFor(p), circlePlane.toWorld(p), v2(p.x / 2, p.y / 2), 0);
+      session.add(snapFor(p), outlinePlane.toWorld(p), v2(p.x / 2, p.y / 2), 0);
     }
     const result = session.recognize();
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(Math.abs(result.shape.center.x - 700)).toBeLessThan(1e-6);
-    expect(Math.abs(result.shape.center.y - 800)).toBeLessThan(1e-6);
-    expect(Math.abs(result.shape.radius - 250)).toBeLessThan(1e-6);
+    expect(result.shape?.kind).toBe('polygon');
+    if (result.shape?.kind !== 'polygon') return;
     const entity = buildEntityFromStroke(session, result.shape, { projector, vertices: [], tolerancePx: 14, gridStep: 1000 });
-    expect(entity.type).toBe('circle');
-    if (entity.type !== 'circle') return;
-    const expectedCenter = circlePlane.toWorld(v2(700, 800));
-    expect(entity.center.x).toBeCloseTo(expectedCenter.x, 6);
-    expect(entity.center.y).toBeCloseTo(expectedCenter.y, 6);
-    expect(entity.center.z).toBeCloseTo(expectedCenter.z, 6);
-    expect(entity.normal).toEqual(circlePlane.normal);
-    expect(entity.radius).toBeCloseTo(250, 6);
-    expect(anchorAfterCommit(entity)).toEqual(entity.center);
+    expect(entity.type).toBe('polygon');
+    if (entity.type !== 'polygon') return;
+    const centre = outlinePlane.toWorld(v2(700, 800));
+    expect(entity.corners.length).toBeGreaterThan(8);
+    for (const corner of entity.corners) {
+      expect(outlinePlane.contains(corner)).toBe(true);
+      expect(distance(corner, centre)).toBeCloseTo(250, 0);
+    }
+    const first = outlinePlane.toPlane(entity.corners[0]);
+    expect(Math.hypot(first.x - 950, first.y - 800)).toBeLessThan(1);
+    expect(anchorAfterCommit(entity)).toEqual(entity.corners[0]);
   });
 
-  it('does not turn a short arc into a circle just because the endpoints snap together', () => {
+  it('keeps an incomplete arc unrecognized even when grid-only snapped endpoints coincide', () => {
     const points = circleStroke(700, 800, 250).slice(0, 41);
     const workPlane = new WorkPlane('XY');
     const snapFor = (raw: Vec2, snapped: Vec2): SnapResult => ({
@@ -178,7 +174,27 @@ describe('StrokeSession: circles', () => {
       const snap = snapFor(point, snapped);
       session.add(snap, snap.raw, snap.screen, 0);
     });
-    expect(session.recognize().shape?.kind).not.toBe('circle');
+    expect(session.recognize().shape).toBeNull();
+  });
+
+  it('lets an explicit on-plane object snap close an open outline', () => {
+    const points = circleStroke(700, 800, 250).slice(0, 61);
+    const workPlane = new WorkPlane('XY');
+    const snapFor = (raw: Vec2, overrides: Partial<SnapResult> = {}): SnapResult => ({
+      type: 'grid', world: workPlane.toWorld(raw), plane: raw,
+      screen: v2(raw.x / 2, raw.y / 2), onPlane: true, raw: workPlane.toWorld(raw),
+      ...overrides,
+    });
+    const session = new StrokeSession(workPlane, snapFor(points[0]));
+    points.slice(1).forEach((point, index) => {
+      const closing = index === points.length - 2
+        ? { type: 'vertex' as const, world: workPlane.toWorld(points[0]), plane: points[0] }
+        : {};
+      const snap = snapFor(point, closing);
+      session.add(snap, snap.raw, snap.screen, 0);
+    });
+    const result = session.recognize();
+    expect(result.shape?.kind).toBe('polygon');
   });
 });
 

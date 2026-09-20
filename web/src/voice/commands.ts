@@ -1,10 +1,11 @@
 import { type CommandResult, type Commands } from '../model/commands';
 import { type ExtrusionSession, type FacePullMeasurement } from '../model/extrusion';
-import { profileFaces, pushPull, type ProfileFace } from '../model/faces';
+import { profileEdgeRun, profileFaces, pushPull, sameProfileFace, type ProfileFace } from '../model/faces';
 import { PLANES } from '../model/plane';
-import { isExtrudableProfile, rectFrame, type ProfileEntity } from '../model/sketch';
+import { polygonFrame } from '../model/polygon';
+import { isRectangleProfile, rectFrame, type ProfileEntity } from '../model/sketch';
 import { type LineMeasurement, type StrokeSession } from '../model/stroke';
-import { add, distance, dot, isFinite3, length, nearlyEqual, scale } from '../model/vec';
+import { add, distance, dot, isFinite3, length, nearlyEqual, scale, sub, type Vec3 } from '../model/vec';
 
 export const MAX_DIMENSION_MM = 1_000_000;
 export const MIN_DIMENSION_MM = 1e-6;
@@ -45,17 +46,19 @@ export function parseVoiceCommand(value: unknown): VoiceCommand {
 }
 
 function validateProfile(profile: ProfileEntity): void {
-  if (profile.type !== 'rect' && profile.type !== 'extrusion') throw new Error('The measured geometry is not supported');
-  const frame = rectFrame(profile);
+  if (profile.type !== 'rect' && profile.type !== 'extrusion' && profile.type !== 'polygon') {
+    throw new Error('The measured geometry is not supported');
+  }
+  const frame = polygonFrame(profile.corners);
   const depth = profile.type === 'extrusion' ? Math.abs(profile.depth) : 0;
-  if (!isExtrudableProfile(profile.corners) || !validDistance(frame.width) || !validDistance(frame.height)
+  if (!frame || !validDistance(frame.width) || !validDistance(frame.height)
     || (profile.type === 'extrusion' && !validDistance(depth))) {
     throw new Error('The measured geometry is not supported');
   }
 }
 
-function faceFor(base: ProfileEntity, axis: ProfileFace['axis'], sign: ProfileFace['sign']): ProfileFace | null {
-  return profileFaces(base).find((face) => face.axis === axis && face.sign === sign) ?? null;
+function faceFor(base: ProfileEntity, axis: ProfileFace['axis'], sign: ProfileFace['sign'], edgeIndex?: number): ProfileFace | null {
+  return profileFaces(base).find((face) => sameProfileFace(face, { axis, sign, edgeIndex })) ?? null;
 }
 
 function validateLineMeasurement(measurement: LineMeasurement): void {
@@ -71,7 +74,7 @@ function validateLineMeasurement(measurement: LineMeasurement): void {
 function validateFaceMeasurement(measurement: FacePullMeasurement): ProfileFace {
   if (measurement.direction !== 1 && measurement.direction !== -1) throw new Error('The measured pull direction is not supported');
   validateProfile(measurement.base);
-  const face = faceFor(measurement.base, measurement.axis, measurement.sign);
+  const face = faceFor(measurement.base, measurement.axis, measurement.sign, measurement.edgeIndex);
   if (!face) throw new Error('The measured face is no longer available');
   return face;
 }
@@ -134,37 +137,102 @@ function dispatchFacePull(command: VoiceCommand, operation: Extract<VoiceOperati
   validateProfile(operation.profile);
   const signed = measurement.direction * command.distance_mm;
   const base = measurement.base;
-  const frame = rectFrame(base);
+  const baseFrame = polygonFrame(base.corners)!;
   const baseDepth = base.type === 'extrusion' ? base.depth : 0;
   const solid = base.type === 'extrusion' && Math.abs(baseDepth) > 1e-9;
-  if (solid || measurement.axis !== 'n') {
-    const oldSize = measurement.axis === 'u' ? frame.width : measurement.axis === 'v' ? frame.height : Math.abs(baseDepth);
-    if (!validDistance(oldSize + signed)) throw new Error('That distance would collapse, invert or exceed a size limit');
-  }
   const pulled = pushPull(base, face, signed, 0);
-  const resultFrame = rectFrame({ id: base.id, type: 'rect', corners: pulled.corners });
-  if (!isExtrudableProfile(pulled.corners) || !Number.isFinite(pulled.depth)
-    || !validDistance(resultFrame.width) || !validDistance(resultFrame.height)
-    || !(Math.abs(pulled.depth) > MIN_DIMENSION_MM && Math.abs(pulled.depth) <= MAX_DIMENSION_MM)) {
+  const pulledFrame = polygonFrame(pulled.corners);
+  if (!pulledFrame || !validDistance(pulledFrame.width) || !validDistance(pulledFrame.height)
+    || !(Math.abs(pulled.depth) > MIN_DIMENSION_MM && Math.abs(pulled.depth) <= MAX_DIMENSION_MM)
+    || Math.abs(dot(pulledFrame.normal, baseFrame.normal) - 1) > 1e-9) {
     throw new Error('That distance would collapse, invert or exceed a size limit');
   }
-  if (solid) {
-    if (Math.sign(pulled.depth) !== Math.sign(baseDepth)) throw new Error('That distance would invert the solid');
-    const candidate: ProfileEntity = { id: base.id, type: 'extrusion', corners: pulled.corners, depth: pulled.depth };
-    const next = profileFaces(candidate);
-    const moved = next.find((candidateFace) => candidateFace.axis === measurement.axis && candidateFace.sign === measurement.sign);
-    const opposite = next.find((candidateFace) => candidateFace.axis === measurement.axis && candidateFace.sign === -measurement.sign);
-    const oldOpposite = faceFor(base, measurement.axis, -measurement.sign as ProfileFace['sign']);
-    if (!moved || !opposite || !oldOpposite
-      || !nearlyEqual(moved.center, add(face.center, scale(face.normal, signed)), GEOMETRY_TOLERANCE_MM)
-      || !nearlyEqual(opposite.center, oldOpposite.center, GEOMETRY_TOLERANCE_MM)
-      || (measurement.axis !== 'u' && Math.abs(resultFrame.width - frame.width) > GEOMETRY_TOLERANCE_MM)
-      || (measurement.axis !== 'v' && Math.abs(resultFrame.height - frame.height) > GEOMETRY_TOLERANCE_MM)
-      || (measurement.axis !== 'n' && Math.abs(Math.abs(pulled.depth) - Math.abs(baseDepth)) > GEOMETRY_TOLERANCE_MM)) {
+  if (solid && Math.sign(pulled.depth) !== Math.sign(baseDepth)) throw new Error('That distance would invert the solid');
+  const candidate: ProfileEntity = { id: base.id, type: 'extrusion', corners: pulled.corners, depth: pulled.depth };
+
+  if (isRectangleProfile(base.corners)) {
+    const frame = rectFrame(base);
+    const resultFrame = rectFrame({ id: base.id, type: 'rect', corners: pulled.corners as [Vec3, Vec3, Vec3, Vec3] });
+    if (solid || measurement.axis !== 'n') {
+      const oldSize = measurement.axis === 'u' ? frame.width : measurement.axis === 'v' ? frame.height : Math.abs(baseDepth);
+      if (!validDistance(oldSize + signed)) throw new Error('That distance would collapse, invert or exceed a size limit');
+    }
+    if (solid) {
+      const next = profileFaces(candidate);
+      const moved = next.find((candidateFace) => sameProfileFace(candidateFace, measurement));
+      const opposite = next.find((candidateFace) => candidateFace.axis === measurement.axis && candidateFace.sign === -measurement.sign);
+      const oldOpposite = profileFaces(base).find((candidateFace) => candidateFace.axis === measurement.axis && candidateFace.sign === -measurement.sign);
+      if (!moved || !opposite || !oldOpposite
+        || !nearlyEqual(moved.center, add(face.center, scale(face.normal, signed)), GEOMETRY_TOLERANCE_MM)
+        || !nearlyEqual(opposite.center, oldOpposite.center, GEOMETRY_TOLERANCE_MM)
+        || (measurement.axis !== 'u' && Math.abs(resultFrame.width - frame.width) > GEOMETRY_TOLERANCE_MM)
+        || (measurement.axis !== 'v' && Math.abs(resultFrame.height - frame.height) > GEOMETRY_TOLERANCE_MM)
+        || (measurement.axis !== 'n' && Math.abs(Math.abs(pulled.depth) - Math.abs(baseDepth)) > GEOMETRY_TOLERANCE_MM)) {
+        throw new Error('The measured pull cannot be represented without changing other geometry');
+      }
+    } else if (Math.abs(Math.abs(pulled.depth) - command.distance_mm) > GEOMETRY_TOLERANCE_MM) {
       throw new Error('The measured pull cannot be represented without changing other geometry');
     }
-  } else if (Math.abs(Math.abs(pulled.depth) - command.distance_mm) > GEOMETRY_TOLERANCE_MM) {
-    throw new Error('The measured pull cannot be represented without changing other geometry');
+  } else if (measurement.axis === 'n') {
+    const moved = faceFor(candidate, 'n', measurement.sign);
+    const opposite = faceFor(candidate, 'n', -measurement.sign as ProfileFace['sign']);
+    const oldOpposite = faceFor(base, 'n', -measurement.sign as ProfileFace['sign']);
+    if (!moved || !opposite || !oldOpposite) {
+      throw new Error('The measured pull cannot be represented without changing other geometry');
+    }
+    if (solid) {
+      const movedOk = moved.quad.every((p, i) => nearlyEqual(p, add(face.quad[i], scale(face.normal, signed)), GEOMETRY_TOLERANCE_MM));
+      const oppositeOk = opposite.quad.every((p, i) => nearlyEqual(p, oldOpposite.quad[i], GEOMETRY_TOLERANCE_MM));
+      if (!movedOk || !oppositeOk) {
+        throw new Error('The measured pull cannot be represented without changing other geometry');
+      }
+    } else {
+      const flat = pulled.corners.every((corner, i) => nearlyEqual(corner, base.corners[i], GEOMETRY_TOLERANCE_MM));
+      if (!flat || Math.abs(pulled.depth - face.sign * signed) > GEOMETRY_TOLERANCE_MM) {
+        throw new Error('The measured pull cannot be represented without changing other geometry');
+      }
+    }
+  } else {
+    if (Math.abs(pulled.depth - baseDepth) > GEOMETRY_TOLERANCE_MM) {
+      throw new Error('The measured pull cannot be represented without changing other geometry');
+    }
+    const candidateFaces = profileFaces(candidate);
+    const active = candidateFaces.find((candidateFace) => candidateFace.axis !== 'n' && candidateFace.edgeIndex === face.edgeIndex);
+    if (!active || Math.abs(dot(active.normal, face.normal) - 1) > 1e-9) {
+      throw new Error('The measured pull cannot be represented without changing other geometry');
+    }
+    const run = profileEdgeRun(base, face);
+    const runEdges = new Set(run);
+    const runVertices = new Set([...run, (run[run.length - 1] + 1) % base.corners.length]);
+    const shiftedPlane = (p: Parameters<typeof dot>[0]): number => dot(sub(p, face.quad[0]), face.normal);
+    for (const p of active.quad) {
+      if (Math.abs(shiftedPlane(p) - signed) > GEOMETRY_TOLERANCE_MM) {
+        throw new Error('The measured pull cannot be represented without changing other geometry');
+      }
+    }
+    for (const oldFace of profileFaces(base)) {
+      if (oldFace.axis === 'n' || oldFace.edgeIndex === undefined) continue;
+      const inRun = runEdges.has(oldFace.edgeIndex);
+      const moved = candidateFaces.find((candidateFace) => candidateFace.axis !== 'n' && candidateFace.edgeIndex === oldFace.edgeIndex);
+      if (!moved) throw new Error('The measured pull cannot be represented without changing other geometry');
+      if (inRun) {
+        if (Math.abs(dot(moved.normal, face.normal) - 1) > 1e-9
+          || moved.quad.some((p) => Math.abs(shiftedPlane(p) - signed) > GEOMETRY_TOLERANCE_MM)) {
+          throw new Error('The measured pull cannot be represented without changing other geometry');
+        }
+      } else if (moved.quad.some((p) => Math.abs(dot(sub(p, oldFace.quad[0]), oldFace.normal)) > GEOMETRY_TOLERANCE_MM)) {
+        throw new Error('The measured pull cannot be represented without changing other geometry');
+      }
+    }
+    for (const [i, corner] of pulled.corners.entries()) {
+      if (!runVertices.has(i)) {
+        if (!nearlyEqual(corner, base.corners[i], GEOMETRY_TOLERANCE_MM)) {
+          throw new Error('The measured pull cannot be represented without changing other geometry');
+        }
+      } else if (Math.abs(shiftedPlane(corner) - signed) > GEOMETRY_TOLERANCE_MM) {
+        throw new Error('The measured pull cannot be represented without changing other geometry');
+      }
+    }
   }
   beforeCommit();
   const result = commands.extrude(operation.profile.id, pulled.depth, pulled.corners);

@@ -1,4 +1,5 @@
 import { entityFaces, type Entity } from './sketch';
+import { triangulatePolygon } from './polygon';
 import type { Projector } from './snap';
 import { add, cross, distance, dot, sub, scale, type Vec2, type Vec3 } from './vec';
 
@@ -36,8 +37,8 @@ export function pickFace(entities: readonly Entity[], cursor: Vec2, projector: P
       }
       continue;
     }
-    for (const [a, b, c, d] of entityFaces(entity)) {
-      for (const triangle of [[a, b, c], [a, c, d]]) {
+    for (const face of entityFaces(entity)) {
+      for (const triangle of triangulatePolygon(face)) {
         const t = triangleHit(ray.origin, ray.dir, triangle[0], triangle[1], triangle[2]);
         if (t !== null && t <= nearest && projector.project(add(ray.origin, scale(ray.dir, t)))) {
           nearest = t;

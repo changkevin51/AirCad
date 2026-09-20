@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { circlePoints, entityTriangles, makeRect, rectFrame, Sketch } from './sketch';
+import { circlePoints, entitySegments, entityTriangles, entityVertices, makeRect, rectFrame, Sketch } from './sketch';
 import { distance, dot, normalize, sub, v3 } from './vec';
 
 const floor = (): [ReturnType<typeof v3>, ReturnType<typeof v3>, ReturnType<typeof v3>, ReturnType<typeof v3>] =>
@@ -82,6 +82,184 @@ describe('Sketch', () => {
     expect(frame.height).toBeCloseTo(250);
     expect(frame.uDir).toEqual(v3(1, 0, 0));
     expect(frame.vDir).toEqual(v3(0, 0, 1));
+  });
+});
+
+describe('Sketch: polygon profiles', () => {
+  const triangle = [v3(0, 0, 0), v3(400, 0, 0), v3(100, 300, 0)];
+  const concave = [v3(0, 0, 0), v3(400, 0, 0), v3(400, 100, 0), v3(100, 100, 0), v3(100, 300, 0), v3(0, 300, 0)];
+
+  it('stores a polygon on any work-plane offset, in either winding', () => {
+    const sketch = new Sketch();
+    const lifted = triangle.map((p) => v3(p.x, p.y, 500));
+    const flipped = [...concave].reverse();
+    const a = sketch.addEntity({ type: 'polygon', corners: lifted });
+    const b = sketch.addEntity({ type: 'polygon', corners: flipped });
+    expect(a.type).toBe('polygon');
+    expect(b.type).toBe('polygon');
+    expect(sketch.vertices()).toHaveLength(9);
+    expect(sketch.segments()).toHaveLength(9);
+    const solid = sketch.addEntity({ type: 'extrusion', corners: triangle, depth: -120 });
+    expect(entityVertices(solid)).toHaveLength(6);
+    expect(entitySegments(solid)).toHaveLength(9);
+    const capArea = entityTriangles(solid)
+      .filter((t) => t[0].z === t[1].z && t[1].z === t[2].z)
+      .reduce((sum, [a2, b2, c2]) => sum + Math.abs((b2.x - a2.x) * (c2.y - a2.y) - (c2.x - a2.x) * (b2.y - a2.y)) / 2, 0);
+    expect(capArea).toBeCloseTo(120000);
+  });
+
+  it('triangulates a concave cap without filling the notch', () => {
+    const sketch = new Sketch();
+    const solid = sketch.addEntity({ type: 'extrusion', corners: concave, depth: 100 });
+    const cap = entityTriangles(solid).filter((t) => t.every((p) => p.z === 0));
+    expect(cap).toHaveLength(4);
+    const area = cap.reduce((sum, [a, b, c]) => sum + Math.abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) / 2, 0);
+    expect(area).toBeCloseTo(60000);
+  });
+
+  it('round-trips polygon and generic extrusion entities through serialization', () => {
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'polygon', corners: triangle });
+    sketch.addEntity({ type: 'extrusion', corners: concave, depth: -250 });
+    const restored = Sketch.fromJSON(JSON.parse(sketch.serialize()));
+    expect(restored.toJSON()).toEqual(sketch.toJSON());
+  });
+
+  it('rejects open, warped, self-crossing and degenerate outlines', () => {
+    const sketch = new Sketch();
+    const bowtie = [v3(0, 0, 0), v3(400, 300, 0), v3(0, 300, 0), v3(400, 0, 0)];
+    const asymmetricCrossing = [v3(0, 0, 0), v3(400, 300, 0), v3(0, 300, 0), v3(300, 0, 0)];
+    const touching = [v3(0, 0, 0), v3(400, 0, 0), v3(200, 100, 0), v3(400, 300, 0), v3(0, 300, 0), v3(200, 100, 0)];
+    const backtracking = [v3(0, 0, 0), v3(400, 0, 0), v3(200, 0, 0), v3(100, 300, 0)];
+    const warped = [v3(0, 0, 0), v3(400, 0, 0), v3(400, 300, 0), v3(0, 300, 50)];
+    const collapsed = [v3(0, 0, 0), v3(100, 0, 0), v3(50, 0, 0)];
+    for (const corners of [bowtie, asymmetricCrossing, touching, backtracking, warped, collapsed]) {
+      expect(() => sketch.addEntity({ type: 'polygon', corners })).toThrow();
+      expect(() => sketch.addEntity({ type: 'extrusion', corners, depth: 100 })).toThrow();
+    }
+    expect(() => sketch.addEntity({ type: 'extrusion', corners: triangle, depth: 0 })).toThrow();
+    expect(() => sketch.addEntity({ type: 'extrusion', corners: triangle, depth: Number.NaN })).toThrow();
+    expect(sketch.size).toBe(0);
+    expect(sketch.canUndo).toBe(false);
+  });
+
+  it('accepts leading collinear vertices and huge coordinates', () => {
+    const sketch = new Sketch();
+    const collinear = [v3(0, 0, 0), v3(200, 0, 0), v3(400, 0, 0), v3(100, 300, 0)];
+    expect(sketch.addEntity({ type: 'polygon', corners: collinear }).type).toBe('polygon');
+    const big = triangle.map((p) => v3(p.x + 1e9, p.y + 1e9, p.z));
+    expect(sketch.addEntity({ type: 'polygon', corners: big }).type).toBe('polygon');
+  });
+});
+
+describe('Sketch: line loops', () => {
+  const addLine = (sketch: Sketch, a: ReturnType<typeof v3>, b: ReturnType<typeof v3>) =>
+    sketch.addEntity({ type: 'line', a, b });
+
+  it('detects a triangle loop regardless of line order or winding', () => {
+    const sketch = new Sketch();
+    const e1 = addLine(sketch, v3(400, 0, 0), v3(0, 0, 0));
+    const e2 = addLine(sketch, v3(100, 300, 0), v3(400, 0, 0));
+    const e3 = addLine(sketch, v3(0, 0, 0), v3(100, 300, 0));
+    const loops = sketch.closedLineProfiles;
+    expect(loops).toHaveLength(1);
+    expect(loops[0].corners).toHaveLength(3);
+    expect([...loops[0].sourceIds].sort()).toEqual([e1.id, e2.id, e3.id]);
+    expect(loops[0].id).toBe(`loop:${JSON.stringify([e1.id, e2.id, e3.id].sort())}`);
+    expect(sketch.getProfile(loops[0].id)).toBe(loops[0]);
+    expect(sketch.getProfile(e1.id)).toBe(loops[0]);
+    expect(sketch.drawable.map((entity) => entity.id)).toEqual([loops[0].id]);
+    expect(sketch.serialize()).not.toContain('loop:');
+    expect(sketch.size).toBe(3);
+  });
+
+  it('detects loops on non-zero plane offsets and ignores dangling branches', () => {
+    const sketch = new Sketch();
+    addLine(sketch, v3(0, 0, 700), v3(400, 0, 700));
+    addLine(sketch, v3(400, 0, 700), v3(400, 300, 700));
+    addLine(sketch, v3(400, 300, 700), v3(0, 300, 700));
+    addLine(sketch, v3(0, 300, 700), v3(0, 0, 700));
+    addLine(sketch, v3(0, 0, 700), v3(-900, -900, 700));
+    expect(sketch.closedLineProfiles).toHaveLength(1);
+    expect(sketch.closedLineProfiles[0].corners.every((p) => p.z === 700)).toBe(true);
+  });
+
+  it('detects two loops sharing one endpoint and two loops sharing an edge', () => {
+    const bowtie = new Sketch();
+    addLine(bowtie, v3(0, 0, 0), v3(300, 0, 0));
+    addLine(bowtie, v3(300, 0, 0), v3(150, 200, 0));
+    addLine(bowtie, v3(150, 200, 0), v3(0, 0, 0));
+    addLine(bowtie, v3(0, 0, 0), v3(-300, 0, 0));
+    addLine(bowtie, v3(-300, 0, 0), v3(-150, 200, 0));
+    addLine(bowtie, v3(-150, 200, 0), v3(0, 0, 0));
+    expect(bowtie.closedLineProfiles).toHaveLength(2);
+
+    const adjacent = new Sketch();
+    addLine(adjacent, v3(0, 0, 0), v3(400, 0, 0));
+    addLine(adjacent, v3(400, 0, 0), v3(400, 300, 0));
+    addLine(adjacent, v3(400, 300, 0), v3(0, 300, 0));
+    const shared = addLine(adjacent, v3(0, 300, 0), v3(0, 0, 0));
+    addLine(adjacent, v3(0, 300, 0), v3(-400, 300, 0));
+    addLine(adjacent, v3(-400, 300, 0), v3(-400, 0, 0));
+    addLine(adjacent, v3(-400, 0, 0), v3(0, 0, 0));
+    const loops = adjacent.closedLineProfiles;
+    expect(loops).toHaveLength(2);
+    expect(adjacent.getProfile(shared.id)).toBeNull();
+    expect(adjacent.getProfile(loops[0].id)).not.toBeNull();
+  });
+
+  it('rejects open, missing-edge, warped, crossing and duplicated boundaries', () => {
+    const open = new Sketch();
+    addLine(open, v3(0, 0, 0), v3(400, 0, 0));
+    addLine(open, v3(400, 0, 0), v3(100, 300, 0));
+    expect(open.closedLineProfiles).toHaveLength(0);
+
+    const warped = new Sketch();
+    addLine(warped, v3(0, 0, 0), v3(400, 0, 0));
+    addLine(warped, v3(400, 0, 0), v3(400, 300, 50));
+    addLine(warped, v3(400, 300, 50), v3(0, 300, 25));
+    addLine(warped, v3(0, 300, 25), v3(0, 0, 0));
+    expect(warped.closedLineProfiles).toHaveLength(0);
+
+    const crossing = new Sketch();
+    addLine(crossing, v3(0, 0, 0), v3(400, 300, 0));
+    addLine(crossing, v3(400, 300, 0), v3(0, 300, 0));
+    addLine(crossing, v3(0, 300, 0), v3(400, 0, 0));
+    addLine(crossing, v3(400, 0, 0), v3(0, 0, 0));
+    expect(crossing.closedLineProfiles).toHaveLength(0);
+
+    const duplicated = new Sketch();
+    addLine(duplicated, v3(0, 0, 0), v3(400, 0, 0));
+    addLine(duplicated, v3(0, 0, 0), v3(400, 0, 0));
+    addLine(duplicated, v3(400, 0, 0), v3(100, 300, 0));
+    addLine(duplicated, v3(100, 300, 0), v3(0, 0, 0));
+    expect(duplicated.closedLineProfiles).toHaveLength(0);
+  });
+
+  it('keeps loop-cache identity stable and invalidates it on every mutation', () => {
+    const sketch = new Sketch();
+    const e1 = addLine(sketch, v3(0, 0, 0), v3(400, 0, 0));
+    addLine(sketch, v3(400, 0, 0), v3(100, 300, 0));
+    addLine(sketch, v3(100, 300, 0), v3(0, 0, 0));
+    const first = sketch.closedLineProfiles;
+    const firstDrawable = sketch.drawable;
+    expect(sketch.closedLineProfiles).toBe(first);
+    expect(sketch.drawable).toBe(firstDrawable);
+    const added = addLine(sketch, v3(0, 0, 500), v3(100, 0, 500));
+    expect(sketch.closedLineProfiles).not.toBe(first);
+    expect(sketch.closedLineProfiles).toHaveLength(1);
+    sketch.removeEntity(added.id);
+    expect(sketch.closedLineProfiles).toHaveLength(1);
+    sketch.removeEntity(e1.id);
+    expect(sketch.closedLineProfiles).toHaveLength(0);
+    sketch.undo();
+    expect(sketch.closedLineProfiles).toHaveLength(1);
+    sketch.undo();
+    expect(sketch.closedLineProfiles).toHaveLength(1);
+    sketch.load(JSON.parse(sketch.serialize()));
+    expect(sketch.closedLineProfiles).toHaveLength(1);
+    sketch.load({ version: 1, units: 'mm', entities: [] });
+    expect(sketch.closedLineProfiles).toHaveLength(0);
   });
 });
 
