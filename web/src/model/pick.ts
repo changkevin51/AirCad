@@ -1,4 +1,4 @@
-import { entityFaces, type CylinderEntity, type Entity } from './sketch';
+import { entityTriangles, type CylinderEntity, type Entity } from './sketch';
 import type { Projector } from './snap';
 import { add, cross, distance, dot, normalize, sub, scale, type Vec2, type Vec3 } from './vec';
 
@@ -45,13 +45,11 @@ export function pickFace(entities: readonly Entity[], cursor: Vec2, projector: P
       }
       continue;
     }
-    for (const [a, b, c, d] of entityFaces(entity)) {
-      for (const triangle of [[a, b, c], [a, c, d]]) {
-        const t = triangleHit(ray.origin, ray.dir, triangle[0], triangle[1], triangle[2]);
-        if (t !== null && t <= nearest && projector.project(add(ray.origin, scale(ray.dir, t)))) {
-          nearest = t;
-          best = entity;
-        }
+    for (const [a, b, c] of entityTriangles(entity)) {
+      const t = triangleHit(ray.origin, ray.dir, a, b, c);
+      if (t !== null && t <= nearest && projector.project(add(ray.origin, scale(ray.dir, t)))) {
+        nearest = t;
+        best = entity;
       }
     }
   }

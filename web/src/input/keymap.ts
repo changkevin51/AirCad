@@ -28,6 +28,7 @@ export type PressAction =
   | 'measure'
   | 'select'
   | 'move'
+  | 'scale'
   | 'extrude'
   | 'confirm'
   | 'export'
@@ -80,11 +81,12 @@ export const PRESS_BINDINGS: readonly KeyBinding<PressAction>[] = [
   { action: 'redo', codes: ['KeyY'], mods: { ctrl: true }, label: 'Ctrl+Y', help: 'Redo', group: 'edit' },
   { action: 'delete', codes: ['Delete', 'Backspace'], mods: { primary: false }, label: 'Delete', help: 'Delete the selected, hovered, or last entity', group: 'edit' },
   { action: 'clear', codes: ['Backspace'], mods: { primary: true }, label: 'Ctrl+Backspace', help: 'Clear the whole sketch', group: 'edit' },
-  { action: 'cancel', codes: ['Escape'], label: 'Esc', help: 'Cancel stroke, move, or extrusion / deselect / close overlays', group: 'edit' },
+  { action: 'cancel', codes: ['Escape'], label: 'Esc', help: 'Cancel stroke, move, scale, or extrusion / deselect / close overlays', group: 'edit' },
   { action: 'select', codes: ['KeyS'], mods: { primary: false, ctrl: false, alt: false }, label: 'S', help: 'Select the shape under the cursor (or pinch / click)', group: 'edit' },
   { action: 'move', codes: ['KeyM'], mods: { primary: false, ctrl: false, alt: false }, label: 'M', help: 'Move the selected shape: pinch or drag, then Enter or M to apply; Esc cancels', group: 'tools' },
-  { action: 'extrude', codes: ['KeyQ'], mods: { primary: false, ctrl: false, alt: false }, label: 'Q', help: 'Push/pull the selected rectangle, circle, or solid: pick a face, pinch and move', group: 'tools' },
-  { action: 'confirm', codes: ['Enter', 'NumpadEnter'], label: 'Enter', help: 'Apply the move or extrusion preview (M / Q also applies)', group: 'tools' },
+  { action: 'scale', codes: ['KeyR'], mods: { primary: false, ctrl: false, alt: false }, label: 'R', help: 'Scale from a corner: pinch or drag it; the opposite corner stays fixed. Enter / R applies; Esc cancels', group: 'tools' },
+  { action: 'extrude', codes: ['KeyQ'], mods: { primary: false, ctrl: false, alt: false }, label: 'Q', help: 'Push/pull the selected rectangle, triangle, circle, or solid: pick a face, pinch and move', group: 'tools' },
+  { action: 'confirm', codes: ['Enter', 'NumpadEnter'], label: 'Enter', help: 'Apply the move, scale, or extrusion preview (M / R / Q also applies)', group: 'tools' },
   { action: 'measure', codes: ['KeyL'], label: 'L', help: 'Type a length, circle diameter, rectangle size, or extrusion depth', group: 'tools' },
   { action: 'export', codes: ['KeyE'], label: 'E', help: 'Export to FreeCAD', group: 'tools' },
   { action: 'toggleNavAssist', codes: ['KeyN'], label: 'N', help: 'Off-hand palm navigation on / off', group: 'tools' },

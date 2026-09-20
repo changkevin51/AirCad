@@ -4,7 +4,7 @@ import type { PlaneInfo } from '../model/plane';
 import type { SnapType } from '../model/snap';
 import { formatMm } from '../model/sketch';
 
-export type Mode = 'READY' | 'DRAWING' | 'EXTRUDING' | 'MOVING' | 'ORBIT' | 'PAN';
+export type Mode = 'READY' | 'DRAWING' | 'EXTRUDING' | 'MOVING' | 'SCALING' | 'ORBIT' | 'PAN';
 
 export interface HudState {
   mode: Mode;
@@ -108,6 +108,10 @@ export class Hud {
           : state.extrusion.dragging
             ? 'Move to pull the highlighted face out, back to push in. Release to pause. Enter applies · Esc cancels.'
             : 'Pinch thumb + index and move (or hold Space / left-drag) to pull the highlighted face. Hover another face or press Tab to switch. Enter applies · Esc cancels.'
+      : state.mode === 'SCALING'
+        ? state.tracking === 'lost'
+          ? 'Tracking lost — scaling paused. Show your hand, release the pinch, then pinch again to continue.'
+          : 'Pinch or drag a corner (or rim point) to scale proportionally. The opposite corner stays fixed. Enter / R applies · Esc cancels.'
       : state.edgeOn ? `Work plane ${state.plane.label} is edge-on. Press Tab or 1 / 2 / 3, or orbit with Shift.`
         : state.mode === 'MOVING'
           ? state.tracking === 'lost'

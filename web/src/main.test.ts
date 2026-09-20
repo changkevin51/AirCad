@@ -1,8 +1,9 @@
+import { OrthographicCamera, PerspectiveCamera, Raycaster, Vector2, Vector3 } from 'three';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HandsMessage, NavMessage, TrackedHandMessage } from './input/tracker-client';
 import type { AirCadApi } from './main';
 import { makeRect, type Entity } from './model/sketch';
-import { circleStroke, rectStroke } from './model/test-helpers';
+import { circleStroke, rectStroke, triangleStroke } from './model/test-helpers';
 import { v2, v3, type Vec2, type Vec3 } from './model/vec';
 
 const h = vi.hoisted(() => ({
@@ -36,12 +37,19 @@ const h = vi.hoisted(() => ({
   listeners: new Map<string, ((event: unknown) => void)[]>(),
   hudStates: [] as { mode: string }[],
   hudKeys: [] as { key: string; label: string }[][],
-  renderer: { extrusions: [] as unknown[], activeFaces: [] as unknown[], sketches: [] as (readonly Entity[])[] },
+  renderer: {
+    extrusions: [] as unknown[],
+    activeFaces: [] as unknown[],
+    sketches: [] as (readonly Entity[])[],
+    ghosts: [] as { points: readonly Vec3[] | null; label: { text: string; at: Vec3 } | null }[],
+    ghostClosed: [] as boolean[],
+  },
   viewDirection: { x: 0, y: 0, z: -1 } as Vec3,
   help: { visible: false },
   measure: { isOpen: false, submit: null as null | ((text: string) => void) },
   raf: null as null | ((time: number) => void),
   nowMs: 10_000,
+  resizeCallbacks: [] as (() => void)[],
 }));
 
 vi.mock('./scene/viewport', () => ({
@@ -51,7 +59,8 @@ vi.mock('./scene/viewport', () => ({
     ortho = false;
     readonly scene = { add: (_object: unknown) => {} };
     constructor(readonly container: unknown) {}
-    onResize(): () => void {
+    onResize(cb: () => void): () => void {
+      h.resizeCallbacks.push(cb);
       return () => {};
     }
     render(): void {}
@@ -109,7 +118,10 @@ vi.mock('./render/sketch-renderer', () => ({
       if (face) h.renderer.activeFaces.push(face);
     }
     setLastLabel(): void {}
-    setGhost(): void {}
+    setGhost(points: readonly Vec3[] | null, closed: boolean, label: { text: string; at: Vec3 } | null): void {
+      h.renderer.ghosts.push({ points, label });
+      h.renderer.ghostClosed.push(closed);
+    }
     setInk(): void {}
     fadeOut(): void {}
     tick(): void {}
@@ -274,12 +286,15 @@ beforeEach(async () => {
   h.renderer.extrusions = [];
   h.renderer.activeFaces = [];
   h.renderer.sketches = [];
+  h.renderer.ghosts = [];
+  h.renderer.ghostClosed = [];
   h.viewDirection = { x: 0, y: 0, z: -1 };
   h.help.visible = false;
   h.measure.isOpen = false;
   h.measure.submit = null;
   h.raf = null;
   h.nowMs = 10_000;
+  h.resizeCallbacks = [];
   vi.clearAllMocks();
   const windowStub = {
     addEventListener: (type: string, listener: (event: unknown) => void) => {
@@ -1323,5 +1338,972 @@ describe('shape movement', () => {
     runFrame();
     expect(h.hudStates.at(-1)?.mode).toBe('READY');
     expect(api.sketch.size).toBe(0);
+  });
+});
+
+describe('corner scaling', () => {
+  const preview = (id: string): Entity | undefined => h.renderer.sketches.at(-1)?.find((entity) => entity.id === id);
+  const previewCorner = (id: string, index: number): Vec3 => {
+    const entity = preview(id);
+    if (entity?.type !== 'rect' && entity?.type !== 'extrusion') throw new Error('expected a rectangular preview');
+    return entity.corners[index];
+  };
+  const expectVec3 = (point: Vec3, x: number, y: number, z: number): void => {
+    expect(point.x).toBeCloseTo(x, 6);
+    expect(point.y).toBeCloseTo(y, 6);
+    expect(point.z).toBeCloseTo(z, 6);
+  };
+  function keyDown(code: string, overrides: Record<string, unknown> = {}) {
+    const event = { code, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, repeat: false, target: null, preventDefault: vi.fn(), ...overrides };
+    fire('keydown', event);
+    return event;
+  }
+  function addBox(): Entity {
+    const added = api.commands.addRect(makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
+    if (!added.ok) throw new Error(added.error);
+    return added.entity;
+  }
+  function startScale(point: Vec2 = v2(500, 400), grid = false): Entity {
+    const entity = addBox();
+    api.setCursor(point);
+    if (!grid) api.press('toggleGrid');
+    api.press('scale');
+    return entity;
+  }
+
+  it('drags a locked corner to scale a rect, applies with Enter, and undoes cleanly', () => {
+    const added = api.commands.addRect(makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
+    if (!added.ok) throw new Error(added.error);
+    const id = added.entity.id;
+    const before = api.sketch.serialize();
+    api.press('toggleGrid');
+    api.setCursor(v2(500, 400));
+    runFrame();
+    expect(h.hudKeys.at(-1)).toContainEqual({ key: 'R', label: 'scale' });
+    keyDown('KeyR');
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('SCALING');
+    const keys = h.hudKeys.at(-1) ?? [];
+    expect(keys).toContainEqual({ key: 'Enter / R', label: 'apply' });
+    expect(keys).toContainEqual({ key: 'Esc', label: 'cancel' });
+
+    h.mouse.onHold?.('draw', true);
+    h.mouse.onMove?.(v2(700, 550));
+    const scaled = preview(id);
+    if (scaled?.type !== 'rect') throw new Error('expected a rect preview');
+    [v3(100, 100, 0), v3(700, 100, 0), v3(700, 550, 0), v3(100, 550, 0)].forEach((expected, index) => {
+      expectVec3(scaled.corners[index], expected.x, expected.y, expected.z);
+    });
+    expect(api.sketch.serialize()).toBe(before);
+    expect(api.lastRecognition()).toBeNull();
+    const ghost = h.renderer.ghosts.at(-1);
+    expect(ghost?.label?.text).toContain('150%');
+    expect(ghost?.label?.text).toContain('fixed corner');
+    expectVec3(ghost!.label!.at, 100, 100, 0);
+    expectVec3(ghost!.points![0], 100, 100, 0);
+    expectVec3(ghost!.points![1], 700, 550, 0);
+
+    h.mouse.onHold?.('draw', false);
+    api.press('confirm');
+    expect(h.renderer.ghosts.at(-1)).toEqual({ points: null, label: null });
+    expect(api.sketch.get(id)).toEqual(scaled);
+    expect(api.selected()?.id).toBe(id);
+    expect(api.commands.undo()).toBe('scale rect');
+    expect(api.sketch.serialize()).toBe(before);
+    expect(api.commands.redo()).toBe('scale rect');
+    expect(api.sketch.get(id)).toEqual(scaled);
+  });
+
+  it.each([0, 1, 2, 3])('locks rect corner %i and keeps the opposite corner fixed', (index) => {
+    const entity = addBox();
+    if (entity.type !== 'rect') throw new Error('expected a rect');
+    const before = api.sketch.serialize();
+    api.press('toggleGrid');
+    const corner = entity.corners[index];
+    const anchor = entity.corners[(index + 2) % 4];
+    api.setCursor(v2(corner.x, corner.y));
+    api.press('scale');
+    api.hold('draw', true);
+    api.setCursor(v2(anchor.x + 1.5 * (corner.x - anchor.x), anchor.y + 1.5 * (corner.y - anchor.y)));
+    api.hold('draw', false);
+    const scaled = preview(entity.id);
+    if (scaled?.type !== 'rect') throw new Error('expected a rect preview');
+    scaled.corners.forEach((point, j) => {
+      const origin = entity.corners[j];
+      expectVec3(point, anchor.x + 1.5 * (origin.x - anchor.x), anchor.y + 1.5 * (origin.y - anchor.y), 0);
+    });
+    expect(api.sketch.serialize()).toBe(before);
+    api.press('cancel');
+  });
+
+  it('scales a line from an endpoint with the other endpoint fixed', () => {
+    const added = api.commands.addLine(v3(100, 100, 0), v3(500, 400, 0));
+    if (!added.ok) throw new Error(added.error);
+    api.press('toggleGrid');
+    api.setCursor(v2(500, 400));
+    api.press('scale');
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    api.hold('draw', false);
+    const scaled = preview(added.entity.id);
+    expect(scaled).toMatchObject({ type: 'line', a: v3(100, 100, 0), b: v3(700, 550, 0) });
+    api.press('cancel');
+  });
+
+  it('scales a circle from a rim point but not from its centre', () => {
+    const added = api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
+    if (!added.ok) throw new Error(added.error);
+    const id = added.entity.id;
+    api.press('toggleGrid');
+    api.setCursor(v2(250, 250));
+    api.press('scale');
+    api.hold('draw', true);
+    api.setCursor(v2(280, 250));
+    expect(preview(id)).toBe(added.entity);
+    api.setCursor(v2(350, 250));
+    api.setCursor(v2(450, 250));
+    const scaled = preview(id);
+    if (scaled?.type !== 'circle') throw new Error('expected a circle preview');
+    expectVec3(scaled.center, 300, 250, 0);
+    expect(scaled.radius).toBeCloseTo(150, 6);
+    api.hold('draw', false);
+    api.press('cancel');
+    expect(api.sketch.get(id)).toEqual(added.entity);
+  });
+
+  it.each([200, -200])('scales a box from a base corner with the opposite cap corner fixed (depth %i)', (depth) => {
+    const previousProject = h.projector.project;
+    const previousRay = h.projector.ray;
+    h.projector.project = (point: Vec3): Vec2 => v2(point.x, point.y);
+    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({ origin: v3(point.x, point.y, 1000), dir: v3(0, 0, -1) });
+    try {
+      const entity = api.sketch.addEntity({
+        type: 'extrusion',
+        corners: makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300),
+        depth,
+      });
+      if (entity.type !== 'extrusion') throw new Error('unreachable');
+      const before = api.sketch.serialize();
+      api.press('toggleGrid');
+      api.setCursor(v2(500, 400));
+      api.press('scale');
+      api.hold('draw', true);
+      api.setCursor(v2(700, 550));
+      api.hold('draw', false);
+      const scaled = preview(entity.id);
+      if (scaled?.type !== 'extrusion') throw new Error('expected an extrusion preview');
+      const anchor = v3(100, 100, depth);
+      scaled.corners.forEach((point, j) => {
+        const origin = entity.corners[j];
+        expectVec3(point, anchor.x + 1.5 * (origin.x - anchor.x), anchor.y + 1.5 * (origin.y - anchor.y), anchor.z + 1.5 * (origin.z - anchor.z));
+      });
+      expect(scaled.depth).toBeCloseTo(depth * 1.5, 6);
+      expect(api.sketch.serialize()).toBe(before);
+      api.press('cancel');
+      expect(api.sketch.get(entity.id)).toEqual(entity);
+    } finally {
+      h.projector.project = previousProject;
+      h.projector.ray = previousRay;
+    }
+  });
+
+  it.each([100, -100])('scales a cylinder from a rim point with the opposite cap rim fixed (depth %i)', (depth) => {
+    const previousProject = h.projector.project;
+    const previousRay = h.projector.ray;
+    h.projector.project = (point: Vec3): Vec2 => v2(point.x, point.y);
+    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({ origin: v3(point.x, point.y, 1000), dir: v3(0, 0, -1) });
+    try {
+      const entity = api.sketch.addEntity({ type: 'cylinder', center: v3(300, 300, 0), normal: v3(0, 0, 1), radius: 50, depth });
+      api.press('toggleGrid');
+      api.setCursor(v2(350, 300));
+      api.press('scale');
+      api.hold('draw', true);
+      api.setCursor(v2(400, 300));
+      api.hold('draw', false);
+      const scaled = preview(entity.id);
+      if (scaled?.type !== 'cylinder') throw new Error('expected a cylinder preview');
+      expectVec3(scaled.center, 325, 300, -depth / 2);
+      expect(scaled.radius).toBeCloseTo(75, 6);
+      expect(scaled.depth).toBeCloseTo(depth * 1.5, 6);
+      api.press('cancel');
+      expect(api.sketch.get(entity.id)).toEqual(entity);
+    } finally {
+      h.projector.project = previousProject;
+      h.projector.ray = previousRay;
+    }
+  });
+
+  it.each([['triangle', 0], ['prism', 200], ['prism', -200]] as const)('scales a %s from a corner at depth %i', (type, depth) => {
+    const previousProject = h.projector.project;
+    const previousRay = h.projector.ray;
+    h.projector.project = (point: Vec3): Vec2 => v2(point.x, point.y);
+    h.projector.ray = (point: Vec2) => ({ origin: v3(point.x, point.y, 1000), dir: v3(0, 0, -1) });
+    try {
+      const corners: [Vec3, Vec3, Vec3] = [v3(100, 100, 0), v3(500, 100, 0), v3(200, 400, 0)];
+      const entity = api.sketch.addEntity(type === 'triangle' ? { type, corners } : { type, corners, depth });
+      const before = api.sketch.serialize();
+      api.press('toggleGrid');
+      api.setCursor(v2(200, 400));
+      api.press('scale');
+      api.hold('draw', true);
+      api.setCursor(v2(50, 550));
+      api.hold('draw', false);
+      const scaled = preview(entity.id);
+      if (scaled?.type !== 'triangle' && scaled?.type !== 'prism') throw new Error('expected a triangular preview');
+      expectVec3(scaled.corners[0], -100, 100, -depth / 2);
+      expectVec3(scaled.corners[1], 500, 100, -depth / 2);
+      expectVec3(scaled.corners[2], 50, 550, -depth / 2);
+      if (scaled.type === 'prism') expect(scaled.depth).toBeCloseTo(depth * 1.5, 6);
+      expect(api.sketch.serialize()).toBe(before);
+      api.press('confirm');
+      expect(api.sketch.get(entity.id)).toEqual(scaled);
+      expect(api.commands.undo()).toBe(`scale ${type}`);
+      expect(api.sketch.serialize()).toBe(before);
+    } finally {
+      h.projector.project = previousProject;
+      h.projector.ray = previousRay;
+    }
+  });
+
+  it.each([
+    ['perspective', () => new PerspectiveCamera(45, 1.25, 1, 100000)],
+    ['orthographic', () => new OrthographicCamera(-1000, 1000, 800, -800, 1, 100000)],
+  ] as const)('scales a box uniformly in 3D through a real %s camera regardless of the work plane', (_label, makeCamera) => {
+    const camera = makeCamera();
+    camera.position.set(1600, -1800, 1400);
+    camera.up.set(0, 0, 1);
+    camera.lookAt(200, 150, 50);
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld();
+    const raycaster = new Raycaster();
+    const previousProject = h.projector.project;
+    const previousRay = h.projector.ray;
+    h.projector.project = (point: Vec3): Vec2 => {
+      const ndc = new Vector3(point.x, point.y, point.z).project(camera);
+      return v2((ndc.x + 1) * 500, (1 - ndc.y) * 400);
+    };
+    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => {
+      raycaster.setFromCamera(new Vector2(point.x / 500 - 1, 1 - point.y / 400), camera);
+      return {
+        origin: v3(raycaster.ray.origin.x, raycaster.ray.origin.y, raycaster.ray.origin.z),
+        dir: v3(raycaster.ray.direction.x, raycaster.ray.direction.y, raycaster.ray.direction.z),
+      };
+    };
+    try {
+      const entity = api.sketch.addEntity({
+        type: 'extrusion',
+        corners: makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300),
+        depth: 200,
+      });
+      if (entity.type !== 'extrusion') throw new Error('unreachable');
+      api.press('toggleGrid');
+      api.press('cyclePlane');
+      const start = h.projector.project(v3(500, 400, 0));
+      api.setCursor(start);
+      api.press('scale');
+      api.hold('draw', true);
+      api.setCursor(h.projector.project(v3(900, 700, -200)));
+      api.hold('draw', false);
+      const scaled = preview(entity.id);
+      if (scaled?.type !== 'extrusion') throw new Error('expected an extrusion preview');
+      const anchor = v3(100, 100, 200);
+      scaled.corners.forEach((point, j) => {
+        const origin = entity.corners[j];
+        expectVec3(point, anchor.x + 2 * (origin.x - anchor.x), anchor.y + 2 * (origin.y - anchor.y), anchor.z + 2 * (origin.z - anchor.z));
+      });
+      expect(scaled.depth).toBeCloseTo(400, 4);
+      api.press('cancel');
+      expect(api.sketch.get(entity.id)).toEqual(entity);
+    } finally {
+      h.projector.project = previousProject;
+      h.projector.ray = previousRay;
+    }
+  });
+
+  it('requires a corner lock first, then keeps scaling the same shape when the cursor roams', () => {
+    const entity = addBox();
+    api.setCursor(v2(300, 250));
+    api.press('toggleGrid');
+    api.press('scale');
+    api.hold('draw', true);
+    api.setCursor(v2(350, 300));
+    api.setCursor(v2(320, 260));
+    expect(preview(entity.id)).toBe(entity);
+    api.setCursor(v2(500, 400));
+    api.setCursor(v2(700, 550));
+    expectVec3(previewCorner(entity.id, 2), 700, 550, 0);
+    api.setCursor(v2(50, 700));
+    expectVec3(previewCorner(entity.id, 2), 356, 292, 0);
+    expect(previewCorner(entity.id, 0)).toEqual(v3(100, 100, 0));
+    api.hold('draw', false);
+    api.press('cancel');
+    expect(api.sketch.get(entity.id)).toEqual(entity);
+  });
+
+  it('rebases the pointer on regrips without jumping and adds no history until applied', () => {
+    const entity = startScale();
+    const before = api.sketch.serialize();
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    expectVec3(previewCorner(entity.id, 2), 700, 550, 0);
+    api.hold('draw', false);
+    api.setCursor(v2(600, 500));
+    api.hold('draw', true);
+    api.setCursor(v2(680, 560));
+    api.hold('draw', false);
+    expectVec3(previewCorner(entity.id, 2), 780, 610, 0);
+    expect(previewCorner(entity.id, 0)).toEqual(v3(100, 100, 0));
+    expect(api.sketch.serialize()).toBe(before);
+    api.press('cancel');
+  });
+
+  it('snaps the scale factor to the grid along the diagonal and re-baselines on G', () => {
+    const entity = addBox();
+    api.setCursor(v2(500, 400));
+    api.press('scale');
+    api.hold('draw', true);
+    api.setCursor(v2(600, 475));
+    expectVec3(previewCorner(entity.id, 2), 580, 460, 0);
+    api.press('toggleGrid');
+    api.setCursor(v2(640, 505));
+    expectVec3(previewCorner(entity.id, 2), 620, 490, 0);
+    api.hold('draw', false);
+    api.press('cancel');
+  });
+
+  it('rejects collapsing or inverted drags and resumes from the last valid preview', () => {
+    const entity = startScale();
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    const good = preview(entity.id);
+    api.setCursor(v2(50, 50));
+    expect(preview(entity.id)).toBe(good);
+    api.setCursor(v2(600, 475));
+    expectVec3(previewCorner(entity.id, 2), 600, 475, 0);
+    const scaled = preview(entity.id);
+    api.setCursor(v2(Infinity, Infinity));
+    expect(preview(entity.id)).toBe(scaled);
+    api.setCursor(v2(700, 550));
+    expect(preview(entity.id)).toBe(scaled);
+    api.setCursor(v2(710, 560));
+    const moved = previewCorner(entity.id, 2);
+    expect(moved.x).toBeGreaterThan(600);
+    expect(previewCorner(entity.id, 0)).toEqual(v3(100, 100, 0));
+    api.hold('draw', false);
+    api.press('cancel');
+  });
+
+  it('Esc cancels without an undo entry and restores the selection', () => {
+    const entity = startScale();
+    const before = api.sketch.serialize();
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    api.hold('draw', false);
+    keyDown('Escape');
+    expect(api.sketch.serialize()).toBe(before);
+    expect(h.renderer.ghosts.at(-1)).toEqual({ points: null, label: null });
+    expect(preview(entity.id)).toEqual(entity);
+    expect(api.selected()?.id).toBe(entity.id);
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('READY');
+    expect(api.commands.undo()).toBe('add rect');
+  });
+
+  it('applying without a grip keeps the shape and the redo stack', () => {
+    const entity = startScale();
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    api.hold('draw', false);
+    api.press('scale');
+    const scaledSerialized = api.sketch.serialize();
+    api.press('undo');
+    api.press('scale');
+    api.press('confirm');
+    expect(api.sketch.get(entity.id)).toEqual(entity);
+    api.press('redo');
+    expect(api.sketch.serialize()).toBe(scaledSerialized);
+  });
+
+  it.each([
+    ['an empty hands frame', () => emitEmptyHands()],
+    ['tracker disconnection', () => h.tracker.onConnection?.('closed')],
+    ['a hand timeout', () => { h.nowMs += 700; runFrame(); }],
+    ['a different hand id', () => emitHands(handAt(700, 600, { id: 2, pinching: true }))],
+    ['focus loss', () => { fire('blur'); fire('focus'); }],
+    ['the help overlay', () => { api.press('help'); api.press('help'); }],
+  ])('a pinch scaling interrupted by %s stays frozen until a real release and regrip', (_label, interrupt) => {
+    const entity = addBox();
+    setHand(v2(500, 400));
+    api.press('toggleGrid');
+    api.press('scale');
+    emitHands(handAt(500, 400, { pinching: true }));
+    emitHands(handAt(700, 550, { pinching: true }));
+    const frozen = previewCorner(entity.id, 2);
+    expect(frozen.x).toBeCloseTo(700, 0);
+    interrupt();
+    emitHands(handAt(700, 600, { pinching: true }));
+    expect(previewCorner(entity.id, 2)).toEqual(frozen);
+    emitHands(handAt(700, 600));
+    emitHands(handAt(700, 600, { pinching: true }));
+    emitHands(handAt(710, 615, { pinching: true }));
+    const moved = previewCorner(entity.id, 2);
+    expect(moved.x - frozen.x).toBeCloseTo(13.6, 0);
+    expect(moved.y - frozen.y).toBeCloseTo(10.2, 0);
+    expect(previewCorner(entity.id, 0)).toEqual(v3(100, 100, 0));
+    api.press('cancel');
+  });
+
+  it('switches from a pinch to a mouse drag without losing the locked corner', () => {
+    const entity = addBox();
+    setHand(v2(500, 400));
+    api.press('toggleGrid');
+    api.press('scale');
+    emitHands(handAt(500, 400, { pinching: true }));
+    emitHands(handAt(700, 550, { pinching: true }));
+    const frozen = previewCorner(entity.id, 2);
+    emitEmptyHands();
+    h.mouse.onMove?.(v2(700, 600));
+    expect(previewCorner(entity.id, 2)).toEqual(frozen);
+    h.mouse.onHold?.('draw', true);
+    h.mouse.onMove?.(v2(710, 615));
+    const moved = previewCorner(entity.id, 2);
+    expect(moved.x - frozen.x).toBeCloseTo(13.6, 0);
+    h.mouse.onHold?.('draw', false);
+    api.press('cancel');
+  });
+
+  it('keeps a hard release requirement through a soft navigation pause', () => {
+    const entity = addBox();
+    setHand(v2(500, 400));
+    api.press('toggleGrid');
+    api.press('scale');
+    emitHands(handAt(500, 400, { pinching: true }));
+    emitHands(handAt(700, 550, { pinching: true }));
+    const frozen = previewCorner(entity.id, 2);
+    emitEmptyHands();
+    api.hold('orbit', true);
+    emitHands(handAt(700, 600, { pinching: true }));
+    api.hold('orbit', false);
+    emitHands(handAt(710, 600, { pinching: true }));
+    expect(previewCorner(entity.id, 2)).toEqual(frozen);
+    emitHands(handAt(710, 600));
+    emitHands(handAt(710, 600, { pinching: true }));
+    emitHands(handAt(720, 615, { pinching: true }));
+    expect(previewCorner(entity.id, 2).x).toBeGreaterThan(frozen.x);
+    api.press('cancel');
+  });
+
+  it.each(['orbit', 'pan'] as const)('%s pauses scaling and re-baselines the grip without a jump', (nav) => {
+    const entity = startScale();
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    const frozen = previewCorner(entity.id, 2);
+    api.hold(nav, true);
+    api.setCursor(v2(600, 500));
+    const spy = nav === 'orbit' ? h.orbit.orbit : h.orbit.pan;
+    const other = nav === 'orbit' ? h.orbit.pan : h.orbit.orbit;
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(other).not.toHaveBeenCalled();
+    expect(previewCorner(entity.id, 2)).toEqual(frozen);
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe(nav === 'orbit' ? 'ORBIT' : 'PAN');
+    api.hold(nav, false);
+    api.setCursor(v2(610, 515));
+    api.hold('draw', false);
+    const moved = previewCorner(entity.id, 2);
+    expect(moved.x - frozen.x).toBeCloseTo(13.6, 6);
+    expect(moved.y - frozen.y).toBeCloseTo(10.2, 6);
+    expect(previewCorner(entity.id, 0)).toEqual(v3(100, 100, 0));
+    api.press('cancel');
+  });
+
+  it.each(['viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'cyclePlane', 'zoomIn', 'zoomOut', 'fitAll'] as const)(
+    'allows %s mid-grip and re-baselines without a jump',
+    (action) => {
+      const entity = startScale();
+      api.hold('draw', true);
+      api.setCursor(v2(700, 550));
+      const frozen = previewCorner(entity.id, 2);
+      api.press(action);
+      expect(previewCorner(entity.id, 2)).toEqual(frozen);
+      api.setCursor(v2(710, 565));
+      const moved = previewCorner(entity.id, 2);
+      expect(moved.x - frozen.x).toBeCloseTo(13.6, 6);
+      expect(moved.y - frozen.y).toBeCloseTo(10.2, 6);
+      api.hold('draw', false);
+      api.press('cancel');
+    },
+  );
+
+  it('ignores the wheel while gripping and re-baselines after a zoom', () => {
+    const entity = startScale();
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    h.mouse.onWheel?.(-100, v2(700, 550));
+    expect(h.orbit.zoom).not.toHaveBeenCalled();
+    api.hold('draw', false);
+    h.mouse.onWheel?.(-100, v2(700, 550));
+    expect(h.orbit.zoom).toHaveBeenCalledTimes(1);
+    api.hold('draw', true);
+    api.setCursor(v2(710, 565));
+    api.hold('draw', false);
+    expect(previewCorner(entity.id, 2).x).toBeCloseTo(713.6, 6);
+    api.press('cancel');
+  });
+
+  it('re-baselines the grip on viewport resize without a jump', () => {
+    const entity = startScale();
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    const frozen = previewCorner(entity.id, 2);
+    for (const cb of h.resizeCallbacks) cb();
+    api.setCursor(v2(710, 565));
+    expect(previewCorner(entity.id, 2)).toEqual(frozen);
+    api.setCursor(v2(720, 580));
+    api.hold('draw', false);
+    expect(previewCorner(entity.id, 2).x).toBeCloseTo(713.6, 6);
+    api.press('cancel');
+  });
+
+  it('keeps automatic palm navigation disabled while scaling', () => {
+    api.press('toggleNavAssist');
+    addBox();
+    setHand(v2(500, 400));
+    api.press('scale');
+    emitHands(handAt(400, 300, { open: true, openArmed: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
+    expect(h.orbit.orbit).not.toHaveBeenCalled();
+    expect(h.orbit.pan).not.toHaveBeenCalled();
+    expect(h.orbit.zoom).not.toHaveBeenCalled();
+    api.press('cancel');
+  });
+
+  it('cancels scaling when the target is edited or deleted programmatically', () => {
+    const entity = startScale();
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    api.hold('draw', false);
+    api.commands.setDimension(entity.id, { width: 200, height: 150 });
+    const edited = preview(entity.id);
+    if (edited?.type !== 'rect') throw new Error('expected a rect');
+    expect(edited.corners[0]).toEqual(v3(100, 100, 0));
+    expect(edited.corners[1]).toEqual(v3(300, 100, 0));
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('READY');
+
+    startScale();
+    const target = api.selected()!.id;
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    api.hold('draw', false);
+    api.commands.deleteEntity(target);
+    expect(api.sketch.get(target)).toBeUndefined();
+    expect(preview(target)).toBeUndefined();
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('READY');
+  });
+
+  it('keeps the preview when an unrelated entity changes and preserves that edit on cancel', () => {
+    const entity = startScale();
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    api.hold('draw', false);
+    const other = api.commands.addRect(makeRect(v3(600, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 100, 100));
+    if (!other.ok) throw new Error(other.error);
+    api.commands.setDimension(other.entity.id, { width: 50, height: 50 });
+    expectVec3(previewCorner(entity.id, 2), 700, 550, 0);
+    api.press('cancel');
+    expect(api.sketch.get(entity.id)).toEqual(entity);
+    const edited = api.sketch.get(other.entity.id);
+    if (edited?.type !== 'rect') throw new Error('expected a rect');
+    expect(edited.corners[1]).toEqual(v3(650, 100, 0));
+    expect(edited.corners[2]).toEqual(v3(650, 150, 0));
+  });
+
+  it.each(['delete', 'undo', 'redo', 'clear', 'move', 'extrude', 'measure', 'select', 'export'] as const)(
+    'blocks %s during scaling but not after',
+    (action) => {
+      const entity = startScale();
+      const before = api.sketch.serialize();
+      api.hold('draw', true);
+      api.setCursor(v2(700, 550));
+      api.hold('draw', false);
+      api.press(action);
+      expect(api.sketch.serialize()).toBe(before);
+      expect(api.extrusion()).toBeNull();
+      expect(h.measure.isOpen).toBe(false);
+      runFrame();
+      expect(h.hudStates.at(-1)?.mode).toBe('SCALING');
+      api.press('cancel');
+      api.press(action);
+      if (action === 'delete') expect(api.sketch.get(entity.id)).toBeUndefined();
+      if (action === 'undo' || action === 'clear') expect(api.sketch.size).toBe(0);
+      if (action === 'move') {
+        runFrame();
+        expect(h.hudStates.at(-1)?.mode).toBe('MOVING');
+        api.press('cancel');
+      }
+      if (action === 'extrude') {
+        expect(api.extrusion()).not.toBeNull();
+        api.press('cancel');
+      }
+      if (action === 'measure') {
+        expect(h.measure.isOpen).toBe(true);
+        h.measure.isOpen = false;
+        h.measure.submit = null;
+      }
+    },
+  );
+
+  it.each([
+    ['an input', { tagName: 'INPUT' }],
+    ['a textarea', { tagName: 'TEXTAREA' }],
+    ['a contenteditable element', { tagName: 'DIV', isContentEditable: true }],
+  ])('ignores R inside %s', (_label, target) => {
+    addBox();
+    api.setCursor(v2(250, 250));
+    api.press('select');
+    const event = keyDown('KeyR', { target });
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('READY');
+  });
+
+  it('ignores R while the measurement input or the help overlay is open', () => {
+    addBox();
+    api.setCursor(v2(250, 250));
+    api.press('select');
+    api.press('measure');
+    keyDown('KeyR');
+    h.measure.isOpen = false;
+    h.measure.submit = null;
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('READY');
+    api.press('help');
+    keyDown('KeyR');
+    api.press('help');
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('READY');
+  });
+
+  it('does not start scaling while drawing, navigating, moving, or extruding', () => {
+    api.press('toggleGrid');
+    api.setCursor(v2(50, 50));
+    api.hold('draw', true);
+    api.setCursor(v2(80, 80));
+    api.press('scale');
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('DRAWING');
+    api.hold('draw', false);
+    api.press('cancel');
+
+    api.hold('orbit', true);
+    api.press('scale');
+    api.hold('orbit', false);
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('READY');
+
+    addBox();
+    api.setCursor(v2(250, 250));
+    api.press('select');
+    api.press('move');
+    api.press('scale');
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('MOVING');
+    api.press('cancel');
+
+    api.press('extrude');
+    api.press('scale');
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('EXTRUDING');
+    api.press('cancel');
+  });
+
+  it('commits once on R and ignores the auto-repeated key', () => {
+    startScale();
+    api.hold('draw', true);
+    api.setCursor(v2(700, 550));
+    api.hold('draw', false);
+    keyDown('KeyR');
+    keyDown('KeyR', { repeat: true });
+    expect(api.commands.undo()).toBe('scale rect');
+    expect(api.commands.undo()).toBe('add rect');
+  });
+
+  it('does not scale when the locked diagonal is degenerate on screen', () => {
+    const previousProject = h.projector.project;
+    const previousRay = h.projector.ray;
+    h.projector.project = (point: Vec3): Vec2 => v2(point.x, point.y);
+    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({ origin: v3(point.x, point.y, 1000), dir: v3(0, 0, -1) });
+    try {
+      const added = api.commands.addLine(v3(100, 100, 0), v3(100, 100, 100));
+      if (!added.ok) throw new Error(added.error);
+      const id = added.entity.id;
+      const before = api.sketch.serialize();
+      api.press('toggleGrid');
+      api.setCursor(v2(100, 100));
+      api.press('scale');
+      api.hold('draw', true);
+      api.setCursor(v2(150, 100));
+      api.hold('draw', false);
+      expect(preview(id)).toEqual(added.entity);
+      api.press('confirm');
+      expect(api.sketch.get(id)).toEqual(added.entity);
+      expect(api.sketch.serialize()).toBe(before);
+      expect(api.commands.undo()).toBe('add line');
+    } finally {
+      h.projector.project = previousProject;
+      h.projector.ray = previousRay;
+    }
+  });
+
+  it.each([false, true])('can enlarge a subpixel preview again without losing its anchor (regrip %s)', (regrip) => {
+    const entity = startScale();
+    const before = api.sketch.serialize();
+    api.hold('draw', true);
+    api.setCursor(v2(100.8, 100.6));
+    expectVec3(previewCorner(entity.id, 2), 100.8, 100.6, 0);
+    if (regrip) {
+      api.hold('draw', false);
+      api.hold('draw', true);
+    }
+    api.setCursor(v2(300, 250));
+    expectVec3(previewCorner(entity.id, 2), 300, 250, 0);
+    expectVec3(previewCorner(entity.id, 0), 100, 100, 0);
+    expect(api.sketch.serialize()).toBe(before);
+    api.hold('draw', false);
+    api.press('cancel');
+    expect(preview(entity.id)).toEqual(entity);
+  });
+
+  it('leaves an empty sketch in READY when R is pressed', () => {
+    api.setCursor(v2(250, 250));
+    const event = keyDown('KeyR');
+    expect(event.preventDefault).toHaveBeenCalled();
+    runFrame();
+    expect(h.hudStates.at(-1)?.mode).toBe('READY');
+    expect(api.sketch.size).toBe(0);
+  });
+});
+
+describe('triangle and prism workflows', () => {
+  const preview = (id: string): Entity | undefined => h.renderer.sketches.at(-1)?.find((entity) => entity.id === id);
+  function keyDown(code: string, overrides: Record<string, unknown> = {}) {
+    const event = { code, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, repeat: false, target: null, preventDefault: vi.fn(), ...overrides };
+    fire('keydown', event);
+    return event;
+  }
+  function drawTriangle(points: Vec2[] = triangleStroke([v2(100, 100), v2(500, 100), v2(200, 400)])): void {
+    api.setCursor(points[0]);
+    api.hold('draw', true);
+    for (const point of points.slice(1)) api.setCursor(point);
+    runFrame();
+    api.hold('draw', false);
+  }
+  function addShape(kind: 'triangle' | 'prism'): Entity {
+    const added = api.commands.addTriangle([v3(0, 0, 0), v3(300, 0, 0), v3(0, 300, 0)]);
+    if (!added.ok) throw new Error(added.error);
+    if (kind === 'prism') {
+      const extruded = api.commands.extrude(added.entity.id, 50);
+      if (!extruded.ok) throw new Error(extruded.error);
+    }
+    const entity = api.sketch.get(added.entity.id);
+    if (!entity) throw new Error('missing entity');
+    return entity;
+  }
+
+  it('commits a freehand triangle, selects it, and ghosts it as a closed triangle', () => {
+    api.press('toggleGrid');
+    drawTriangle();
+    const entity = api.sketch.last;
+    if (entity?.type !== 'triangle') throw new Error('expected a triangle');
+    expect(api.lastRecognition()?.reason).toBe('triangle');
+    expect(api.selected()?.id).toBe(entity.id);
+    const ghostIndex = h.renderer.ghosts.map((entry) => entry.points !== null).lastIndexOf(true);
+    const ghost = h.renderer.ghosts[ghostIndex];
+    expect(h.renderer.ghostClosed[ghostIndex]).toBe(true);
+    expect(ghost?.points).toHaveLength(3);
+    expect(ghost?.label?.text).toBe('Triangle');
+    const [a, b, c] = entity.corners;
+    expect(ghost?.label?.at).toEqual(v3(a.x / 3 + b.x / 3 + c.x / 3, a.y / 3 + b.y / 3 + c.y / 3, a.z / 3 + b.z / 3 + c.z / 3));
+    expect(h.renderer.ghosts.at(-1)).toEqual({ points: null, label: null });
+  });
+
+  it('Q pulls a triangle into a prism preview and commits with the same id', () => {
+    api.press('toggleGrid');
+    drawTriangle();
+    const id = api.sketch.last!.id;
+    const serialized = api.sketch.serialize();
+    api.press('extrude');
+    expect(api.extrusion()).toMatchObject({ depth: 0, dragging: false, preview: { type: 'prism', depth: 0 } });
+    api.setCursor(v2(50, 50));
+    api.hold('draw', true);
+    api.setCursor(v2(50, 0));
+    expect(api.extrusion()).toMatchObject({ depth: 50, dragging: true, preview: { type: 'prism', depth: 50 } });
+    expect(api.sketch.serialize()).toBe(serialized);
+    api.hold('draw', false);
+    api.press('confirm');
+    expect(api.extrusion()).toBeNull();
+    expect(api.sketch.get(id)).toMatchObject({ type: 'prism', depth: 50 });
+    api.press('undo');
+    expect(api.sketch.get(id)).toMatchObject({ type: 'triangle' });
+    api.press('redo');
+    expect(api.sketch.get(id)).toMatchObject({ type: 'prism', depth: 50 });
+  });
+
+  it('keeps a zero-depth extrusion live instead of committing a flat prism', () => {
+    api.press('toggleGrid');
+    drawTriangle();
+    api.press('extrude');
+    api.press('confirm');
+    expect(api.extrusion()).not.toBeNull();
+    expect(api.sketch.last?.type).toBe('triangle');
+    api.press('cancel');
+    expect(api.extrusion()).toBeNull();
+    expect(api.sketch.last?.type).toBe('triangle');
+  });
+
+  it('accepts an exact negative pull and cancels back to the triangle', () => {
+    api.press('toggleGrid');
+    drawTriangle();
+    const id = api.sketch.last!.id;
+    api.press('extrude');
+    api.press('measure');
+    h.measure.submit?.('-250');
+    h.measure.isOpen = false;
+    expect(api.extrusion()).toMatchObject({ depth: -250, dragging: false, preview: { type: 'prism', depth: -250 } });
+    api.press('cancel');
+    expect(api.extrusion()).toBeNull();
+    expect(api.sketch.get(id)).toMatchObject({ type: 'triangle' });
+    expect(api.commands.undo()).toBe('add triangle');
+  });
+
+  it('moves a prism with a mouse drag, preserving depth, and commits undoably', () => {
+    const entity = addShape('prism');
+    api.setCursor(v2(50, 50));
+    api.press('select');
+    api.press('toggleGrid');
+    const serialized = api.sketch.serialize();
+    api.press('move');
+    api.hold('draw', true);
+    api.setCursor(v2(90, 75));
+    api.hold('draw', false);
+    const moved = preview(entity.id);
+    if (moved?.type !== 'prism') throw new Error('expected a prism preview');
+    expect(moved.depth).toBe(50);
+    expect(moved.corners[0]).toEqual(v3(40, 25, 0));
+    expect(api.sketch.serialize()).toBe(serialized);
+    keyDown('Enter');
+    const committed = api.sketch.get(entity.id);
+    if (committed?.type !== 'prism') throw new Error('expected a prism');
+    expect(committed.depth).toBe(50);
+    expect(committed.corners[0]).toEqual(v3(40, 25, 0));
+    expect(api.selected()?.id).toBe(entity.id);
+    api.press('undo');
+    expect(api.sketch.serialize()).toBe(serialized);
+    api.press('redo');
+    expect(api.sketch.get(entity.id)).toEqual(committed);
+  });
+
+  it.each([
+    { kind: 'triangle', input: 'mouse', finish: 'confirm' },
+    { kind: 'triangle', input: 'mouse', finish: 'cancel' },
+    { kind: 'triangle', input: 'pinch', finish: 'confirm' },
+    { kind: 'triangle', input: 'pinch', finish: 'cancel' },
+    { kind: 'prism', input: 'mouse', finish: 'confirm' },
+    { kind: 'prism', input: 'mouse', finish: 'cancel' },
+    { kind: 'prism', input: 'pinch', finish: 'confirm' },
+    { kind: 'prism', input: 'pinch', finish: 'cancel' },
+  ] as const)('moves a $kind via $input with $finish', ({ kind, input, finish }) => {
+    const entity = addShape(kind);
+    api.press('toggleGrid');
+    const serialized = api.sketch.serialize();
+    if (input === 'mouse') api.setCursor(v2(50, 50));
+    else setHand(v2(50, 50));
+    api.press('select');
+    api.press('move');
+    const grip = (point: Vec2, down: boolean): void => {
+      if (input === 'mouse') {
+        api.hold('draw', down);
+        api.setCursor(point);
+      } else {
+        emitHands(handAt(point.x, point.y, { pinching: down }));
+      }
+    };
+    grip(v2(50, 50), true);
+    grip(v2(90, 75), true);
+    grip(v2(90, 75), false);
+    const moved = preview(entity.id);
+    expect(moved?.type).toBe(kind);
+    if (moved?.type === 'triangle' || moved?.type === 'prism') {
+      expect(moved.corners[0].x).toBeCloseTo(40);
+      expect(moved.corners[0].y).toBeCloseTo(25);
+      expect(moved.corners[0].z).toBeCloseTo(0);
+      if (moved.type === 'prism') expect(moved.depth).toBe(50);
+    }
+    expect(api.sketch.serialize()).toBe(serialized);
+    expect(api.sketch.size).toBe(1);
+    api.press(finish);
+    expect(api.selected()?.id).toBe(entity.id);
+    if (finish === 'cancel') {
+      expect(api.sketch.serialize()).toBe(serialized);
+      expect(api.sketch.get(entity.id)).toEqual(entity);
+      expect(api.commands.undo()).toBe(kind === 'prism' ? 'extrude prism 50 mm' : 'add triangle');
+    } else {
+      expect(api.sketch.get(entity.id)).toEqual(moved);
+      api.press('undo');
+      expect(api.sketch.serialize()).toBe(serialized);
+      api.press('redo');
+      expect(api.sketch.get(entity.id)).toEqual(moved);
+    }
+  });
+
+  it('shows triangle Q/M hints without a size control and a depth hint on prisms', () => {
+    const entity = addShape('triangle');
+    api.setCursor(v2(50, 50));
+    api.press('select');
+    runFrame();
+    const triangleKeys = h.hudKeys.at(-1) ?? [];
+    expect(triangleKeys).toContainEqual({ key: 'Q', label: 'extrude triangle' });
+    expect(triangleKeys).toContainEqual({ key: 'M', label: 'move' });
+    expect(triangleKeys).toContainEqual({ key: 'Delete', label: 'delete' });
+    expect(triangleKeys.find((hint) => hint.key === 'L')).toBeUndefined();
+
+    expect(api.commands.extrude(entity.id, 50).ok).toBe(true);
+    runFrame();
+    const prismKeys = h.hudKeys.at(-1) ?? [];
+    expect(prismKeys).toContainEqual({ key: 'Q', label: 'push/pull' });
+    expect(prismKeys).toContainEqual({ key: 'L', label: 'depth' });
+  });
+
+  it('commits a jittered triangle after One-Euro-smoothed hand samples', () => {
+    const points = triangleStroke([v2(0, 0), v2(1000, 0), v2(350, 800)], { pointsPerSide: 12, jitter: 40 });
+    const scale = 0.6;
+    const ox = 80;
+    const oy = 80;
+    const previousProject = h.projector.project;
+    const previousRay = h.projector.ray;
+    h.projector.project = (point: Vec3): Vec2 => v2(ox + point.x * scale, oy + (point.y - point.z) * scale);
+    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({
+      origin: { x: (point.x - ox) / scale, y: (point.y - oy) / scale, z: 1000 },
+      dir: { x: 0, y: 0, z: -1 },
+    });
+    try {
+      runFrame();
+      const screenFor = (point: Vec2): Vec2 => v2(ox + point.x * scale, oy + point.y * scale);
+      const first = screenFor(points[0]);
+      emitHands(handAt(first.x, first.y));
+      api.hold('draw', true);
+      for (const point of points.slice(1)) {
+        h.nowMs += 33;
+        const screen = screenFor(point);
+        emitHands(handAt(screen.x, screen.y));
+      }
+      api.hold('draw', false);
+    } finally {
+      h.projector.project = previousProject;
+      h.projector.ray = previousRay;
+    }
+    expect(api.lastRecognition()?.reason).toBe('triangle');
+    expect(api.sketch.last?.type).toBe('triangle');
   });
 });

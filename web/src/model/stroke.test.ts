@@ -3,7 +3,7 @@ import { WorkPlane, type PlaneKind } from './plane';
 import { snapCursor, type SnapResult } from './snap';
 import { makeRect, Sketch } from './sketch';
 import { alignRectToStart, anchorAfterCommit, buildEntityFromStroke, pullRectCorners, StrokeSession } from './stroke';
-import { circleStroke, rectStroke, rotatePoints, topViewProjector } from './test-helpers';
+import { circleStroke, rectStroke, rotatePoints, topViewProjector, triangleStroke } from './test-helpers';
 import { v2, v3, type Vec2, type Vec3 } from './vec';
 
 const projector = topViewProjector(0.1, 400, 300);
@@ -236,5 +236,115 @@ describe('StrokeSession: rough rectangles versus circle correction', () => {
       const entity = buildEntityFromStroke(session, result.shape, { projector, vertices: [], tolerancePx: 14, gridStep: 100 });
       expect(entity.type).toBe('rect');
     }
+  });
+});
+
+describe('StrokeSession: triangles', () => {
+  it.each(['XY', 'XZ', 'YZ'] as PlaneKind[])('recognises a raw triangle on %s despite grid-snapped endpoints', (kind) => {
+    const triPlane = new WorkPlane(kind, v3(100, 200, 300));
+    const corners: [Vec2, Vec2, Vec2] = [v2(700, 500), v2(1300, 500), v2(900, 1100)];
+    const raw = triangleStroke(corners);
+    const snapFor = (p: Vec2): SnapResult => ({
+      type: 'grid',
+      world: triPlane.toWorld(v2(p.x + 100, p.y + 100)),
+      plane: v2(p.x + 100, p.y + 100),
+      screen: v2(p.x / 2, p.y / 2),
+      onPlane: true,
+      raw: triPlane.toWorld(p),
+    });
+    const session = new StrokeSession(triPlane, snapFor(raw[0]));
+    for (const p of raw.slice(1)) {
+      session.add(snapFor(p), triPlane.toWorld(p), v2(p.x / 2, p.y / 2), 0);
+    }
+    const result = session.recognize();
+    expect(result.shape?.kind).toBe('triangle');
+    const entity = buildEntityFromStroke(session, result.shape!, { projector, vertices: [], tolerancePx: 14 });
+    expect(entity.type).toBe('triangle');
+    if (entity.type !== 'triangle') return;
+    expect(entity.corners).toHaveLength(3);
+    for (const corner of entity.corners) expect(triPlane.contains(corner, 1e-6)).toBe(true);
+    for (const [index, corner] of entity.corners.entries()) {
+      const expected = triPlane.toWorld(corners[index]);
+      expect(corner.x).toBeCloseTo(expected.x, 6);
+      expect(corner.y).toBeCloseTo(expected.y, 6);
+      expect(corner.z).toBeCloseTo(expected.z, 6);
+    }
+    expect(anchorAfterCommit(entity)).toEqual(entity.corners[0]);
+  });
+
+  const triangleShape = (corners: [Vec2, Vec2, Vec2]) => ({ kind: 'triangle' as const, corners });
+  const freeStart = (at: Vec2, type: SnapResult['type'] = 'free', world?: Vec3): SnapResult => ({
+    type,
+    world: world ?? plane.toWorld(at),
+    plane: at,
+    screen: projector.project(plane.toWorld(at))!,
+    onPlane: true,
+    raw: world ?? plane.toWorld(at),
+  });
+
+  it('rounds triangle corners to the grid and keeps raw corners when the grid is off', () => {
+    const shape = triangleShape([v2(13, 17), v2(293, 17), v2(113, 217)]);
+    const session = new StrokeSession(plane, freeStart(shape.corners[0]));
+    const snapped = buildEntityFromStroke(session, shape, { projector, vertices: [], tolerancePx: 14, gridStep: 100 });
+    expect(snapped).toEqual({ type: 'triangle', corners: [v3(0, 0, 0), v3(300, 0, 0), v3(100, 200, 0)] });
+    const raw = buildEntityFromStroke(session, shape, { projector, vertices: [], tolerancePx: 14, gridStep: 0 });
+    if (raw.type !== 'triangle') throw new Error('unreachable');
+    expect(raw.corners).toEqual([v3(13, 17, 0), v3(293, 17, 0), v3(113, 217, 0)]);
+    expect(anchorAfterCommit(raw)).toEqual(v3(13, 17, 0));
+  });
+
+  it('snaps triangle corners onto nearby on-plane vertices but not off-plane ones', () => {
+    const unit = topViewProjector(1, 0, 0);
+    const sketch = new Sketch();
+    sketch.addEntity({ type: 'line', a: v3(1000, 1000, 0), b: v3(1000, 1000, 900) });
+    const shape = triangleShape([v2(1008, 996), v2(1300, 1000), v2(1100, 1400)]);
+    const session = new StrokeSession(plane, freeStart(shape.corners[0]));
+    const entity = buildEntityFromStroke(session, shape, { projector: unit, vertices: sketch.vertices(), tolerancePx: 14, gridStep: 0 });
+    if (entity.type !== 'triangle') throw new Error('unreachable');
+    expect(entity.corners[0]).toEqual(v3(1000, 1000, 0));
+    expect(entity.corners[1]).toEqual(v3(1300, 1000, 0));
+    expect(entity.corners[2]).toEqual(v3(1100, 1400, 0));
+  });
+
+  it('honours an explicit object-snap start near a true corner', () => {
+    const unit = topViewProjector(1, 0, 0);
+    const start = freeStart(v2(0, 0), 'midpoint', v3(1002, 1000, 0));
+    const session = new StrokeSession(plane, start);
+    const shape = triangleShape([v2(1008, 996), v2(1300, 1000), v2(1100, 1400)]);
+    const entity = buildEntityFromStroke(session, shape, { projector: unit, vertices: [], tolerancePx: 14, gridStep: 0 });
+    if (entity.type !== 'triangle') throw new Error('unreachable');
+    expect(entity.corners[0]).toEqual(v3(1002, 1000, 0));
+  });
+
+  it('falls back to raw corners when a coarse grid collapses the triangle', () => {
+    const shape = triangleShape([v2(13, 17), v2(293, 17), v2(113, 217)]);
+    const session = new StrokeSession(plane, freeStart(shape.corners[0]));
+    const entity = buildEntityFromStroke(session, shape, { projector, vertices: [], tolerancePx: 14, gridStep: 1000 });
+    if (entity.type !== 'triangle') throw new Error('unreachable');
+    expect(entity.corners).toEqual([v3(13, 17, 0), v3(293, 17, 0), v3(113, 217, 0)]);
+  });
+
+  it('does not replace a real corner with a mid-edge stroke start', () => {
+    const session = new StrokeSession(plane, { ...freeStart(v2(500, 0), 'grid'), world: v3(500, 0, 0), raw: v3(500, 0, 0) });
+    const shape = triangleShape([v2(0, 0), v2(1000, 0), v2(350, 800)]);
+    const entity = buildEntityFromStroke(session, shape, { projector, vertices: [], tolerancePx: 14, gridStep: 0 });
+    if (entity.type !== 'triangle') throw new Error('unreachable');
+    expect(entity.corners).toEqual([v3(0, 0, 0), v3(1000, 0, 0), v3(350, 800, 0)]);
+  });
+
+  it('does not invent a triangle just because the endpoints snap together', () => {
+    const points = triangleStroke([v2(0, 0), v2(1000, 0), v2(350, 800)], { gapFraction: 0.3 });
+    const workPlane = new WorkPlane('XY');
+    const snapFor = (raw: Vec2, snapped: Vec2): SnapResult => ({
+      type: 'grid', world: workPlane.toWorld(snapped), plane: snapped,
+      screen: v2(raw.x / 2, raw.y / 2), onPlane: true, raw: workPlane.toWorld(raw),
+    });
+    const session = new StrokeSession(workPlane, snapFor(points[0], points[0]));
+    points.slice(1).forEach((point, index) => {
+      const snapped = index === points.length - 2 ? points[0] : point;
+      const snap = snapFor(point, snapped);
+      session.add(snap, snap.raw, snap.screen, 0);
+    });
+    expect(session.recognize().shape?.kind).not.toBe('triangle');
   });
 });

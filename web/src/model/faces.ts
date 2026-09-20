@@ -7,6 +7,7 @@ import {
   entityFaces,
   extrusionNormal,
   isExtrudableProfile,
+  isTriangleProfile,
   makeRect,
   rectFrame,
   type CircleGeometry,
@@ -16,8 +17,10 @@ import {
   type ExtrusionEntity,
   type ProfileEntity,
   type RectEntity,
+  type TriangleEntity,
+  type TriangleProfileEntity,
 } from './sketch';
-import { add, dot, normalize, scale, sub, v3, type Vec2, type Vec3 } from './vec';
+import { add, cross, dot, normalize, scale, sub, v3, type Vec2, type Vec3 } from './vec';
 
 export interface ProfileFace {
   /** Polygon outline in world space. Circular cap outlines contain the analytic ring tessellation. */
@@ -30,8 +33,9 @@ export interface ProfileFace {
   normal: Vec3;
   center: Vec3;
   /** Which box axis this face lies on, and its sign: 'u' | 'v' | 'n'. */
-  axis: 'u' | 'v' | 'n';
+  axis: 'u' | 'v' | 'n' | 'edge';
   sign: 1 | -1;
+  edgeIndex?: 0 | 1 | 2;
   /** Human label from the world direction of `normal`, e.g. 'top' (see labelForNormal). */
   label: string;
 }
@@ -65,6 +69,7 @@ const FACE_ORDER: Record<string, number> = { 'n1': 0, 'n-1': 1, 'u1': 2, 'u-1': 
 export function profileFaces(profile: ProfileEntity): ProfileFace[] {
   if (profile.type === 'circle') return circularCapFaces(profile, 0);
   if (profile.type === 'cylinder') return circularCapFaces(profile, profile.depth);
+  if (profile.type === 'triangle' || profile.type === 'prism') return triangleProfileFaces(profile);
   const n = extrusionNormal(profile);
   const depth = profile.type === 'extrusion' ? profile.depth : 0;
   if (profile.type === 'rect' || Math.abs(depth) < 1e-9) {
@@ -103,6 +108,30 @@ export function profileFaces(profile: ProfileEntity): ProfileFace[] {
     });
   }
   faces.sort((a, b) => FACE_ORDER[`${a.axis}${a.sign}`] - FACE_ORDER[`${b.axis}${b.sign}`]);
+  return faces;
+}
+
+function triangleProfileFaces(profile: TriangleProfileEntity): ProfileFace[] {
+  const n = extrusionNormal(profile);
+  const depth = profile.type === 'prism' ? profile.depth : 0;
+  const base = profile.corners.map((point) => ({ ...point }));
+  const top = base.map((point) => add(point, scale(n, depth)));
+  const positive = depth >= 0;
+  const faces: ProfileFace[] = ([1, -1] as const).map((sign) => {
+    const outline = (sign === 1) === positive ? top : base;
+    const normal = scale(n, sign);
+    return { outline, normal, center: quadCenter(outline), axis: 'n', sign, label: labelForNormal(normal) };
+  });
+  if (Math.abs(depth) < 1e-9) return faces;
+  const center = entityCenter(profile);
+  for (const index of [0, 1, 2] as const) {
+    const next = (index + 1) % 3;
+    const quad: [Vec3, Vec3, Vec3, Vec3] = [base[index], base[next], top[next], top[index]];
+    const faceCenter = quadCenter(quad);
+    let normal = normalize(cross(normalize(sub(base[next], base[index])), n));
+    if (dot(normal, sub(faceCenter, center)) < 0) normal = scale(normal, -1);
+    faces.push({ outline: quad, quad, normal, center: faceCenter, axis: 'edge', sign: 1, edgeIndex: index, label: labelForNormal(normal) });
+  }
   return faces;
 }
 
@@ -210,6 +239,7 @@ export function pickExtrusionTarget(
   const entity = pickFace(entities, cursor, projector);
   if (!entity || entity.type === 'line') return null;
   if ((entity.type === 'rect' || entity.type === 'extrusion') && !isExtrudableProfile(entity.corners)) return null;
+  if ((entity.type === 'triangle' || entity.type === 'prism') && !isTriangleProfile(entity.corners)) return null;
   const faces = profileFaces(entity);
   const faceIndex = pickProfileFace(faces, cursor, projector);
   if (faceIndex === null) return null;
@@ -223,7 +253,7 @@ export function pickExtrusionTarget(
  * pulling the far cap only changes depth.
  */
 type PushPullResult =
-  | { corners: ExtrusionEntity['corners']; depth: number }
+  | { corners: ExtrusionEntity['corners'] | TriangleEntity['corners']; depth: number }
   | { center: Vec3; normal: Vec3; radius: number; depth: number };
 
 export function pushPull(
@@ -238,6 +268,18 @@ export function pushPull(
   distance: number,
   minSize: number,
 ): { center: Vec3; normal: Vec3; radius: number; depth: number };
+export function pushPull(
+  profile: TriangleProfileEntity,
+  face: ProfileFace,
+  distance: number,
+  minSize: number,
+): { corners: TriangleEntity['corners']; depth: number };
+export function pushPull(
+  profile: RectEntity | ExtrusionEntity | TriangleProfileEntity,
+  face: ProfileFace,
+  distance: number,
+  minSize: number,
+): { corners: RectEntity['corners'] | TriangleEntity['corners']; depth: number };
 export function pushPull(
   profile: ProfileEntity,
   face: ProfileFace,
@@ -273,6 +315,38 @@ export function pushPull(
       center = add(center, scale(normal, s * applied));
     }
     return { center, normal, radius: profile.radius, depth };
+  }
+
+  if (profile.type === 'triangle' || profile.type === 'prism') {
+    let corners = profile.corners.map((point) => ({ ...point })) as TriangleEntity['corners'];
+    const n = extrusionNormal(profile);
+    const depth0 = profile.type === 'prism' ? profile.depth : 0;
+    const solid = profile.type === 'prism' && Math.abs(depth0) > 1e-9;
+    let depth = depth0;
+    if (face.axis === 'edge') {
+      if (!solid || face.edgeIndex === undefined) return { corners, depth };
+      const index = face.edgeIndex;
+      const next = (index + 1) % 3;
+      const opposite = corners[(index + 2) % 3];
+      const height = dot(sub(corners[index], opposite), face.normal);
+      if (height <= 1e-6) return { corners, depth };
+      const size = minSize > 0 ? Math.max(height + distance, minSize) : height + distance;
+      corners[index] = add(opposite, scale(sub(corners[index], opposite), size / height));
+      corners[next] = add(opposite, scale(sub(corners[next], opposite), size / height));
+      return { corners, depth };
+    }
+    const s = face.sign;
+    const far = !solid || Math.sign(depth0) === s;
+    if (far) {
+      depth = depth0 + s * distance;
+      if (solid && minSize > 0) depth = depth0 > 0 ? Math.max(depth, minSize) : Math.min(depth, -minSize);
+    } else {
+      depth = depth0 - s * distance;
+      if (minSize > 0) depth = depth0 > 0 ? Math.max(depth, minSize) : Math.min(depth, -minSize);
+      const offset = scale(n, depth0 - depth);
+      corners = corners.map((corner) => add(corner, offset)) as TriangleEntity['corners'];
+    }
+    return { corners, depth };
   }
 
   const frame = rectFrame(profile);

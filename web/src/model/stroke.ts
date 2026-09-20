@@ -1,8 +1,8 @@
 import type { WorkPlane } from './plane';
 import { recognizeStroke, type RecognizeOptions, type RecognizeResult, type RecognizedShape } from './recognize';
 import type { Projector, SnapResult } from './snap';
-import type { EntityInput, Vertex } from './sketch';
-import { add, distance2, dot, normalize, roundTo, scale, sub, type Vec2, type Vec3 } from './vec';
+import { isTriangleProfile, type EntityInput, type TriangleEntity, type Vertex } from './sketch';
+import { add, distance2, dot, normalize, roundTo, scale, sub, v2, type Vec2, type Vec3 } from './vec';
 
 const OBJECT_SNAPS = new Set(['vertex', 'midpoint', 'edge', 'lock']);
 
@@ -99,9 +99,9 @@ export class StrokeSession {
       this.plane.toPlane(this.lastSnap.raw ?? this.lastSnap.world),
     ];
     const result = recognizeStroke(raw, options);
-    if (result.shape?.kind === 'circle') return result;
+    if (result.shape?.kind === 'circle' || result.shape?.kind === 'triangle') return result;
     const snapped = recognizeStroke(this.planePoints(), options);
-    return snapped.shape?.kind === 'circle' ? result : snapped;
+    return snapped.shape?.kind === 'circle' || snapped.shape?.kind === 'triangle' ? result : snapped;
   }
 }
 
@@ -212,6 +212,31 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
   }
   if (shape.kind === 'circle') {
     return { type: 'circle', center: plane.toWorld(shape.center), normal: { ...plane.normal }, radius: shape.radius };
+  }
+  if (shape.kind === 'triangle') {
+    const raw = shape.corners.map((corner) => plane.toWorld(corner)) as TriangleEntity['corners'];
+    const step = context.gridStep ?? 0;
+    const corners = raw.map((corner, index) => {
+      const screen = context.projector.project(corner);
+      let snapped = plane.toWorld(v2(roundTo(shape.corners[index].x, step), roundTo(shape.corners[index].y, step)));
+      let nearest = context.tolerancePx;
+      const candidates = [
+        ...(isObjectSnap(session.start) && session.start.onPlane ? [session.start.world] : []),
+        ...context.vertices.map((vertex) => vertex.point),
+      ];
+      if (screen) for (const point of candidates) {
+        if (!plane.contains(point, 1e-3)) continue;
+        const projected = context.projector.project(point);
+        if (!projected) continue;
+        const distance = distance2(screen, projected);
+        if (distance < nearest) {
+          nearest = distance;
+          snapped = { ...point };
+        }
+      }
+      return snapped;
+    }) as TriangleEntity['corners'];
+    return { type: 'triangle', corners: isTriangleProfile(corners) ? corners : raw };
   }
   const corners2 = shape.oriented ? shape.corners : alignRectToStart(shape.corners, session.start.plane, context.gridStep ?? 0);
   const corners = pullRectCorners(corners2.map((c) => plane.toWorld(c)), plane, context);

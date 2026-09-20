@@ -1,10 +1,10 @@
 import { profileFaces, pushPull, type ProfileFace } from './faces';
-import type { CircleEntity, CylinderEntity, ExtrusionEntity, ProfileEntity } from './sketch';
+import type { CircleEntity, CylinderEntity, ExtrusionEntity, PrismEntity, ProfileEntity, TriangleEntity, TriangleProfileEntity } from './sketch';
 import { clone, dot2, nearlyEqual, roundTo, sub2, type Vec2 } from './vec';
 
 type CircularProfile = CircleEntity | CylinderEntity;
-type PreviewFor<P extends ProfileEntity> = P extends CircularProfile ? CylinderEntity : ExtrusionEntity;
-type CornersFor<P extends ProfileEntity> = P extends CircularProfile ? null : ExtrusionEntity['corners'];
+type PreviewFor<P extends ProfileEntity> = P extends CircularProfile ? CylinderEntity : P extends TriangleProfileEntity ? PrismEntity : ExtrusionEntity;
+type CornersFor<P extends ProfileEntity> = P extends CircularProfile ? null : P extends TriangleProfileEntity ? TriangleEntity['corners'] : ExtrusionEntity['corners'];
 
 /** A preview transaction: no model/history writes until the user confirms. */
 export class ExtrusionSession<P extends ProfileEntity = ProfileEntity> {
@@ -34,8 +34,8 @@ export class ExtrusionSession<P extends ProfileEntity = ProfileEntity> {
     this.faces = profileFaces(profile);
     this.faceIndex = Math.min(Math.max(0, faceIndex), this.faces.length - 1);
     this.base = profile;
-    this.depth = profile.type === 'extrusion' ? profile.depth : 0;
-    if (profile.type === 'rect' || profile.type === 'extrusion') {
+    this.depth = profile.type === 'extrusion' || profile.type === 'prism' ? profile.depth : 0;
+    if ('corners' in profile) {
       this.corners = profile.corners.map(clone) as CornersFor<P>;
     } else {
       this.corners = null as CornersFor<P>;
@@ -58,9 +58,9 @@ export class ExtrusionSession<P extends ProfileEntity = ProfileEntity> {
 
   get changed(): boolean {
     const profile = this.profile;
-    const depth = profile.type === 'extrusion' || profile.type === 'cylinder' ? profile.depth : 0;
+    const depth = profile.type === 'extrusion' || profile.type === 'cylinder' || profile.type === 'prism' ? profile.depth : 0;
     if (this.depth !== depth) return true;
-    if (profile.type === 'rect' || profile.type === 'extrusion') {
+    if ('corners' in profile) {
       return !this.corners || !this.corners.every((corner, index) => nearlyEqual(corner, profile.corners[index], 1e-6));
     }
     return !this.center || !this.normal || this.radius === null
@@ -80,6 +80,9 @@ export class ExtrusionSession<P extends ProfileEntity = ProfileEntity> {
         depth: this.depth,
       } as PreviewFor<P>;
     }
+    if (this.profile.type === 'triangle' || this.profile.type === 'prism') {
+      return { id: this.profile.id, type: 'prism', corners: this.corners, depth: this.depth } as PreviewFor<P>;
+    }
     if (!this.corners) throw new Error('rectangle extrusion has no corners');
     return { id: this.profile.id, type: 'extrusion', corners: this.corners, depth: this.depth } as PreviewFor<P>;
   }
@@ -97,7 +100,7 @@ export class ExtrusionSession<P extends ProfileEntity = ProfileEntity> {
     const current = this.currentFaces();
     const active = this.faces[this.faceIndex];
     this.faces.splice(0, this.faces.length, ...current);
-    const index = current.findIndex((face) => face.axis === active?.axis && face.sign === active?.sign);
+    const index = current.findIndex((face) => face.axis === active?.axis && face.sign === active?.sign && face.edgeIndex === active?.edgeIndex);
     this.faceIndex = index >= 0 ? index : 0;
   }
 

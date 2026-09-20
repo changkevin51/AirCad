@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Commands, parseDepth } from './commands';
 import { ExtrusionSession } from './extrusion';
-import { entityCenter, entityFaces, entityPoints, extrusionNormal, makeRect, Sketch, type RectEntity, type ExtrusionEntity } from './sketch';
+import { entityCenter, entityFaces, entityPoints, extrusionNormal, makeRect, Sketch, type ExtrusionEntity, type PrismEntity, type RectEntity, type TriangleEntity } from './sketch';
 import { v2, v3 } from './vec';
 
 const profile = (u = v3(1, 0, 0), v = v3(0, 1, 0)): RectEntity => ({
@@ -227,5 +227,88 @@ describe('extrusion gesture transaction', () => {
     cylinder.setPull(50);
     expect(cylinder.changed).toBe(true);
     expect(profile.center).toEqual(v3(100, 200, 0));
+  });
+});
+
+describe('triangular prism extrusion session', () => {
+  const UP = v2(0, -1);
+  const tri = (): TriangleEntity => ({ id: 't', type: 'triangle', corners: [v3(0, 0, 0), v3(300, 0, 0), v3(0, 300, 0)] });
+  const prism = (depth: number): PrismEntity => ({ id: 'p', type: 'prism', corners: tri().corners, depth });
+
+  it('pulls a flat triangle into a five-faced prism without touching the model', () => {
+    const sketch = new Sketch();
+    const entity = sketch.addEntity({ type: 'triangle', corners: tri().corners }) as TriangleEntity;
+    const saved = sketch.serialize();
+    const session = new ExtrusionSession(entity, 10, 100, 0);
+    expect(session.faces).toHaveLength(2);
+    expect(session.preview).toMatchObject({ id: entity.id, type: 'prism', depth: 0 });
+    session.update(v2(0, 300), true, 'mouse', UP);
+    session.update(v2(0, 250), true, 'mouse', UP);
+    expect(session.depth).toBe(500);
+    expect(session.faces).toHaveLength(5);
+    expect(session.currentFaces()).toHaveLength(5);
+    expect(session.preview.corners).toEqual(entity.corners);
+    expect(sketch.serialize()).toBe(saved);
+    expect(sketch.undo()).toBe('add triangle');
+  });
+
+  it('cycles all five faces on release but never while gripped', () => {
+    const session = new ExtrusionSession(tri(), 1, 0, 0);
+    session.setPull(100);
+    expect(session.faces).toHaveLength(5);
+    const preview = structuredClone(session.preview);
+    for (const index of [1, 2, 3, 4, 0]) {
+      expect(session.cycleFace()).toBe(true);
+      expect(session.faceIndex).toBe(index);
+      expect(session.face).toEqual(session.currentFaces()[index]);
+      expect(session.preview).toEqual(preview);
+    }
+    expect(session.faces.filter((face) => face.axis === 'edge').map((face) => face.edgeIndex)).toEqual([0, 1, 2]);
+    session.update(v2(0, 300), false, 'mouse', UP);
+    session.update(v2(0, 300), true, 'mouse', UP);
+    session.update(v2(0, 290), true, 'mouse', UP);
+    expect(session.dragging).toBe(true);
+    expect(session.setFace(1)).toBe(false);
+    expect(session.cycleFace()).toBe(false);
+    session.update(v2(0, 290), false, 'mouse', UP);
+    expect(session.cycleFace()).toBe(true);
+    expect(session.faceIndex).toBe(1);
+  });
+
+  it('keeps side face identity across refreshes and regrips without a depth jump', () => {
+    const session = new ExtrusionSession(prism(123), 10, 0, 0);
+    expect(session.depth).toBe(123);
+    expect(session.setFace(2)).toBe(true);
+    expect(session.face.edgeIndex).toBe(0);
+    session.update(v2(0, 300), true, 'mouse', UP);
+    session.update(v2(0, 250), true, 'mouse', UP);
+    expect(session.depth).toBe(123);
+    expect(session.face.axis).toBe('edge');
+    expect(session.face.edgeIndex).toBe(0);
+    session.update(v2(0, 250), false, 'mouse', UP);
+    session.update(v2(10, 100), true, 'mouse', UP);
+    expect(session.depth).toBe(123);
+    expect(session.dragging).toBe(true);
+    expect(session.face.edgeIndex).toBe(0);
+  });
+
+  it('tracks prism changes and exact signed depth edits like other solids', () => {
+    const session = new ExtrusionSession(tri(), 1, 0, 0);
+    expect(session.changed).toBe(false);
+    session.setPull(100);
+    expect(session.changed).toBe(true);
+    expect(session.preview.type).toBe('prism');
+    session.setDepth(-250);
+    expect(session.depth).toBe(-250);
+    expect(session.preview).toMatchObject({ type: 'prism', depth: -250 });
+    session.setDepth(0);
+    expect(session.changed).toBe(false);
+    const edit = new ExtrusionSession(prism(100), 1, 0, 0);
+    expect(edit.changed).toBe(false);
+    edit.setFace(1);
+    expect(edit.changed).toBe(false);
+    edit.setPull(50);
+    expect(edit.depth).toBe(150);
+    expect(edit.changed).toBe(true);
   });
 });

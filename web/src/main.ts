@@ -17,9 +17,9 @@ import { defaultFaceIndex, pickProfileFace, profileFaces } from './model/faces';
 import { pickFace } from './model/pick';
 import { nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
 import { adaptiveGridStep, snapCursor, type SnapResult } from './model/snap';
-import { circlePoints, describeEntity, entityCenter, entityMidpoints, entityPoints, entityVertices, formatMm, isExtrudableProfile, Sketch, translateEntity, type CircleGeometry, type Entity, type ExtrusionEntity, type SolidEntity } from './model/sketch';
+import { circlePoints, describeEntity, entityCenter, entityMidpoints, entityPoints, entityScaleHandles, entityVertices, formatMm, isExtrudableProfile, isTriangleProfile, scaleEntity, Sketch, translateEntity, type CircleGeometry, type Entity, type ExtrusionEntity, type ScaleHandle, type SolidEntity, type TriangleEntity } from './model/sketch';
 import { anchorAfterCommit, buildEntityFromStroke, StrokeSession } from './model/stroke';
-import { add, isFinite3, length2, nearlyEqual, normalize2, roundTo, scale, sub, sub2, v2, v3, type Vec2, type Vec3 } from './model/vec';
+import { add, closestPointOnLineToRay, distance, distance2, dot, isFinite3, length2, nearlyEqual, normalize2, roundTo, scale, sub, sub2, v2, v3, type Vec2, type Vec3 } from './model/vec';
 import { SketchRenderer } from './render/sketch-renderer';
 import { AxisTriad, createGroundGrid } from './scene/grid';
 import { OrbitController, type ViewPreset } from './scene/orbit';
@@ -45,6 +45,9 @@ function sameSolidPreview(a: SolidEntity, b: SolidEntity): boolean {
   if (a.type === 'extrusion' && b.type === 'extrusion') {
     return a.corners.every((corner, index) => nearlyEqual(corner, b.corners[index], 1e-6));
   }
+  if (a.type === 'prism' && b.type === 'prism') {
+    return a.corners.every((corner, index) => nearlyEqual(corner, b.corners[index], 1e-6));
+  }
   if (a.type === 'cylinder' && b.type === 'cylinder') {
     return nearlyEqual(a.center, b.center, 1e-6)
       && nearlyEqual(a.normal, b.normal, 1e-6)
@@ -58,6 +61,16 @@ interface MoveSession {
   preview: Entity;
   offset: Vec3;
   grab: { point: Vec3; offset: Vec3; plane: WorkPlane; step: number } | null;
+  source: string | null;
+  needsRelease: boolean;
+}
+
+interface ScaleSession {
+  entity: Entity;
+  preview: Entity;
+  factor: number;
+  handle: ScaleHandle | null;
+  grab: { offset: Vec2; along: number; factor: number; step: number } | null;
   source: string | null;
   needsRelease: boolean;
 }
@@ -86,6 +99,7 @@ class App {
   private stroke: StrokeSession | null = null;
   private extrusion: ExtrusionSession | null = null;
   private movement: MoveSession | null = null;
+  private scaling: ScaleSession | null = null;
   private selectedId: string | null = null;
   private lastPinching = false;
   private lastHandMessageAt = 0;
@@ -137,8 +151,12 @@ class App {
         if (this.sketch.get(this.movement.entity.id) !== this.movement.entity) this.cancelMove();
         else this.renderMove();
       }
+      if (this.scaling) {
+        if (this.sketch.get(this.scaling.entity.id) !== this.scaling.entity) this.cancelScale();
+        else this.renderScale();
+      }
     });
-    this.viewport.onResize(() => this.pauseMove(false));
+    this.viewport.onResize(() => { this.pauseMove(false); this.pauseScale(false); });
 
     this.mouse = new MouseSource(viewportElement, {
       onMove: (point) => {
@@ -146,8 +164,9 @@ class App {
       },
       onHold: (action, down) => this.setHold(action, down),
       onWheel: (deltaY, point) => {
-        if (!this.extrusion?.dragging && !this.movement?.grab) {
+        if (!this.extrusion?.dragging && !this.movement?.grab && !this.scaling?.grab) {
           this.pauseMove(false);
+          this.pauseScale(false);
           this.orbit.zoom(deltaY < 0 ? 1.15 : 1 / 1.15, point);
         }
       },
@@ -170,6 +189,7 @@ class App {
           this.cursor.dropHand();
           this.extrusion?.pause();
           this.pauseMove();
+          this.pauseScale();
           this.previousCursor = null;
         }
         this.pip.setCameraState(this.cameraState, state === 'open');
@@ -216,6 +236,7 @@ class App {
   private releaseAll(): void {
     this.extrusion?.pause();
     this.pauseMove();
+    this.pauseScale();
     this.previousCursor = null;
     for (const action of [...this.held]) this.setHold(action, false);
     this.mouse.releaseAll();
@@ -231,10 +252,16 @@ class App {
       this.previousCursor = this.navigationMode && this.focused && position && source ? { position: { ...position }, source } : null;
       this.extrusion?.pause(false);
       this.pauseMove(false);
+      this.pauseScale(false);
       if (!down) {
         this.updateExtrusion();
         this.updateMove();
+        this.updateScale();
       }
+      return;
+    }
+    if (this.scaling) {
+      if (action === 'draw') this.updateScale();
       return;
     }
     if (this.movement) {
@@ -267,7 +294,7 @@ class App {
   }
 
   private get mode(): Mode {
-    return this.navigationMode ?? (this.movement ? 'MOVING' : this.extrusion ? 'EXTRUDING' : this.stroke ? 'DRAWING' : 'READY');
+    return this.navigationMode ?? (this.scaling ? 'SCALING' : this.movement ? 'MOVING' : this.extrusion ? 'EXTRUDING' : this.stroke ? 'DRAWING' : 'READY');
   }
 
   private onHands(message: HandsMessage): void {
@@ -280,7 +307,7 @@ class App {
     // Missing frames do not count as a pinch release.
     if (this.cursor.hand) this.lastPinching = pinching;
     this.pip.setHands(message, this.cursor.handId);
-    if (this.focused && this.navAssist && message.nav && !this.navigationMode && !this.held.has('draw') && !this.stroke && !this.extrusion && !this.movement && !pinching && !this.measure.isOpen && !this.help.visible) this.applyPalmNav(message.nav, message.frame);
+    if (this.focused && this.navAssist && message.nav && !this.navigationMode && !this.held.has('draw') && !this.stroke && !this.extrusion && !this.movement && !this.scaling && !pinching && !this.measure.isOpen && !this.help.visible) this.applyPalmNav(message.nav, message.frame);
   }
 
   private applyPalmNav(nav: NavMessage, frame: { w: number; h: number }): void {
@@ -298,6 +325,12 @@ class App {
 
   private doPress(action: PressAction): void {
     if (this.help.visible && action !== 'help' && action !== 'cancel') return;
+    if (this.scaling && !['scale', 'confirm', 'cancel', 'help', 'togglePip', 'cyclePlane', 'toggleGrid', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'fitAll', 'zoomIn', 'zoomOut'].includes(action)) {
+      this.toasts.show('Finish scaling with Enter or R, or cancel with Esc');
+      return;
+    }
+    const rebaseScale = !!this.scaling && ['cyclePlane', 'toggleGrid', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'fitAll', 'zoomIn', 'zoomOut'].includes(action);
+    if (rebaseScale) this.pauseScale(false);
     if (this.movement && !['move', 'confirm', 'cancel', 'help', 'togglePip', 'cyclePlane', 'toggleGrid', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'fitAll', 'zoomIn', 'zoomOut'].includes(action)) {
       this.toasts.show('Finish the move with Enter or M, or cancel with Esc');
       return;
@@ -317,12 +350,17 @@ class App {
         if (this.movement) this.commitMove();
         else this.beginMove();
         break;
+      case 'scale':
+        if (this.scaling) this.commitScale();
+        else this.beginScale();
+        break;
       case 'extrude':
         if (this.extrusion) this.commitExtrusion();
         else this.beginExtrusion();
         break;
       case 'confirm':
-        if (this.movement) this.commitMove();
+        if (this.scaling) this.commitScale();
+        else if (this.movement) this.commitMove();
         else if (this.extrusion) this.commitExtrusion();
         break;
       case 'viewTop':
@@ -392,6 +430,7 @@ class App {
       }
       case 'cancel':
         if (this.help.visible) this.help.hide();
+        else if (this.scaling) this.cancelScale();
         else if (this.movement) this.cancelMove();
         else if (this.extrusion) this.cancelExtrusion();
         else if (this.stroke) this.cancelStroke();
@@ -409,10 +448,12 @@ class App {
       case 'help':
         this.extrusion?.pause();
         this.pauseMove();
+        this.pauseScale();
         this.help.toggle();
         break;
     }
     if (rebaseMove) this.updateMove();
+    if (rebaseScale) this.updateScale();
   }
 
   private setPlaneKind(kind: PlaneKind, announce: boolean): void {
@@ -442,15 +483,21 @@ class App {
       this.toasts.show('Draw something first, then press L to set its size', 'error');
       return;
     }
+    if (target.type === 'triangle') {
+      this.toasts.show('Use Q to extrude the triangle or M to move it');
+      return;
+    }
     const prompt = target.type === 'line'
       ? `Length of ${describeEntity(target)} (mm):`
       : target.type === 'extrusion'
         ? 'Extrusion depth (mm) or base size (W x H mm):'
-        : target.type === 'cylinder'
-          ? 'Cylinder pull depth (mm; negative pushes the active cap in):'
-          : target.type === 'circle'
-            ? 'Circle diameter (mm; e.g. 50 or 5 cm):'
-            : `Size of ${describeEntity(target)} (W x H mm):`;
+        : target.type === 'prism'
+          ? 'Triangular prism depth (mm; e.g. 100 or -10 cm):'
+          : target.type === 'cylinder'
+            ? 'Cylinder pull depth (mm; negative pushes the active cap in):'
+            : target.type === 'circle'
+              ? 'Circle diameter (mm; e.g. 50 or 5 cm):'
+              : `Size of ${describeEntity(target)} (W x H mm):`;
     this.measure.open(prompt, (text) => {
       const result = this.commands.setDimension(target.id, text);
       this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'success' : 'error');
@@ -591,6 +638,140 @@ class App {
     this.toasts.show('Move cancelled');
   }
 
+  private beginScale(): void {
+    if (!this.focused || this.measure.isOpen || this.help.visible) return;
+    if (this.stroke || this.navigationMode) {
+      this.toasts.show('Finish drawing or navigating before scaling a shape', 'error');
+      return;
+    }
+    const entity = this.selected ?? this.entityAtCursor();
+    if (!entity) {
+      this.toasts.show('Select a shape with a click, pinch, or S, then press R to scale it', 'error');
+      return;
+    }
+    this.selectEntity(entity);
+    this.scaling = { entity, preview: entity, factor: 1, handle: null, grab: null, source: null, needsRelease: false };
+    this.hover = null;
+    this.sketchRenderer.setHover(null);
+    this.renderScale();
+    this.updateScale();
+    this.toasts.show('Pinch or drag a corner (or rim point) to scale · opposite corner stays fixed · Enter / R applies · Esc cancels', 'info', 6000);
+  }
+
+  private pauseScale(requireRelease = true): void {
+    if (!this.scaling) return;
+    this.scaling.grab = null;
+    this.scaling.needsRelease ||= requireRelease;
+  }
+
+  private renderScale(): void {
+    const session = this.scaling;
+    if (!session) return;
+    this.sketchRenderer.setSketch(this.sketch.all.map((entity) => entity.id === session.entity.id ? session.preview : entity));
+    this.sketchRenderer.setSelected(session.preview);
+    this.sketchRenderer.setLastLabel(session.preview);
+    const handle = session.handle;
+    const point = handle ? add(handle.anchor, scale(sub(handle.point, handle.anchor), session.factor)) : null;
+    this.sketchRenderer.setGhost(handle && point ? [handle.anchor, point] : null, false,
+      handle ? { text: `${Number((session.factor * 100).toFixed(1))}% · fixed corner`, at: handle.anchor } : null);
+  }
+
+  private updateScale(): void {
+    const session = this.scaling;
+    if (!session) return;
+    const position = this.cursor.position;
+    const source = this.cursorSource;
+    if (!this.focused || this.measure.isOpen || this.help.visible || !position || !source) {
+      this.pauseScale();
+      return;
+    }
+    if (this.navigationMode) {
+      this.pauseScale(false);
+      return;
+    }
+    if (session.source !== null && session.source !== source) this.pauseScale();
+    session.source = source;
+    const gripping = this.held.has('draw') || !!this.cursor.hand?.pinching;
+    if (!gripping) {
+      session.grab = null;
+      session.needsRelease = false;
+      return;
+    }
+    if (session.needsRelease) return;
+    const projector = this.viewport.projector();
+    if (!session.handle) {
+      let nearest: { handle: ScaleHandle; distance: number } | null = null;
+      for (const handle of entityScaleHandles(session.entity)) {
+        const screen = projector.project(handle.point);
+        if (!screen) continue;
+        const d = distance2(position, screen);
+        if (d <= SNAP_TOLERANCE_PX && (!nearest || d < nearest.distance)) nearest = { handle, distance: d };
+      }
+      if (!nearest) return;
+      session.handle = nearest.handle;
+      this.renderScale();
+    }
+    const { point, anchor } = session.handle;
+    const direction = sub(point, anchor);
+    const span = distance(point, anchor);
+    const screen = projector.project(add(anchor, scale(direction, session.factor)));
+    const anchorScreen = projector.project(anchor);
+    const referenceScreen = projector.project(point);
+    if (!screen || !anchorScreen || !referenceScreen || !Number.isFinite(span) || span < 1e-6 || distance2(referenceScreen, anchorScreen) < 2) {
+      this.pauseScale(false);
+      return;
+    }
+    const offset = session.grab?.offset ?? sub2(position, screen);
+    const ray = projector.ray(sub2(position, offset));
+    const hit = closestPointOnLineToRay(ray.origin, ray.dir, anchor, direction);
+    if (!hit || !Number.isFinite(hit.s) || !isFinite3(hit.point) || dot(sub(hit.point, ray.origin), ray.dir) < 0) {
+      this.pauseScale(false);
+      return;
+    }
+    if (!session.grab) {
+      session.grab = { offset, along: hit.s, factor: session.factor, step: this.gridEnabled ? this.gridStep : 0 };
+      return;
+    }
+    const factor = session.grab.factor + roundTo(hit.s - session.grab.along, session.grab.step) / span;
+    if (factor === session.factor) return;
+    const preview = scaleEntity(session.entity, anchor, factor);
+    if (!preview) return;
+    session.factor = factor;
+    session.preview = preview;
+    this.renderScale();
+  }
+
+  private commitScale(): void {
+    const session = this.scaling;
+    if (!session) return;
+    this.scaling = null;
+    const result = this.commands.scale(session.entity.id, session.handle?.anchor ?? entityCenter(session.entity), session.factor);
+    this.sketchRenderer.setGhost(null, false, null);
+    this.sketchRenderer.setSketch(this.sketch.all);
+    this.held.clear();
+    this.mouse.releaseAll();
+    if (result.ok) {
+      this.lastCommitted = result.entity;
+      this.selectEntity(result.entity);
+      this.sketchRenderer.setLastLabel(result.entity);
+    } else {
+      this.sketchRenderer.setSelected(this.selected);
+      this.sketchRenderer.setLastLabel(this.selected);
+    }
+    this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'success' : 'error');
+  }
+
+  private cancelScale(): void {
+    this.scaling = null;
+    this.sketchRenderer.setGhost(null, false, null);
+    this.sketchRenderer.setSketch(this.sketch.all);
+    this.sketchRenderer.setSelected(this.selected);
+    this.sketchRenderer.setLastLabel(this.selected);
+    this.held.clear();
+    this.mouse.releaseAll();
+    this.toasts.show('Scale cancelled');
+  }
+
   private beginExtrusion(): void {
     if (this.stroke) {
       this.toasts.show('Finish drawing before extruding', 'error');
@@ -598,11 +779,15 @@ class App {
     }
     const target = this.selected ?? this.entityAtCursor();
     if (!target || target.type === 'line') {
-      this.toasts.show('Select a closed rectangle or circle: point inside it and pinch, click, or press S.', 'error', 5000);
+      this.toasts.show('Select a closed rectangle, triangle, or circle: point inside it and pinch, click, or press S.', 'error', 5000);
       return;
     }
     if ((target.type === 'rect' || target.type === 'extrusion') && !isExtrudableProfile(target.corners)) {
       this.toasts.show('This shape is not a planar rectangle. Draw a new closed rectangle to extrude.', 'error');
+      return;
+    }
+    if ((target.type === 'triangle' || target.type === 'prism') && !isTriangleProfile(target.corners)) {
+      this.toasts.show('This triangle is degenerate. Draw a new closed triangle to extrude.', 'error');
       return;
     }
     this.selectEntity(target);
@@ -671,11 +856,15 @@ class App {
       this.toasts.show('The preview is degenerate — pull the cap back out or press Esc.', 'error');
       return;
     }
+    if (preview.type === 'prism' && (!isTriangleProfile(preview.corners) || !entityPoints(preview).every(isFinite3))) {
+      this.toasts.show('The preview is degenerate — pull the face back out or press Esc.', 'error');
+      return;
+    }
     // Clear the preview transaction before the command emits its model change.
     this.extrusion = null;
-    const geometry = preview.type === 'extrusion'
-      ? preview.corners
-      : { center: preview.center, normal: preview.normal, radius: preview.radius } satisfies CircleGeometry;
+    const geometry = preview.type === 'cylinder'
+      ? { center: preview.center, normal: preview.normal, radius: preview.radius } satisfies CircleGeometry
+      : preview.corners;
     const result = this.commands.extrude(session.profile.id, session.depth, geometry);
     this.sketchRenderer.setExtrusion(null);
     this.sketchRenderer.setActiveFace(null);
@@ -707,6 +896,10 @@ class App {
       this.toasts.show('Nothing to export yet', 'error');
       return;
     }
+    if (this.sketch.all.some((entity) => entity.type === 'triangle' || entity.type === 'prism')) {
+      this.toasts.show('Triangles and triangular prisms are not supported by the legacy exporter', 'error', 6000);
+      return;
+    }
     const payload = this.commands.exportPayload();
     this.toasts.show(`Exporting ${payload.entities.length} entities to FreeCAD...`);
     try {
@@ -727,11 +920,21 @@ class App {
 
   private computeSnap(cursorPx: Vec2): SnapResult {
     const plane = this.stroke ? this.stroke.plane : this.plane;
+    const scaling = this.scaling;
+    const projector = this.viewport.projector();
+    if (scaling?.handle) {
+      const { anchor, point } = scaling.handle;
+      const world = add(anchor, scale(sub(point, anchor), scaling.factor));
+      const screen = projector.project(world);
+      if (screen) return { type: 'lock', world, plane: plane.toPlane(world), screen, onPlane: plane.contains(world, 1e-6), raw: null, entityId: scaling.entity.id };
+    }
     return snapCursor({
       cursor: cursorPx,
-      projector: this.viewport.projector(),
+      projector,
       plane,
-      targets: { vertices: this.sketch.vertices(), midpoints: this.sketch.midpoints(), segments: this.sketch.segments() },
+      targets: scaling
+        ? { vertices: entityScaleHandles(scaling.preview).map(({ point }, index) => ({ point, index, entityId: scaling.entity.id })), midpoints: [], segments: [] }
+        : { vertices: this.sketch.vertices(), midpoints: this.sketch.midpoints(), segments: this.sketch.segments() },
       gridStep: this.gridStep,
       gridEnabled: this.gridEnabled,
       strokeStart: this.stroke ? this.stroke.start.world : null,
@@ -741,7 +944,7 @@ class App {
   }
 
   private beginStroke(): void {
-    if (this.stroke || this.extrusion || this.movement || this.navigationMode || !this.cursor.position || this.cursor.isLost) return;
+    if (this.stroke || this.extrusion || this.movement || this.scaling || this.navigationMode || !this.cursor.position || this.cursor.isLost) return;
     const snap = this.computeSnap(this.cursor.position);
     this.lastSnap = snap;
     this.planeBeforeStroke = this.plane;
@@ -773,12 +976,14 @@ class App {
       this.previousCursor = null;
       this.extrusion?.pause();
       this.pauseMove();
+      this.pauseScale();
       return;
     }
     const navigation = this.navigationMode;
     if (navigation) {
       this.extrusion?.pause(false);
       this.pauseMove(false);
+      this.pauseScale(false);
       if (this.previousCursor?.source === source) {
         const dx = position.x - this.previousCursor.position.x;
         const dy = position.y - this.previousCursor.position.y;
@@ -789,7 +994,8 @@ class App {
       return;
     }
     this.previousCursor = null;
-    if (this.movement) this.updateMove();
+    if (this.scaling) this.updateScale();
+    else if (this.movement) this.updateMove();
     else if (this.extrusion) this.updateExtrusion();
     else this.sampleStroke();
   }
@@ -823,7 +1029,7 @@ class App {
     this.lastRecognition = { reason: result.reason, points: stroke.planePoints(), screenExtent: stroke.screenExtent() };
     if (!result.shape) {
       this.sketchRenderer.fadeOut(stroke.worldPath());
-      this.toasts.show('Not recognized: draw a straight line, a closed rectangle, or most of a circle', 'error');
+      this.toasts.show('Not recognized: draw a straight line, a closed rectangle or triangle, or most of a circle', 'error');
       return;
     }
     const input = buildEntityFromStroke(stroke, result.shape, {
@@ -836,9 +1042,11 @@ class App {
       ? this.commands.addLine(input.a, input.b)
       : input.type === 'circle'
         ? this.commands.addCircle(input.center, input.normal, input.radius)
-        : input.type === 'rect'
-          ? this.commands.addRect(input.corners)
-          : { ok: false as const, error: 'A cylinder cannot be created from a sketch stroke' };
+        : input.type === 'triangle'
+          ? this.commands.addTriangle(input.corners)
+          : input.type === 'rect'
+            ? this.commands.addRect(input.corners)
+            : { ok: false as const, error: 'A cylinder cannot be created from a sketch stroke' };
     if (!commit.ok) {
       this.toasts.show(commit.error, 'error');
       return;
@@ -880,6 +1088,11 @@ class App {
       this.sketchRenderer.setGhost(circlePoints(circle), true, { text: `Ø ${formatMm(circle.radius * 2)}`, at: circle.center });
       return;
     }
+    if (shape.kind === 'triangle') {
+      const triangle: TriangleEntity = { id: 'ghost', type: 'triangle', corners: shape.corners.map((corner) => plane.toWorld(corner)) as TriangleEntity['corners'] };
+      this.sketchRenderer.setGhost(triangle.corners, true, { text: 'Triangle', at: entityCenter(triangle) });
+      return;
+    }
     const corners = shape.corners.map((c) => plane.toWorld(c));
     const centre = plane.toWorld(v2((shape.corners[0].x + shape.corners[2].x) / 2, (shape.corners[0].y + shape.corners[2].y) / 2));
     this.sketchRenderer.setGhost(corners, true, {
@@ -896,6 +1109,7 @@ class App {
       this.cursor.dropHand();
       this.extrusion?.pause();
       this.pauseMove();
+      this.pauseScale();
       this.previousCursor = null;
     }
     const cursorPx = this.cursor.position;
@@ -939,7 +1153,7 @@ class App {
       navAssist: this.navAssist,
       edgeOn: this.plane.isEdgeOn(viewDirection),
       entityCount: this.sketch.size,
-      selected: this.selected ? describeEntity(this.selected) : null,
+      selected: this.scaling ? describeEntity(this.scaling.preview) : this.selected ? describeEntity(this.selected) : null,
       extrusion: this.extrusion ? { depth: this.extrusion.depth, dragging: this.extrusion.dragging, face: this.extrusion.face.label, pulled: this.extrusion.pulled } : null,
     });
     this.hud.setKeys(this.keyHints(mode));
@@ -988,6 +1202,15 @@ class App {
           { key: 'Enter / M', label: 'apply' },
           { key: key('cancel'), label: 'cancel' },
         ];
+      case 'SCALING':
+        return [
+          { key: this.cursor.hand ? 'Pinch' : 'Drag / Space', label: this.scaling?.handle ? 'scale shape' : 'lock corner & scale' },
+          { key: key('toggleGrid'), label: 'grid snap' },
+          { key: key('orbit'), label: 'orbit' },
+          { key: key('pan'), label: 'pan' },
+          { key: 'Enter / R', label: 'apply' },
+          { key: key('cancel'), label: 'cancel' },
+        ];
       case 'DRAWING':
         return [
           { key: key('draw'), label: 'release to commit' },
@@ -1008,9 +1231,13 @@ class App {
         ];
         const target = this.selected ?? this.hover;
         if (this.hover) hints.push({ key: key('select'), label: 'select' });
-        if (target && target.type !== 'line') hints.push({ key: key('extrude'), label: target.type === 'circle' ? 'extrude cylinder' : 'push/pull' });
+        if (target && target.type !== 'line') hints.push({ key: key('extrude'), label: target.type === 'circle' ? 'extrude cylinder' : target.type === 'triangle' ? 'extrude triangle' : 'push/pull' });
         if (target) hints.push({ key: key('move'), label: 'move' });
-        if (target) hints.push({ key: key('measure'), label: target.type === 'circle' ? 'diameter' : target.type === 'cylinder' ? 'depth' : 'size' }, { key: key('delete'), label: 'delete' });
+        if (target) hints.push({ key: key('scale'), label: 'scale' });
+        if (target) {
+          if (target.type !== 'triangle') hints.push({ key: key('measure'), label: target.type === 'circle' ? 'diameter' : target.type === 'cylinder' || target.type === 'prism' ? 'depth' : 'size' });
+          hints.push({ key: key('delete'), label: 'delete' });
+        }
         else if (this.sketch.size) hints.push({ key: key('measure'), label: 'size' }, { key: key('undo'), label: 'undo' });
         hints.push({ key: key('export'), label: 'FreeCAD' }, { key: key('help'), label: 'help' });
         return hints;
@@ -1039,7 +1266,7 @@ class App {
         dragging: this.extrusion.dragging,
         face: this.extrusion.face.label,
         preview: this.extrusion.preview,
-        ...(this.extrusion.preview.type === 'extrusion' ? { corners: this.extrusion.preview.corners } : {}),
+        ...(this.extrusion.preview.type === 'extrusion' || this.extrusion.preview.type === 'prism' ? { corners: this.extrusion.preview.corners } : {}),
       } : null,
     };
   }
@@ -1057,7 +1284,7 @@ export interface AirCadApi {
   /** Reason and plane points of the most recent pen-up, for diagnostics. */
   lastRecognition(): { reason: string; points: Vec2[]; screenExtent: number } | null;
   selected(): Entity | null;
-  extrusion(): { depth: number; dragging: boolean; face: string; preview: SolidEntity; corners?: ExtrusionEntity['corners'] } | null;
+  extrusion(): { depth: number; dragging: boolean; face: string; preview: SolidEntity; corners?: ExtrusionEntity['corners'] | TriangleEntity['corners'] } | null;
 }
 
 declare global {
