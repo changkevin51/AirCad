@@ -44,6 +44,9 @@ const h = vi.hoisted(() => ({
   voiceControl: null as null | { toggle: () => void; cancel: () => void },
   glyph: { update: vi.fn() },
   guide: vi.fn(),
+  ghost: null as null | { points: Vec3[]; closed: boolean },
+  extrusionPreview: null as null | { type: string; corners: Vec3[]; depth: number },
+  rendererEntities: [] as { id: string; type: string }[][],
 }));
 
 vi.mock('./scene/viewport', () => ({
@@ -99,13 +102,19 @@ vi.mock('./scene/workplane-visual', () => ({
 vi.mock('./render/sketch-renderer', () => ({
   SketchRenderer: class {
     constructor(_viewport: unknown) {}
-    setSketch(): void {}
+    setSketch(entities: readonly { id: string; type: string }[] = []): void {
+      h.rendererEntities.push(entities.map((entity) => ({ id: entity.id, type: entity.type })));
+    }
     setSelected(): void {}
     setHover(): void {}
-    setExtrusion(): void {}
+    setExtrusion(preview: { type: string; corners: Vec3[]; depth: number } | null): void {
+      h.extrusionPreview = preview ? { type: preview.type, corners: preview.corners, depth: preview.depth } : null;
+    }
     setActiveFace(): void {}
     setLastLabel(): void {}
-    setGhost(): void {}
+    setGhost(points: readonly Vec3[] | null, closed: boolean): void {
+      h.ghost = points ? { points: [...points], closed } : null;
+    }
     setInk(): void {}
     setLineGuide(points: readonly Vec3[] | null, label: { text: string; at: Vec3 } | null): void {
       h.guide(points, label);
@@ -290,6 +299,9 @@ beforeEach(async () => {
   h.nowMs = 10_000;
   h.voice = null;
   h.voiceControl = null;
+  h.ghost = null;
+  h.extrusionPreview = null;
+  h.rendererEntities = [];
   vi.clearAllMocks();
   const windowStub = {
     addEventListener: (type: string, listener: (event: unknown) => void) => {
@@ -689,6 +701,174 @@ describe('navigation HUD', () => {
     const keys = h.hudKeys.at(-1) ?? [];
     expect(keys).toContainEqual({ key: 'Shift', label: 'orbit' });
     expect(keys).toContainEqual({ key: 'Ctrl', label: 'pan' });
+  });
+});
+
+describe('closed outlines and line loops', () => {
+  const drawStroke = (points: Vec2[]): void => {
+    api.setCursor(points[0]);
+    api.hold('draw', true);
+    for (const point of points.slice(1)) api.setCursor(point);
+    api.hold('draw', false);
+  };
+
+  const drawTriangleLoop = (): { a: Vec2; b: Vec2; c: Vec2 } => {
+    const a = v2(100, 100);
+    const b = v2(500, 100);
+    const c = v2(200, 400);
+    drawStroke([a, b]);
+    drawStroke([b, c]);
+    drawStroke([c, a]);
+    return { a, b, c };
+  };
+
+  it('draws a triangle, then Q + drag + typed depth + Enter commits it exactly once', () => {
+    api.press('toggleGrid');
+    drawStroke([v2(100, 100), v2(500, 100), v2(200, 400), v2(100, 100)]);
+    const polygon = api.sketch.last;
+    expect(polygon?.type).toBe('polygon');
+    if (polygon?.type !== 'polygon') throw new Error('expected polygon');
+    expect(polygon.corners).toHaveLength(3);
+    const saved = api.sketch.serialize();
+
+    api.setCursor(v2(250, 200));
+    api.press('select');
+    expect(api.selected()?.id).toBe(polygon.id);
+    api.press('extrude');
+    expect(api.extrusion()).toMatchObject({ depth: 0 });
+    api.hold('draw', true);
+    api.setCursor(v2(250, 150));
+    expect(api.extrusion()!.depth).toBe(50);
+    api.hold('draw', false);
+    expect(api.extrusion()).not.toBeNull();
+    expect(api.sketch.serialize()).toBe(saved);
+
+    api.press('measure');
+    h.measure.submit?.('12.345');
+    expect(api.extrusion()!.depth).toBeCloseTo(12.345);
+    api.press('confirm');
+    expect(api.extrusion()).toBeNull();
+    expect(api.sketch.get(polygon.id)).toMatchObject({ type: 'extrusion', depth: 12.345, corners: polygon.corners });
+    expect(api.commands.undo()).toBe('extrude 12.3 mm');
+    expect(api.sketch.serialize()).toBe(saved);
+  });
+
+  it('follows the same Q path with a hand pinch', () => {
+    api.press('toggleGrid');
+    drawStroke([v2(100, 100), v2(500, 100), v2(200, 400), v2(100, 100)]);
+    api.setCursor(v2(250, 200));
+    api.press('select');
+    api.press('extrude');
+    setHand(v2(250, 200));
+    emitHands(handAt(250, 200, { pinching: true }));
+    emitHands(handAt(250, 170, { pinching: true }));
+    expect(api.extrusion()!.depth).toBeCloseTo(30);
+    emitHands(handAt(250, 170, { pinching: false }));
+    expect(api.extrusion()).not.toBeNull();
+    api.press('confirm');
+    expect(api.sketch.last).toMatchObject({ type: 'extrusion' });
+    expect((api.sketch.last as ExtrusionEntity).depth).toBeCloseTo(30);
+  });
+
+  it('selects and extrudes a loop of separately drawn lines, then cancels and commits cleanly', () => {
+    api.press('toggleGrid');
+    drawTriangleLoop();
+    const lines = [...api.sketch.all];
+    expect(lines).toHaveLength(3);
+    expect(api.sketch.closedLineProfiles).toHaveLength(1);
+    const loop = api.sketch.closedLineProfiles[0];
+    expect(api.selected()?.id).toBe(loop.id);
+    const saved = api.sketch.serialize();
+
+    api.setCursor(v2(250, 200));
+    api.press('select');
+    expect(api.selected()?.id).toBe(loop.id);
+    api.press('extrude');
+    expect(api.extrusion()).not.toBeNull();
+    expect(api.extrusion()!.corners).toHaveLength(3);
+    api.press('cancel');
+    expect(api.extrusion()).toBeNull();
+    expect(api.sketch.serialize()).toBe(saved);
+
+    api.press('extrude');
+    api.press('measure');
+    h.measure.submit?.('150');
+    api.press('confirm');
+    expect(api.sketch.serialize()).not.toBe(saved);
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.last).toMatchObject({ type: 'extrusion', depth: 150 });
+    expect(api.commands.undo()).toBe('extrude 150 mm');
+    expect(api.sketch.serialize()).toBe(saved);
+    for (const line of lines) expect(api.sketch.get(line.id)).not.toBeUndefined();
+    api.commands.redo();
+    expect(api.sketch.last).toMatchObject({ type: 'extrusion', depth: 150 });
+  });
+
+  it('starts Q extrusion directly on a line that belongs to one closed loop', () => {
+    api.press('toggleGrid');
+    api.commands.addLine(v3(100, 100, 0), v3(500, 100, 0));
+    api.setCursor(v2(300, 100));
+    api.press('select');
+    expect(api.selected()?.type).toBe('line');
+    api.commands.addLine(v3(500, 100, 0), v3(200, 400, 0));
+    api.commands.addLine(v3(200, 400, 0), v3(100, 100, 0));
+    api.press('extrude');
+    expect(api.extrusion()).not.toBeNull();
+    expect(api.extrusion()!.corners).toHaveLength(3);
+    api.press('cancel');
+    expect(api.sketch.size).toBe(3);
+    expect(api.sketch.all.every((entity) => entity.type === 'line')).toBe(true);
+  });
+
+  it('cancels the loop preview and its voice draft when a source line is deleted', () => {
+    api.press('toggleGrid');
+    drawTriangleLoop();
+    api.setCursor(v2(250, 200));
+    api.press('select');
+    api.press('extrude');
+    expect(api.extrusion()).not.toBeNull();
+    api.hold('draw', true);
+    api.setCursor(v2(250, 163));
+    const target = h.voice!.capture();
+    expect(h.voice!.isCurrent(target)).toBe(true);
+    const lines = [...api.sketch.all];
+    expect(api.commands.deleteEntity(lines[0].id).ok).toBe(true);
+    expect(api.extrusion()).toBeNull();
+    expect(api.sketch.closedLineProfiles).toHaveLength(0);
+    expect(h.voice!.isCurrent(target)).toBe(false);
+    const afterDelete = api.sketch.serialize();
+    expect(h.voice!.execute({ distance_mm: 50 }, target).ok).toBe(false);
+    expect(api.sketch.serialize()).toBe(afterDelete);
+  });
+
+  it('does not pick the notch of a concave outline', () => {
+    api.press('toggleGrid');
+    drawStroke([v2(0, 0), v2(400, 0), v2(400, 100), v2(100, 100), v2(100, 300), v2(0, 300), v2(0, 0)]);
+    expect(api.sketch.last?.type).toBe('polygon');
+    api.setCursor(v2(250, 200));
+    api.press('select');
+    expect(api.selected()).toBeNull();
+    api.setCursor(v2(50, 200));
+    api.press('select');
+    expect(api.selected()?.type).toBe('polygon');
+  });
+
+  it('commits a round stroke as a polygon ghost and never makes an open arc', () => {
+    api.press('toggleGrid');
+    const round = Array.from({ length: 60 }, (_, i) => v2(400 + Math.cos((i / 59) * Math.PI * 2) * 200, 300 + Math.sin((i / 59) * Math.PI * 2) * 200));
+    api.setCursor(round[0]);
+    api.hold('draw', true);
+    for (const point of round.slice(1)) api.setCursor(point);
+    runFrame();
+    expect(h.ghost?.closed).toBe(true);
+    expect(h.ghost!.points.length).toBeGreaterThan(8);
+    api.hold('draw', false);
+    const shape = api.sketch.last;
+    expect(shape?.type).toBe('polygon');
+    if (shape?.type === 'polygon') expect(shape.corners.length).toBeGreaterThan(8);
+    const arc = Array.from({ length: 30 }, (_, i) => v2(400 + Math.cos((i / 29) * Math.PI * 1.4) * 200, 600 + Math.sin((i / 29) * Math.PI * 1.4) * 200));
+    drawStroke(arc);
+    expect(api.sketch.size).toBe(1);
   });
 });
 

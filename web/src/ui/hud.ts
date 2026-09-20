@@ -103,7 +103,7 @@ export class Hud {
       this.chips.innerHTML = html;
     }
     const hintText = state.voice
-      ? `Voice draft frozen (${state.voice}) — you may release. Say a distance with units, or V to confirm a number · Esc cancels the draft.`
+      ? `Voice draft frozen (${state.voice}) — you may release. Say a distance; V confirms or sends it · Esc cancels the draft.`
       : state.extrusion
       ? state.tracking === 'lost'
         ? 'Tracking lost — depth paused. Show your hand, release the pinch, then pinch again to continue.'

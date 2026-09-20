@@ -1,3 +1,5 @@
+import { findClosedLineProfiles } from './loops';
+import { polygonFrame, triangulatePolygon } from './polygon';
 import {
   add,
   clone,
@@ -28,11 +30,21 @@ export interface RectEntity {
   corners: [Vec3, Vec3, Vec3, Vec3];
 }
 
-/** A closed rectangular profile swept along its positive plane normal by a signed depth in mm. */
+export interface PolygonEntity {
+  id: string;
+  type: 'polygon';
+  corners: Vec3[];
+}
+
+export interface LineLoopProfile extends PolygonEntity {
+  sourceIds: string[];
+}
+
+/** A closed planar profile swept along its positive plane normal by a signed depth in mm. */
 export interface ExtrusionEntity {
   id: string;
   type: 'extrusion';
-  corners: RectEntity['corners'];
+  corners: Vec3[];
   depth: number;
 }
 
@@ -46,12 +58,13 @@ export interface CircleEntity {
 
 export type CircleGeometry = Pick<CircleEntity, 'center' | 'normal' | 'radius'>;
 
-export type ProfileEntity = RectEntity | ExtrusionEntity;
+export type ProfileEntity = RectEntity | PolygonEntity | ExtrusionEntity;
 export type Entity = LineEntity | ProfileEntity | CircleEntity;
 export type EntityInput =
   | { type: 'line'; a: Vec3; b: Vec3 }
   | { type: 'rect'; corners: RectEntity['corners'] }
-  | { type: 'extrusion'; corners: RectEntity['corners']; depth: number }
+  | { type: 'polygon'; corners: Vec3[] }
+  | { type: 'extrusion'; corners: Vec3[]; depth: number }
   | { type: 'circle'; center: Vec3; normal: Vec3; radius: number };
 
 export interface Vertex {
@@ -118,17 +131,20 @@ export function rectNormal(rect: ProfileEntity): Vec3 {
   ));
 }
 
-/** A positive dominant axis makes depth independent of the direction the rectangle was drawn. */
+/** A positive dominant axis makes depth independent of the direction the outline was drawn. */
 export function extrusionNormal(profile: ProfileEntity): Vec3 {
-  const normal = rectNormal(profile);
+  const frame = polygonFrame(profile.corners);
+  const fallback = profile.corners.length >= 3
+    ? normalize(cross(sub(profile.corners[1], profile.corners[0]), sub(profile.corners[2], profile.corners[0])))
+    : v3(0, 0, 1);
+  const normal = frame ? frame.normal : fallback;
   const dominant = [normal.x, normal.y, normal.z].reduce((a, b) => Math.abs(a) >= Math.abs(b) ? a : b);
   return dominant < 0 ? scale(normal, -1) : normal;
 }
 
 export const extrusionOffset = (entity: ExtrusionEntity): Vec3 => scale(extrusionNormal(entity), entity.depth);
 
-/** Reject collapsed, skewed or non-planar profiles before making a solid. */
-export function isExtrudableProfile(corners: readonly Vec3[]): boolean {
+export function isRectangleProfile(corners: readonly Vec3[]): boolean {
   if (corners.length !== 4 || !corners.every(isFinite3)) return false;
   const [a, b, c, d] = corners;
   const u = sub(b, a);
@@ -138,6 +154,11 @@ export function isExtrudableProfile(corners: readonly Vec3[]): boolean {
   return width > 1e-6 && height > 1e-6 && length(cross(u, v)) > 1e-12
     && Math.abs(dot(normalize(u), normalize(v))) < 1e-6
     && distance(c, add(b, v)) <= Math.max(width, height) * 1e-6;
+}
+
+/** Reject collapsed, skewed, self-crossing or non-planar profiles before making a solid. */
+export function isExtrudableProfile(corners: readonly Vec3[]): boolean {
+  return polygonFrame(corners) !== null;
 }
 
 export function isValidCircle(circle: CircleGeometry): boolean {
@@ -174,31 +195,33 @@ export function entitySegments(entity: Entity): Segment[] {
     const points = circlePoints(entity);
     return points.map((a, index) => ({ entityId: entity.id, a, b: points[(index + 1) % points.length], index, circle: entity }));
   }
+  const n = entity.corners.length;
   const base = entity.corners.map((corner, index) => ({
     entityId: entity.id,
     a: corner,
-    b: entity.corners[(index + 1) % 4],
+    b: entity.corners[(index + 1) % n],
     index,
   }));
-  if (entity.type === 'rect') return base;
+  if (entity.type === 'rect' || entity.type === 'polygon') return base;
   const offset = extrusionOffset(entity);
   return [
     ...base,
-    ...base.map((edge) => ({ ...edge, a: add(edge.a, offset), b: add(edge.b, offset), index: edge.index + 4 })),
-    ...entity.corners.map((a, index) => ({ entityId: entity.id, a, b: add(a, offset), index: index + 8 })),
+    ...base.map((edge) => ({ ...edge, a: add(edge.a, offset), b: add(edge.b, offset), index: edge.index + n })),
+    ...entity.corners.map((a, index) => ({ entityId: entity.id, a, b: add(a, offset), index: index + 2 * n })),
   ];
 }
 
-/** Quad faces used by both the renderer and face picking. */
+/** Faces used by both the renderer and face picking. */
 export function entityFaces(entity: Entity): Vec3[][] {
   if (entity.type === 'line' || entity.type === 'circle') return [];
-  if (entity.type === 'rect') return [[...entity.corners]];
+  if (entity.type === 'rect' || entity.type === 'polygon') return [[...entity.corners]];
   const offset = extrusionOffset(entity);
   const base = entity.corners;
+  const n = base.length;
   const top = base.map((corner) => add(corner, offset));
   return [
     [...base], top,
-    ...base.map((a, i) => [a, base[(i + 1) % 4], top[(i + 1) % 4], top[i]]),
+    ...base.map((a, i) => [a, base[(i + 1) % n], top[(i + 1) % n], top[i]]),
   ];
 }
 
@@ -214,13 +237,21 @@ export function entityMidpoints(entity: Entity): Vertex[] {
 export function entityCenter(entity: Entity): Vec3 {
   if (entity.type === 'line') return lerp(entity.a, entity.b, 0.5);
   if (entity.type === 'circle') return clone(entity.center);
-  const center = lerp(entity.corners[0], entity.corners[2], 0.5);
+  let x = 0;
+  let y = 0;
+  let z = 0;
+  for (const corner of entity.corners) {
+    x += corner.x;
+    y += corner.y;
+    z += corner.z;
+  }
+  const center = v3(x / entity.corners.length, y / entity.corners.length, z / entity.corners.length);
   return entity.type === 'extrusion' ? add(center, scale(extrusionOffset(entity), 0.5)) : center;
 }
 
 export function entityPoints(entity: Entity): Vec3[] {
   if (entity.type === 'line') return [entity.a, entity.b];
-  if (entity.type === 'rect') return [...entity.corners];
+  if (entity.type === 'rect' || entity.type === 'polygon') return [...entity.corners];
   if (entity.type === 'circle') {
     const normal = normalize(entity.normal);
     return (['x', 'y', 'z'] as const).flatMap((axis) => {
@@ -239,12 +270,17 @@ export function entityTriangles(entity: Entity): [Vec3, Vec3, Vec3][] {
     const points = circlePoints(entity);
     return points.map((point, index) => [entity.center, point, points[(index + 1) % points.length]]);
   }
-  return entityFaces(entity).flatMap(([a, b, c, d]) => [[a, b, c], [a, c, d]] as [Vec3, Vec3, Vec3][]);
+  return entityFaces(entity).flatMap((face) => triangulatePolygon(face));
 }
 
 export function describeEntity(entity: Entity): string {
   if (entity.type === 'line') return `line ${formatMm(lineLength(entity))}`;
   if (entity.type === 'circle') return `circle diameter ${formatMm(entity.radius * 2)}`;
+  if (!isRectangleProfile(entity.corners)) {
+    return entity.type === 'extrusion'
+      ? `extrusion (${entity.corners.length} edges), depth ${formatMm(entity.depth)}`
+      : `closed outline (${entity.corners.length} edges)`;
+  }
   const { width, height } = rectFrame(entity);
   if (entity.type === 'extrusion') return `extrusion ${formatMm(width)} x ${formatMm(height)} x ${formatMm(entity.depth)}`;
   return `rectangle ${formatMm(width)} x ${formatMm(height)}`;
@@ -256,18 +292,21 @@ export function formatMm(value: number): string {
 }
 
 function validateInput(input: EntityInput): void {
-  if (!['line', 'rect', 'extrusion', 'circle'].includes(input.type)) throw new Error('unsupported entity type');
+  if (!['line', 'rect', 'extrusion', 'polygon', 'circle'].includes(input.type)) throw new Error('unsupported entity type');
   if (input.type === 'circle') {
     if (!isValidCircle(input)) throw new Error('a circle needs a finite center, a non-zero normal, and a positive radius');
     return;
   }
   const points = input.type === 'line' ? [input.a, input.b] : input.corners;
-  if (input.type !== 'line' && input.corners.length !== 4) throw new Error('a rectangle needs four corners');
+  if (input.type === 'rect' && input.corners.length !== 4) throw new Error('a rectangle needs four corners');
   for (const point of points) {
     if (!isFinite3(point)) throw new Error('entity coordinates must be finite');
   }
+  if (input.type === 'polygon' && !isExtrudableProfile(input.corners)) {
+    throw new Error('a polygon needs a simple planar closed outline');
+  }
   if (input.type === 'extrusion') {
-    if (!isExtrudableProfile(input.corners)) throw new Error('extrusion needs a planar rectangle with non-zero sides');
+    if (!isExtrudableProfile(input.corners)) throw new Error('extrusion needs a simple planar closed outline');
     if (!Number.isFinite(input.depth) || Math.abs(input.depth) < 1e-6) throw new Error('extrusion depth must be finite and non-zero');
   }
 }
@@ -284,9 +323,40 @@ export class Sketch {
   private redoStack: SketchCommand[] = [];
   private listeners = new Set<SketchListener>();
   private nextId = 1;
+  private loopCache: { entities: readonly Entity[]; loops: LineLoopProfile[] } | null = null;
+  private drawableCache: { entities: readonly Entity[]; drawable: Entity[] } | null = null;
 
   get all(): readonly Entity[] {
     return this.entities;
+  }
+
+  get closedLineProfiles(): readonly LineLoopProfile[] {
+    if (!this.loopCache || this.loopCache.entities !== this.entities) {
+      const lines = this.entities.filter((entity): entity is LineEntity => entity.type === 'line');
+      this.loopCache = { entities: this.entities, loops: findClosedLineProfiles(lines) };
+    }
+    return this.loopCache.loops;
+  }
+
+  get drawable(): readonly Entity[] {
+    if (!this.drawableCache || this.drawableCache.entities !== this.entities) {
+      const consumed = new Set(this.closedLineProfiles.flatMap((profile) => profile.sourceIds));
+      this.drawableCache = {
+        entities: this.entities,
+        drawable: [...this.entities.filter((entity) => !consumed.has(entity.id)), ...this.closedLineProfiles],
+      };
+    }
+    return this.drawableCache.drawable;
+  }
+
+  getProfile(id: string): ProfileEntity | null {
+    const entity = this.entities.find((candidate) => candidate.id === id);
+    if (entity && (entity.type === 'rect' || entity.type === 'polygon' || entity.type === 'extrusion')) return entity;
+    const loops = this.closedLineProfiles;
+    const direct = loops.find((profile) => profile.id === id);
+    if (direct) return direct;
+    const containing = loops.filter((profile) => profile.sourceIds.includes(id));
+    return containing.length === 1 ? containing[0] : null;
   }
 
   get size(): number {
@@ -349,7 +419,8 @@ export class Sketch {
 
   private materialize(input: EntityInput, id: string): Entity {
     if (input.type === 'line') return { id, type: 'line', a: clone(input.a), b: clone(input.b) };
-    if (input.type === 'extrusion') return { id, type: 'extrusion', corners: input.corners.map(clone) as RectEntity['corners'], depth: input.depth };
+    if (input.type === 'extrusion') return { id, type: 'extrusion', corners: input.corners.map(clone), depth: input.depth };
+    if (input.type === 'polygon') return { id, type: 'polygon', corners: input.corners.map(clone) };
     if (input.type === 'circle') return { id, type: 'circle', center: clone(input.center), normal: normalize(input.normal), radius: input.radius };
     return { id, type: 'rect', corners: input.corners.map(clone) as [Vec3, Vec3, Vec3, Vec3] };
   }
@@ -400,6 +471,31 @@ export class Sketch {
       },
       revert: () => {
         this.entities = this.entities.map((entity) => (entity.id === id ? previous : entity));
+      },
+    });
+    return next;
+  }
+
+  replaceEntities(ids: readonly string[], input: EntityInput | null, label: string): Entity | null {
+    const unique = [...new Set(ids)];
+    const missing = unique.some((id) => !this.entities.some((entity) => entity.id === id));
+    if (missing) return null;
+    if (!input) {
+      if (!unique.length) return null;
+    } else {
+      validateInput(input);
+    }
+    const snapshot = this.entities;
+    const idSet = new Set(unique);
+    const next = input ? this.materialize(input, this.allocateId()) : null;
+    this.execute({
+      label,
+      apply: () => {
+        const remaining = this.entities.filter((entity) => !idSet.has(entity.id));
+        this.entities = next ? [...remaining, next] : remaining;
+      },
+      revert: () => {
+        this.entities = snapshot;
       },
     });
     return next;

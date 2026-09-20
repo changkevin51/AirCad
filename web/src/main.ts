@@ -17,7 +17,7 @@ import { defaultFaceIndex, pickProfileFace, profileFaces } from './model/faces';
 import { pickFace } from './model/pick';
 import { nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
 import { adaptiveGridStep, snapCursor, type SnapResult } from './model/snap';
-import { circlePoints, describeEntity, entityMidpoints, entityVertices, formatMm, isExtrudableProfile, Sketch, type Entity, type ExtrusionEntity } from './model/sketch';
+import { describeEntity, entityMidpoints, entityVertices, formatMm, isExtrudableProfile, isRectangleProfile, Sketch, type Entity, type ExtrusionEntity } from './model/sketch';
 import { anchorAfterCommit, buildEntityFromStroke, StrokeSession, type LineMeasurement } from './model/stroke';
 import { add, dot, length2, nearlyEqual, normalize2, scale, sub2, v2, type Vec2, type Vec3 } from './model/vec';
 import { SketchRenderer } from './render/sketch-renderer';
@@ -41,6 +41,16 @@ const GRID_MIN_PX = 8;
 const PALM_ORBIT_GAIN = 1.0;
 const LOCK_AXES: Partial<Record<HoldAction, Axis>> = { lockX: 'x', lockY: 'y', lockZ: 'z' };
 const PLANE_FOR_VIEW: Record<Exclude<ViewPreset, 'iso'>, PlaneKind> = { top: 'XY', front: 'XZ', right: 'YZ' };
+
+const cornersCenter = (corners: readonly Vec2[]): Vec2 => {
+  let x = 0;
+  let y = 0;
+  for (const corner of corners) {
+    x += corner.x;
+    y += corner.y;
+  }
+  return v2(x / corners.length, y / corners.length);
+};
 
 class App {
   private readonly platform = detectPlatform();
@@ -114,13 +124,13 @@ class App {
 
     this.sketch.onChange(() => {
       this.modelRevision += 1;
-      this.sketchRenderer.setSketch(this.sketch.all.filter((entity) => entity.id !== this.extrusion?.profile.id));
-      if (this.selectedId && !this.sketch.get(this.selectedId)) this.selectedId = null;
+      this.sketchRenderer.setSketch(this.sketch.drawable.filter((entity) => entity.id !== this.extrusion?.profile.id));
+      if (this.selectedId && !this.sketch.get(this.selectedId) && !this.sketch.getProfile(this.selectedId)) this.selectedId = null;
       this.sketchRenderer.setSelected(this.extrusion ? null : this.selected);
       this.hover = null;
       this.sketchRenderer.setHover(null);
       // Programmatic edits must not leave a stale preview able to overwrite newer geometry.
-      if (this.extrusion && this.sketch.get(this.extrusion.profile.id) !== this.extrusion.profile) this.cancelExtrusion();
+      if (this.extrusion && this.sketch.getProfile(this.extrusion.profile.id) !== this.extrusion.profile) this.cancelExtrusion();
       if (this.lastCommitted && !this.sketch.get(this.lastCommitted.id)) this.lastCommitted = this.sketch.last ?? null;
       this.sketchRenderer.setLastLabel(this.lastCommitted && this.sketch.get(this.lastCommitted.id) ? this.sketch.get(this.lastCommitted.id)! : null);
     });
@@ -261,7 +271,7 @@ class App {
       this.plane = this.plane.withAnchor(anchorAfterCommit(result.entity));
       this.selectEntity(result.entity);
       this.sketchRenderer.setLastLabel(result.entity);
-      this.sketchRenderer.setSketch(this.sketch.all);
+      this.sketchRenderer.setSketch(this.sketch.drawable);
     }
     return result;
   }
@@ -464,7 +474,7 @@ class App {
         const pull = parseDepth(text);
         if (pull === null) this.toasts.show('Enter a non-zero depth, such as 500, -250, or 2 m. Press L to retry.', 'error');
         else if (this.extrusion === session) {
-          session.setPull(pull);
+          if (!session.setPull(pull)) this.toasts.show(session.error ?? 'That pull is not possible', 'error');
           this.sketchRenderer.setExtrusion(session.preview);
           this.sketchRenderer.setActiveFace(session.face.quad);
         }
@@ -476,7 +486,15 @@ class App {
       this.toasts.show('Draw something first, then press L to set its size', 'error');
       return;
     }
-    const prompt = target.type === 'line' ? `Length of ${describeEntity(target)} (mm):` : target.type === 'extrusion' ? 'Extrusion depth (mm) or base size (W x H mm):' : target.type === 'circle' ? 'Circle diameter (mm; e.g. 50 or 5 cm):' : `Size of ${describeEntity(target)} (W x H mm):`;
+    if (target.type === 'circle') {
+      this.toasts.show('Circles are read-only; redraw the shape as a closed outline to edit it', 'error');
+      return;
+    }
+    const prompt = target.type === 'line'
+      ? `Length of ${describeEntity(target)} (mm):`
+      : target.type === 'extrusion'
+        ? isRectangleProfile(target.corners) ? 'Extrusion depth (mm) or base size (W x H mm):' : 'Extrusion depth (mm):'
+        : target.type === 'polygon' ? 'Extrusion depth (mm):' : `Size of ${describeEntity(target)} (W x H mm):`;
     this.measure.open(prompt, (text) => {
       const result = this.commands.setDimension(target.id, text);
       this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'success' : 'error');
@@ -490,24 +508,31 @@ class App {
   // ----------------------------------------------------------- selection / extrusion
 
   private get selected(): Entity | null {
-    return this.selectedId ? this.sketch.get(this.selectedId) ?? null : null;
+    if (!this.selectedId) return null;
+    return this.sketch.get(this.selectedId) ?? this.sketch.getProfile(this.selectedId);
+  }
+
+  private resolveSelection(entity: Entity | null): Entity | null {
+    return entity?.type === 'line' ? this.sketch.getProfile(entity.id) ?? entity : entity;
   }
 
   private entityAtCursor(): Entity | null {
     const position = this.cursor.position;
     if (!position || this.cursor.isLost) return null;
-    return this.hoveredEntity(this.computeSnap(position)) ?? pickFace(this.sketch.all, position, this.viewport.projector());
+    return this.hoveredEntity(this.computeSnap(position)) ?? pickFace(this.sketch.drawable, position, this.viewport.projector());
   }
 
   private selectEntity(entity: Entity | null): void {
-    this.selectedId = entity?.id ?? null;
-    this.sketchRenderer.setSelected(entity);
+    const resolved = this.resolveSelection(entity);
+    this.selectedId = resolved?.id ?? null;
+    this.sketchRenderer.setSelected(resolved);
   }
 
   private selectAtCursor(): void {
     const entity = this.entityAtCursor();
     this.selectEntity(entity);
-    if (entity) this.toasts.show(`Selected ${describeEntity(entity)}${entity.type === 'circle' ? ' · L to set diameter' : entity.type !== 'line' ? ' · Q to extrude' : ''}`);
+    const shown = this.selected;
+    if (shown) this.toasts.show(`Selected ${describeEntity(shown)}${shown.type !== 'line' && shown.type !== 'circle' ? ' · Q to extrude' : ''}`);
   }
 
   private beginExtrusion(): void {
@@ -515,24 +540,21 @@ class App {
       this.toasts.show('Finish drawing before extruding', 'error');
       return;
     }
-    const target = this.selected ?? this.entityAtCursor();
-    if (!target || target.type === 'line') {
-      this.toasts.show('Select a closed rectangle: point inside it and pinch, click, or press S.', 'error', 5000);
-      return;
-    }
-    if (target.type === 'circle') {
-      this.toasts.show('Circle extrusion is not supported yet. Press L to set its diameter.', 'error');
+    const selected = this.selected ?? this.entityAtCursor();
+    const target = selected ? this.sketch.getProfile(selected.id) : null;
+    if (!target) {
+      this.toasts.show('Select a closed planar outline: point inside it and pinch, click, or press S.', 'error', 5000);
       return;
     }
     if (!isExtrudableProfile(target.corners)) {
-      this.toasts.show('This shape is not a planar rectangle. Draw a new closed rectangle to extrude.', 'error');
+      this.toasts.show('This outline is not a simple closed planar profile. Draw a new closed outline to extrude.', 'error');
       return;
     }
     this.selectEntity(target);
     const faces = profileFaces(target);
     const faceIndex = defaultFaceIndex(faces, this.viewport.viewDirection());
     this.extrusion = new ExtrusionSession(target, this.orbit.worldPerPixel(), this.gridEnabled ? this.gridStep : 0, faceIndex);
-    this.sketchRenderer.setSketch(this.sketch.all.filter((entity) => entity.id !== target.id));
+    this.sketchRenderer.setSketch(this.sketch.drawable.filter((entity) => entity.id !== target.id));
     this.sketchRenderer.setSelected(null);
     this.hover = null;
     this.sketchRenderer.setHover(null);
@@ -594,7 +616,7 @@ class App {
     const result = this.commands.extrude(session.profile.id, session.depth, session.corners);
     this.sketchRenderer.setExtrusion(null);
     this.sketchRenderer.setActiveFace(null);
-    this.sketchRenderer.setSketch(this.sketch.all);
+    this.sketchRenderer.setSketch(this.sketch.drawable);
     this.held.clear();
     this.mouse.releaseAll();
     if (result.ok) {
@@ -611,7 +633,7 @@ class App {
     this.extrusion = null;
     this.sketchRenderer.setExtrusion(null);
     this.sketchRenderer.setActiveFace(null);
-    this.sketchRenderer.setSketch(this.sketch.all);
+    this.sketchRenderer.setSketch(this.sketch.drawable);
     this.sketchRenderer.setSelected(this.selected);
     this.sketchRenderer.setLastLabel(this.selected);
     this.held.clear();
@@ -742,7 +764,7 @@ class App {
     this.lastRecognition = { reason: result.reason, points: stroke.planePoints(), screenExtent: stroke.screenExtent() };
     if (!result.shape) {
       this.sketchRenderer.fadeOut(stroke.worldPath());
-      this.toasts.show('Not recognized: draw a straight line, a closed rectangle, or most of a circle', 'error');
+      this.toasts.show('Not recognized: draw a straight line or a closed outline', 'error');
       return;
     }
     const input = buildEntityFromStroke(stroke, result.shape, {
@@ -751,7 +773,10 @@ class App {
       tolerancePx: SNAP_TOLERANCE_PX,
       gridStep: this.gridEnabled ? this.gridStep : 0,
     });
-    const commit = input.type === 'line' ? this.commands.addLine(input.a, input.b) : input.type === 'circle' ? this.commands.addCircle(input.center, input.normal, input.radius) : this.commands.addRect(input.corners);
+    const commit = input.type === 'line' ? this.commands.addLine(input.a, input.b)
+      : input.type === 'rect' ? this.commands.addRect(input.corners)
+      : input.type === 'polygon' ? this.commands.addPolygon(input.corners)
+      : { ok: false as const, error: 'Unsupported shape' };
     if (!commit.ok) {
       this.toasts.show(commit.error, 'error');
       return;
@@ -816,15 +841,12 @@ class App {
       this.sketchRenderer.setGhost([a, b], false, { text: formatMm(length), at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 } });
       return;
     }
-    if (shape.kind === 'circle') {
-      const circle = { center: plane.toWorld(shape.center), normal: { ...plane.normal }, radius: shape.radius };
-      this.sketchRenderer.setGhost(circlePoints(circle), true, { text: `Ø ${formatMm(circle.radius * 2)}`, at: circle.center });
-      return;
-    }
     const corners = shape.corners.map((c) => plane.toWorld(c));
-    const centre = plane.toWorld(v2((shape.corners[0].x + shape.corners[2].x) / 2, (shape.corners[0].y + shape.corners[2].y) / 2));
+    const centre = plane.toWorld(cornersCenter(shape.corners));
     this.sketchRenderer.setGhost(corners, true, {
-      text: `${formatMm(shape.width).replace(' mm', '')} × ${formatMm(shape.height)}`,
+      text: shape.kind === 'rect'
+        ? `${formatMm(shape.width).replace(' mm', '')} × ${formatMm(shape.height)}`
+        : `${shape.corners.length} edges`,
       at: centre,
     });
   }
@@ -853,7 +875,7 @@ class App {
       // Points are captured in onCursorMoved; the ghost follows the camera too.
       this.updateGhost(this.stroke);
     } else {
-      const hovered = snap && cursorPx && mode === 'READY' && !this.cursor.isLost ? this.hoveredEntity(snap) ?? pickFace(this.sketch.all, cursorPx, projector) : null;
+      const hovered = snap && cursorPx && mode === 'READY' && !this.cursor.isLost ? this.hoveredEntity(snap) ?? pickFace(this.sketch.drawable, cursorPx, projector) : null;
       if (hovered !== this.hover) {
         this.hover = hovered;
         this.sketchRenderer.setHover(hovered);
@@ -899,9 +921,9 @@ class App {
     const last = this.lastCommitted ? this.sketch.get(this.lastCommitted.id) : undefined;
     if (last && last.id !== snap.entityId && (snap.type === 'vertex' || snap.type === 'midpoint')) {
       const shared = [...entityVertices(last), ...entityMidpoints(last)].some((v) => nearlyEqual(v.point, snap.world, 1e-6));
-      if (shared) return last;
+      if (shared) return this.resolveSelection(last);
     }
-    return this.sketch.get(snap.entityId) ?? null;
+    return this.resolveSelection(this.sketch.get(snap.entityId) ?? null);
   }
 
   private keyHints(mode: Mode): KeyHint[] {
@@ -948,8 +970,11 @@ class App {
         const target = this.selected ?? this.hover;
         if (this.hover) hints.push({ key: key('select'), label: 'select' });
         if (target && target.type !== 'line' && target.type !== 'circle') hints.push({ key: key('extrude'), label: 'extrude' });
-        if (target) hints.push({ key: key('measure'), label: target.type === 'circle' ? 'diameter' : 'size' }, { key: key('delete'), label: 'delete' });
-        else if (this.sketch.size) hints.push({ key: key('measure'), label: 'size' }, { key: key('undo'), label: 'undo' });
+        if (target) {
+          const label = target.type === 'polygon' ? 'depth' : target.type === 'extrusion' ? 'size / depth' : 'size';
+          if (target.type !== 'circle') hints.push({ key: key('measure'), label });
+          hints.push({ key: key('delete'), label: 'delete' });
+        } else if (this.sketch.size) hints.push({ key: key('measure'), label: 'size' }, { key: key('undo'), label: 'undo' });
         hints.push({ key: key('export'), label: 'FreeCAD' }, { key: key('help'), label: 'help' });
         return hints;
       }

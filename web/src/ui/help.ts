@@ -56,19 +56,19 @@ export class HelpOverlay {
         <header><h2>AirCAD - pen sketching in 3D</h2><span>H or Esc to close</span></header>
         <p class="help__intro">
           Your index fingertip (or the mouse) is the cursor. Keys stand in for the pen buttons:
-          hold <kbd>Space</kbd> to draw a straight line, a closed rectangle, or a rough circle on the work plane,
+          hold <kbd>Space</kbd> to draw a straight line or any closed outline — rectangle, triangle, concave shape, even a round loop — on the work plane,
           hold <kbd>Shift</kbd> to orbit and <kbd>Ctrl</kbd> to pan. Everything is in millimetres.
         </p>
         <div class="help__grid">
           <section class="help__walkthrough"><h3>Push/pull a face</h3><ol>
-            <li>Point inside a rectangle or solid and pinch thumb + index, click, or press <kbd>S</kbd> to select it. Its outline stays highlighted.</li>
+            <li>Point inside a closed outline or solid and pinch thumb + index, click, or press <kbd>S</kbd> to select it. Its outline stays highlighted.</li>
             <li>Press <kbd>Q</kbd>. The face most facing you is highlighted — hover another face or press <kbd>Tab</kbd> to switch which side you push/pull.</li>
             <li>Pinch and move to pull the highlighted face out, or back to push it in. Mouse: left-drag or hold <kbd>Space</kbd>.</li>
             <li>Release to pause, then grab again to keep adjusting. <kbd>L</kbd> types an exact pull distance; negative values push in.</li>
             <li>Hold <kbd>Shift</kbd> to orbit or <kbd>Ctrl</kbd> to pan while pulling. Release the key to continue the pull without changing its depth.</li>
             <li><kbd>Enter</kbd> or <kbd>Q</kbd> applies; <kbd>Esc</kbd> cancels. Press <kbd>0</kbd> for a 3D view. Undo restores the original shape.</li>
           </ol></section>
-          <section><h3>Draw a circle</h3><p>Hold <kbd>Space</kbd> or left-drag around most of a circle — roughly two-thirds of the way around or more. Gaps, wobble, and circular squiggles are allowed; release to fit a clean circle automatically. Select it and press <kbd>L</kbd> to set its diameter. Circle extrusion and hole cutting are not supported yet.</p></section>
+          <section><h3>Draw a closed outline</h3><p>Hold <kbd>Space</kbd> or left-drag around any simple closed shape — triangles, concave outlines, even round loops are kept as drawn. Separately drawn lines also form a closed outline when their endpoints snap together. An outline must lie flat on one plane and must not cross itself; holes are not supported. Select it and press <kbd>Q</kbd> to push/pull it into a solid.</p></section>
           ${sections}
           <section><h3>Mouse</h3><table>${mouse}</table></section>
           <section class="help__walkthrough"><h3>Sketch a house</h3><ol>${steps}</ol></section>

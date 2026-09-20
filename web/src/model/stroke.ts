@@ -138,10 +138,14 @@ export class StrokeSession {
       ...this.rawPlane,
       this.plane.toPlane(this.lastSnap.raw ?? this.lastSnap.world),
     ];
-    const result = recognizeStroke(raw, options);
-    if (result.shape?.kind === 'circle') return result;
+    const outline = [...raw];
+    if (isObjectSnap(this.start) && this.start.onPlane) outline[0] = this.start.plane;
+    if (isObjectSnap(this.lastSnap) && this.lastSnap.onPlane) outline[outline.length - 1] = this.lastSnap.plane;
+    const rawResult = recognizeStroke(outline, options);
+    if (rawResult.shape?.kind === 'polygon') return rawResult;
     const snapped = recognizeStroke(this.planePoints(), options);
-    return snapped.shape?.kind === 'circle' ? result : snapped;
+    if (snapped.shape?.kind === 'polygon' && !rawResult.shape) return rawResult;
+    return snapped;
   }
 }
 
@@ -250,8 +254,8 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
     const b = isObjectSnap(session.last) ? session.last.world : plane.toWorld(shape.b);
     return { type: 'line', a, b };
   }
-  if (shape.kind === 'circle') {
-    return { type: 'circle', center: plane.toWorld(shape.center), normal: { ...plane.normal }, radius: shape.radius };
+  if (shape.kind === 'polygon') {
+    return { type: 'polygon', corners: shape.corners.map((c) => plane.toWorld(c)) };
   }
   const corners2 = shape.oriented ? shape.corners : alignRectToStart(shape.corners, session.start.plane, context.gridStep ?? 0);
   const corners = pullRectCorners(corners2.map((c) => plane.toWorld(c)), plane, context);

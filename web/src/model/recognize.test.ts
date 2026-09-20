@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { recognizeStroke, simplifyRdp, type RecognizedRect } from './recognize';
 import { circleStroke, lineStroke, rectStroke, rotatePoints, scribbleStroke, seededRandom } from './test-helpers';
-import { v2 } from './vec';
+import { v2, type Vec2 } from './vec';
 
 function expectRectClose(rect: RecognizedRect, x0: number, y0: number, w: number, h: number, tolerance: number): void {
   const xs = rect.corners.map((c) => c.x);
@@ -104,9 +104,7 @@ describe('recognizeStroke: rectangles', () => {
     if (result.shape?.kind === 'rect') expect(result.shape.oriented).toBe(false);
   });
 
-  it('rejects triangles, scribbles and open loops', () => {
-    const triangle = [v2(0, 0), v2(1000, 0), v2(500, 800), v2(0, 0)];
-    expect(recognizeStroke(triangle).shape).toBeNull();
+  it('rejects scribbles and open loops', () => {
     expect(recognizeStroke(scribbleStroke()).shape).toBeNull();
     expect(recognizeStroke(rectStroke(0, 0, 1000, 1000, { gapFraction: 0.3 })).shape).toBeNull();
   });
@@ -118,65 +116,73 @@ describe('recognizeStroke: rectangles', () => {
   });
 });
 
-describe('recognizeStroke: circles', () => {
-  it.each([[0, 0, 1000], [125, -400, 25], [1e9, -1e9, 500], [0, 0, 0.01]])('fits a circle at %s, %s with radius %s', (cx, cy, radius) => {
-    const result = recognizeStroke(circleStroke(cx, cy, radius));
-    expect(result.reason).toBe('circle');
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(result.shape.center.x).toBeCloseTo(cx, 5);
-    expect(result.shape.center.y).toBeCloseTo(cy, 5);
-    expect(result.shape.radius).toBeCloseTo(radius, 5);
-  });
+describe('recognizeStroke: closed outlines', () => {
+  const polyStroke = (corners: Vec2[], pointsPerSide = 20, jitter = 0, seed = 5): Vec2[] => {
+    const rand = seededRandom(seed);
+    const points: Vec2[] = [];
+    for (let i = 0; i < corners.length; i++) {
+      const a = corners[i];
+      const b = corners[(i + 1) % corners.length];
+      for (let j = 0; j < pointsPerSide; j++) {
+        const t = j / pointsPerSide;
+        points.push(v2(a.x + (b.x - a.x) * t + (rand() - 0.5) * jitter, a.y + (b.y - a.y) * t + (rand() - 0.5) * jitter));
+      }
+    }
+    points.push(v2(points[0].x + (rand() - 0.5) * jitter, points[0].y + (rand() - 0.5) * jitter));
+    return points;
+  };
 
-  it('accepts either direction, arbitrary starts and a small closing gap', () => {
-    const ring = circleStroke(200, -300, 600).slice(0, -1);
-    const shifted = [...ring.slice(19), ...ring.slice(0, 19)];
-    for (const points of [[...shifted, shifted[0]], [...shifted, shifted[0]].reverse(), shifted.slice(0, -2)]) {
-      const result = recognizeStroke(points);
-      expect(result.shape?.kind).toBe('circle');
-      if (result.shape?.kind === 'circle') expect(result.shape.radius).toBeCloseTo(600, 4);
+  it('recognises triangles, trapezoids, pentagons and concave outlines as polygons with vertices preserved', () => {
+    const cases: Vec2[][] = [
+      [v2(0, 0), v2(400, 0), v2(100, 300)],
+      [v2(0, 0), v2(400, 0), v2(300, 200), v2(100, 200)],
+      [v2(0, 0), v2(300, 0), v2(400, 200), v2(200, 350), v2(-50, 200)],
+      [v2(0, 0), v2(400, 0), v2(400, 100), v2(100, 100), v2(100, 300), v2(0, 300)],
+    ];
+    for (const corners of cases) {
+      for (const jitter of [0, 4]) {
+        const result = recognizeStroke(polyStroke(corners, 20, jitter));
+        expect(result.shape?.kind).toBe('polygon');
+        if (result.shape?.kind !== 'polygon') continue;
+        if (jitter === 0) expect(result.shape.corners.length).toBe(corners.length);
+        else expect(result.shape.corners.length).toBeGreaterThanOrEqual(corners.length);
+        for (const corner of corners) {
+          expect(result.shape.corners.some((c) => Math.hypot(c.x - corner.x, c.y - corner.y) <= 2 * Math.max(1, jitter))).toBe(true);
+        }
+      }
     }
   });
 
-  it('autocorrects a wobbly slightly oval loop', () => {
+  it('keeps a closed round stroke a many-sided sampled polygon, never a circle or rectangle', () => {
+    for (const count of [80, 160]) {
+      const result = recognizeStroke(circleStroke(200, -300, 500, count));
+      expect(result.shape?.kind).toBe('polygon');
+      if (result.shape?.kind !== 'polygon') continue;
+      expect(result.shape.corners.length).toBeGreaterThan(8);
+      const cx = result.shape.corners.reduce((s, c) => s + c.x, 0) / result.shape.corners.length;
+      const cy = result.shape.corners.reduce((s, c) => s + c.y, 0) / result.shape.corners.length;
+      expect(Math.hypot(cx - 200, cy + 300)).toBeLessThan(20);
+      for (const corner of result.shape.corners) {
+        expect(Math.hypot(corner.x - 200, corner.y + 300)).toBeCloseTo(500, 0);
+      }
+    }
+  });
+
+  it('preserves the uneven radii of a wobbly round outline instead of fitting a circle', () => {
     const points = Array.from({ length: 121 }, (_, i) => {
       const angle = (i * Math.PI * 2) / 120;
       const radius = 500 * (1 + 0.05 * Math.sin(angle * 3) + 0.025 * Math.cos(angle * 7));
       return v2(200 + Math.cos(angle) * radius * 1.04, -300 + Math.sin(angle) * radius * 0.97);
     });
     const result = recognizeStroke(points);
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(Math.hypot(result.shape.center.x - 200, result.shape.center.y + 300)).toBeLessThan(25);
-    expect(Math.abs(result.shape.radius - 500)).toBeLessThan(30);
+    expect(result.shape?.kind).toBe('polygon');
+    if (result.shape?.kind !== 'polygon') return;
+    expect(result.shape.corners.length).toBeGreaterThan(8);
+    const radii = result.shape.corners.map((c) => Math.hypot(c.x - 200, c.y + 300));
+    expect(Math.max(...radii) - Math.min(...radii)).toBeGreaterThan(10);
   });
 
-  it('handles unequal drawing speed and repeated samples', () => {
-    const points = Array.from({ length: 161 }, (_, i) => {
-      const t = (i / 160) ** 3 * Math.PI * 2;
-      return v2(120 + 500 * Math.cos(t), 80 + 500 * Math.sin(t));
-    });
-    const result = recognizeStroke(points.flatMap((point, i) => (i < 100 ? [point, point, point] : [point])));
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind === 'circle') {
-      expect(result.shape.center.x).toBeCloseTo(120, 4);
-      expect(result.shape.center.y).toBeCloseTo(80, 4);
-      expect(result.shape.radius).toBeCloseTo(500, 4);
-    }
-  });
-
-  it.each([40, 100, 240])('autocorrects seeded jitter with %s samples', (count) => {
-    const rand = seededRandom(17);
-    const points = circleStroke(200, -300, 500, count).map((p) => v2(p.x + (rand() - 0.5) * 60, p.y + (rand() - 0.5) * 60));
-    const result = recognizeStroke(points);
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(Math.hypot(result.shape.center.x - 200, result.shape.center.y + 300)).toBeLessThan(30);
-    expect(Math.abs(result.shape.radius - 500)).toBeLessThan(30);
-  });
-
-  it.each([240, 270, 300])('closes a circular arc covering %s degrees in either direction', (sweep) => {
+  it.each([240, 270, 300])('leaves a %s degree arc unrecognized in either direction', (sweep) => {
     for (const direction of [1, -1]) {
       for (const phase of [0, 0.7]) {
         const points = Array.from({ length: 101 }, (_, i) => {
@@ -184,68 +190,40 @@ describe('recognizeStroke: circles', () => {
           return v2(200 + 500 * Math.cos(angle), -300 + 500 * Math.sin(angle));
         });
         const result = recognizeStroke(points);
-        expect(result.shape?.kind).toBe('circle');
-        if (result.shape?.kind !== 'circle') continue;
-        expect(result.shape.center.x).toBeCloseTo(200, 5);
-        expect(result.shape.center.y).toBeCloseTo(-300, 5);
-        expect(result.shape.radius).toBeCloseTo(500, 5);
+        expect(result.shape).toBeNull();
       }
     }
   });
 
-  it.each([[0.20, 5], [0.24, 4]])('autocorrects circular squiggles with wobble %s and frequency %s', (amplitude, frequency) => {
-    const points = Array.from({ length: 161 }, (_, i) => {
-      const angle = i * Math.PI * 2 / 160;
-      const radius = 500 * (1 + amplitude * Math.sin(frequency * angle) + 0.06 * Math.cos(9 * angle));
-      return v2(200 + radius * Math.cos(angle), -300 + radius * Math.sin(angle));
-    });
-    const result = recognizeStroke(points);
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(Math.hypot(result.shape.center.x - 200, result.shape.center.y + 300)).toBeLessThan(100);
-    expect(Math.abs(result.shape.radius - 500)).toBeLessThan(100);
+  it('rejects open outlines, bowties, scribbles and retraced loops', () => {
+    const bowtie = [v2(0, 0), v2(400, 300), v2(0, 300), v2(400, 0)];
+    expect(recognizeStroke(polyStroke(bowtie)).shape).toBeNull();
+    expect(recognizeStroke(scribbleStroke()).shape).toBeNull();
+    const circle = circleStroke(0, 0, 500);
+    expect(recognizeStroke([...circle, ...circle.slice(1)]).shape).toBeNull();
+    expect(recognizeStroke(rectStroke(0, 0, 1000, 1000, { gapFraction: 0.3 })).shape).toBeNull();
+    expect(recognizeStroke([v2(0, 0), v2(500, 0), v2(0, 0)]).shape).toBeNull();
   });
 
-  it.each([40, 100, 240])('accepts stronger hand jitter with %s samples', (count) => {
-    const rand = seededRandom(17);
-    const points = circleStroke(200, -300, 500, count).map((point) => v2(point.x + (rand() - 0.5) * 160, point.y + (rand() - 0.5) * 160));
-    const result = recognizeStroke(points);
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(Math.hypot(result.shape.center.x - 200, result.shape.center.y + 300)).toBeLessThan(100);
-    expect(Math.abs(result.shape.radius - 500)).toBeLessThan(100);
+  it('simplifies dense collinear samples down to the real corners', () => {
+    const triangle = polyStroke([v2(0, 0), v2(400, 0), v2(100, 300)], 120, 0);
+    const result = recognizeStroke(triangle);
+    expect(result.shape?.kind).toBe('polygon');
+    if (result.shape?.kind !== 'polygon') return;
+    expect(result.shape.corners.length).toBe(3);
   });
 
-  it('accepts an incomplete wavy circle', () => {
-    const points = Array.from({ length: 161 }, (_, i) => {
-      const angle = 0.7 + 240 * Math.PI / 180 * i / 160;
-      const radius = 500 * (1 + 0.16 * Math.sin(4 * angle) + 0.05 * Math.cos(7 * angle));
-      return v2(200 + radius * Math.cos(angle), -300 + radius * Math.sin(angle));
-    });
-    expect(recognizeStroke(points).shape?.kind).toBe('circle');
+  it('does not box arbitrary quadrilaterals into rectangles', () => {
+    const result = recognizeStroke(polyStroke([v2(0, 0), v2(400, 30), v2(350, 300), v2(80, 250)], 25, 0));
+    expect(result.shape?.kind).toBe('polygon');
+    if (result.shape?.kind !== 'polygon') return;
+    expect(result.shape.corners.length).toBe(4);
   });
 
-  it('still requires most of a circular loop and honors the circle gap option', () => {
-    const arc = (sweep: number) => Array.from({ length: 101 }, (_, i) => { const a = sweep * Math.PI / 180 * i / 100; return v2(500 * Math.cos(a), 500 * Math.sin(a)); });
-    expect(recognizeStroke(arc(210)).shape?.kind).not.toBe('circle');
-    expect(recognizeStroke(arc(240), { circleMaxGapDeg: 90 }).shape?.kind).not.toBe('circle');
-    expect(recognizeStroke(arc(240)).shape?.kind).toBe('circle');
-  });
-
-  it('preserves squares/rectangles and rejects short arcs, elongated ellipses and retraced loops as circles', () => {
+  it('still recognises genuine rectangles over the polygon fallback', () => {
     expect(recognizeStroke(rectStroke(0, 0, 1000, 1000)).shape?.kind).toBe('rect');
     expect(recognizeStroke(rotatePoints(rectStroke(0, 0, 1000, 1000), Math.PI / 4, v2(500, 500))).shape?.kind).toBe('rect');
     expect(recognizeStroke(rectStroke(0, 0, 1000, 1000, { jitter: 30 })).shape?.kind).toBe('rect');
-    const circle = circleStroke(0, 0, 500);
-    for (const points of [
-      circle.slice(0, 41),
-      circle.map((p) => v2(p.x * 1.8, p.y)),
-      [...circle, ...circle.slice(1)],
-      [v2(0, 0), v2(500, 0), v2(0, 0)],
-      Array.from({ length: 121 }, (_, i) => { const a = (i * Math.PI * 2) / 120; return v2(500 * Math.sin(a), 500 * Math.sin(2 * a)); }),
-    ]) {
-      expect(recognizeStroke(points).shape?.kind).not.toBe('circle');
-    }
   });
 });
 

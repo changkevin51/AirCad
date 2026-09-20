@@ -11,6 +11,15 @@ import { UNSUPPORTED_SPEECH, type SpeechRecognitionEventLike, type SpeechRecogni
 
 const h = vi.hoisted(() => ({
   pagehide: null as null | (() => void),
+  recording: null as null | { audio: Promise<Blob>; stop(): void; cancel(): void },
+}));
+
+vi.mock('./microphone', () => ({
+  audioBase64: vi.fn(async () => 'QUJD'),
+  recordMicrophone: vi.fn(async (signal: AbortSignal) => {
+    signal?.addEventListener('abort', () => h.recording?.cancel());
+    return h.recording;
+  }),
 }));
 
 let current: FakeRecognition | null = null;
@@ -59,6 +68,7 @@ class FakeEl {
   className = '';
   textContent = '';
   type = '';
+  value = '';
   disabled = false;
   hidden = false;
   blurCount = 0;
@@ -448,5 +458,225 @@ describe('VoiceControl', () => {
     h.pagehide!();
     await pending;
     expect(statusEl.textContent).toContain('Voice request cancelled');
+  });
+});
+
+describe('VoiceControl engine setting', () => {
+  const QWEN_IDLE_STATUS = 'Start a line or pull a face, then press V while holding. Say “500 mm” or “by 1 m”. V again stops and sends (max 10 s).';
+  const TRANSCRIPT = '500 millimetres';
+  const envelope = (command: unknown = { distance_mm: 500 }) => ({
+    ok: true, transcript: TRANSCRIPT, command, response_text: JSON.stringify({ transcript: TRANSCRIPT, command, error: null }), call_id: 'call-1',
+  });
+  const respond = (body: unknown, init: { ok?: boolean; status?: number } = {}) => ({
+    ok: init.ok ?? true,
+    status: init.status ?? 200,
+    json: async () => body,
+  });
+
+  let sketch: Sketch;
+  let commands: Commands;
+  let stroke: StrokeSession | null;
+  let captured: VoiceTarget | null;
+  let store: Map<string, string>;
+  let root: FakeEl;
+  let recordButton: FakeEl;
+  let engineSelect: FakeEl;
+  let statusEl: FakeEl;
+  let notify: (message: string, error: boolean) => void;
+  let fetchSpy: ReturnType<typeof vi.fn>;
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+  const line = (): LineEntity | null => {
+    const last = sketch.last;
+    return last?.type === 'line' ? last : null;
+  };
+
+  const build = (overrides: Partial<VoiceControlOptions> = {}): VoiceControl => {
+    const options: VoiceControlOptions = {
+      capture: () => {
+        captured = captureVoiceTarget(stroke, null, true);
+        return captured;
+      },
+      isCurrent: (target) => {
+        if (captured !== target) return false;
+        try {
+          return sameVoiceTarget(target, captureVoiceTarget(stroke, null, true));
+        } catch {
+          return false;
+        }
+      },
+      execute: (command, target) => {
+        let currentTarget: VoiceTarget | null = null;
+        try {
+          currentTarget = captureVoiceTarget(stroke, null, true);
+        } catch {
+          currentTarget = null;
+        }
+        const result = dispatchVoiceCommand(command, target, commands, currentTarget);
+        if (result.ok) {
+          stroke = null;
+          captured = null;
+        }
+        return result;
+      },
+      notify,
+      speechRecognition: FakeRecognition,
+      storage: {
+        getItem: (key) => store.get(key) ?? null,
+        setItem: (key, value) => {
+          store.set(key, value);
+        },
+      },
+      ...overrides,
+    };
+    root = new FakeEl();
+    const control = new VoiceControl(root as unknown as HTMLElement, options);
+    recordButton = find(root, 'voice-control__record');
+    engineSelect = find(root, 'voice-control__engine-select');
+    statusEl = find(root, 'voice-control__status');
+    return control;
+  };
+
+  const startRecording = (): { stop: () => void; fail: (error: unknown) => void } => {
+    let resolveAudio: (blob: Blob) => void = () => {};
+    let rejectAudio: (error: unknown) => void = () => {};
+    h.recording = {
+      audio: new Promise<Blob>((resolve, reject) => {
+        resolveAudio = resolve;
+        rejectAudio = reject;
+      }),
+      stop: () => resolveAudio(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/wav' })),
+      cancel: () => rejectAudio(new DOMException('Voice recording cancelled', 'AbortError')),
+    };
+    return { stop: () => h.recording?.stop(), fail: (error) => rejectAudio(error) };
+  };
+
+  beforeEach(() => {
+    sketch = new Sketch();
+    commands = new Commands(sketch);
+    stroke = drawStroke();
+    captured = null;
+    current = null;
+    store = new Map();
+    notify = vi.fn();
+    h.pagehide = null;
+    h.recording = null;
+    vi.stubGlobal('document', { createElement: () => new FakeEl() });
+    vi.stubGlobal('window', { addEventListener: (type: string, listener: () => void) => { if (type === 'pagehide') h.pagehide = listener; } });
+    fetchSpy = vi.fn(async () => respond(envelope()));
+    vi.stubGlobal('fetch', fetchSpy);
+    infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    infoSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  it('defaults to the browser recognizer and offers qwen as the other option', () => {
+    const control = build();
+    expect(control.activeEngine).toBe('browser');
+    expect(engineSelect.value).toBe('browser');
+    expect(engineSelect.children.map((option) => option.value)).toEqual(['browser', 'qwen']);
+    expect(engineSelect.children.map((option) => option.textContent))
+      .toEqual(['Browser speech (default)', 'Qwen omni (Python server)']);
+  });
+
+  it('persists the selected recognizer and restores it on the next panel', () => {
+    const control = build();
+    engineSelect.value = 'qwen';
+    engineSelect.fire('change', {});
+    expect(control.activeEngine).toBe('qwen');
+    expect(store.get('aircad.voice.engine')).toBe('qwen');
+    expect(statusEl.textContent).toBe(QWEN_IDLE_STATUS);
+    expect(recordButton.textContent).toBe('Record distance');
+
+    const restored = build();
+    expect(restored.activeEngine).toBe('qwen');
+    expect(engineSelect.value).toBe('qwen');
+  });
+
+  it('keeps the current recognizer when the select carries an unknown value', () => {
+    const control = build();
+    engineSelect.value = 'whisper';
+    engineSelect.fire('change', {});
+    expect(control.activeEngine).toBe('browser');
+    expect(engineSelect.value).toBe('browser');
+    expect(store.size).toBe(0);
+  });
+
+  it('locks the recognizer while a request is in flight', async () => {
+    const control = build();
+    const pending = control.listen();
+    await flush();
+    expect(engineSelect.disabled).toBe(true);
+    engineSelect.value = 'qwen';
+    engineSelect.fire('change', {});
+    expect(control.activeEngine).toBe('browser');
+    expect(engineSelect.value).toBe('browser');
+    control.cancel();
+    await pending;
+    expect(engineSelect.disabled).toBe(false);
+  });
+
+  it('routes V through the browser recognizer by default', async () => {
+    const control = build();
+    const pending = control.start();
+    await flush();
+    expect(current).not.toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    current!.emit(false, '500 mm');
+    await pending;
+    expect(line()!.b).toEqual(v3(400, 600, 300));
+  });
+
+  it('records and posts audio to the Python server when qwen is selected', async () => {
+    const control = build({ engine: 'qwen' });
+    const recording = startRecording();
+    const pending = control.start();
+    await flush();
+    expect(current).toBeNull();
+    expect(recordButton.textContent).toBe('Stop and send');
+    recording.stop();
+    await pending;
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/voice/command');
+    expect(JSON.parse(String(init.body))).toEqual({
+      audio_wav_base64: 'QUJD',
+      context: { operation: 'line', units: 'mm' },
+    });
+    expect(line()!.b).toEqual(v3(400, 600, 300));
+    expect(statusEl.textContent).toBe(`Heard: ${TRANSCRIPT}\nCreated 500 mm line on XY`);
+    expect(recordButton.textContent).toBe('Record distance');
+  });
+
+  it('surfaces a qwen server error without touching the sketch', async () => {
+    fetchSpy.mockImplementation(async () => respond({ ok: false, error: 'Voice service is not configured' }, { ok: false, status: 500 }));
+    const control = build({ engine: 'qwen' });
+    const recording = startRecording();
+    const pending = control.start();
+    await flush();
+    recording.stop();
+    await pending;
+    expect(statusEl.textContent).toContain('Voice service is not configured');
+    expect(line()).toBeNull();
+    expect(notify).toHaveBeenCalledWith('Voice command failed; see the voice panel', true);
+  });
+
+  it('cancels a pending qwen recording', async () => {
+    const control = build({ engine: 'qwen' });
+    startRecording();
+    const pending = control.start();
+    await flush();
+    control.cancel();
+    await pending;
+    expect(statusEl.textContent).toContain('Voice request cancelled');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(line()).toBeNull();
   });
 });

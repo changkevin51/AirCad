@@ -6,7 +6,7 @@ import { WorkPlane, type PlaneKind } from '../model/plane';
 import { makeRect, rectFrame, Sketch, type ExtrusionEntity, type LineEntity, type ProfileEntity } from '../model/sketch';
 import type { SnapResult } from '../model/snap';
 import { StrokeSession } from '../model/stroke';
-import { add, distance, nearlyEqual, scale, v2, v3, type Vec3 } from '../model/vec';
+import { add, distance, dot, nearlyEqual, scale, sub, v2, v3, type Vec3 } from '../model/vec';
 import { captureVoiceTarget, dispatchVoiceCommand, parseVoiceCommand, sameVoiceTarget } from './commands';
 
 const ORIGIN = v3(100, 200, 300);
@@ -388,5 +388,182 @@ describe('dispatchVoiceCommand: face pull', () => {
     expect(dispatchVoiceCommand({ distance_mm: 50 }, target, commands, null, beforeCommit).ok).toBe(false);
     expect(beforeCommit).not.toHaveBeenCalled();
     expect(sketch.serialize()).toBe(before);
+  });
+});
+
+describe('dispatchVoiceCommand: generic outlines', () => {
+  const TRIANGLE: Vec3[] = [v3(0, 0, 0), v3(400, 0, 0), v3(100, 300, 0)];
+  const CONCAVE: Vec3[] = [v3(0, 0, 0), v3(400, 0, 0), v3(400, 100, 0), v3(100, 100, 0), v3(100, 300, 0), v3(0, 300, 0)];
+
+  const outlineOn = (kind: PlaneKind, local: readonly Vec3[], winding: 1 | -1): Vec3[] => {
+    const plane = new WorkPlane(kind, ORIGIN);
+    const corners = local.map((p) => plane.toWorld(v2(p.x, p.y)));
+    return winding === 1 ? corners : [...corners].reverse();
+  };
+
+  function outlineFixture(options: { corners: Vec3[]; depth?: number; flat?: boolean; faceIndex?: number; movePx?: number; step?: number }) {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const added = commands.addPolygon(options.corners);
+    if (!added.ok) throw new Error('fixture setup failed');
+    let profile = added.entity as ProfileEntity;
+    if (!options.flat) {
+      const solid = commands.extrude(profile.id, options.depth ?? 80);
+      if (!solid.ok) throw new Error('fixture setup failed');
+      profile = solid.entity as ProfileEntity;
+    }
+    const session = new ExtrusionSession(profile, 1, options.step ?? 0, options.faceIndex ?? 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 300 - (options.movePx ?? 37)), true, 'mouse', UP);
+    return { sketch, commands, profile, session };
+  }
+
+  it.each(['XY', 'XZ', 'YZ'] as const)('moves a triangle cap exactly on %s in either winding and depth sign', (kind) => {
+    for (const winding of [1, -1] as const) {
+      for (const depth of [80, -80]) {
+        for (const faceIndex of [0, 1]) {
+          for (const movePx of [37, -37]) {
+            const { sketch, commands, profile, session } = outlineFixture({ corners: outlineOn(kind, TRIANGLE, winding), depth, faceIndex, movePx });
+            const signed = (movePx > 0 ? 1 : -1) * 12.345;
+            const before = sketch.serialize();
+            const face = profileFaces(profile)[faceIndex];
+            const target = captureVoiceTarget(null, session, true);
+            const result = dispatchVoiceCommand({ distance_mm: 12.345 }, target, commands, captureVoiceTarget(null, session, true));
+            expect(result.ok).toBe(true);
+            const updated = sketch.get(profile.id) as ExtrusionEntity;
+            const moved = profileFaces(updated)[faceIndex];
+            expect(moved.quad.every((p, i) => nearlyEqual(p, add(face.quad[i], scale(face.normal, signed)), 1e-6))).toBe(true);
+            expect(Math.sign(updated.depth)).toBe(Math.sign(depth));
+            expect(Math.abs(Math.abs(updated.depth) - (Math.abs(depth) + signed))).toBeLessThan(1e-6);
+            expect(commands.undo()).toBeTruthy();
+            expect(sketch.serialize()).toBe(before);
+          }
+        }
+      }
+    }
+  });
+
+  it('pulls a flat polygon cap into a solid with the spoken depth', () => {
+    for (const faceIndex of [0, 1]) {
+      const { sketch, commands, profile, session } = outlineFixture({ corners: TRIANGLE, flat: true, faceIndex, movePx: 37 });
+      const face = profileFaces(profile)[faceIndex];
+      const target = captureVoiceTarget(null, session, true);
+      const result = dispatchVoiceCommand({ distance_mm: 50 }, target, commands, target);
+      expect(result.ok).toBe(true);
+      const updated = sketch.get(profile.id) as ExtrusionEntity;
+      expect(updated.type).toBe('extrusion');
+      expect(updated.corners).toEqual(TRIANGLE);
+      expect(updated.depth).toBeCloseTo(face.sign * 50, 9);
+      expect(commands.undo()).toBeTruthy();
+      expect(sketch.get(profile.id)).toMatchObject({ type: 'polygon' });
+    }
+  });
+
+  it('moves exactly the captured boundary edge even when another edge shares its normal and label', () => {
+    const { sketch, commands, profile, session } = outlineFixture({ corners: CONCAVE, depth: 100, faceIndex: 4, movePx: 37 });
+    const face = profileFaces(profile)[4];
+    expect(face.edgeIndex).toBe(2);
+    const twin = profileFaces(profile).find((f) => f.edgeIndex === 4)!;
+    expect(twin.axis).toBe(face.axis);
+    expect(twin.sign).toBe(face.sign);
+    expect(twin.label).toBe(face.label);
+    const target = captureVoiceTarget(null, session, true);
+    const result = dispatchVoiceCommand({ distance_mm: 12.345 }, target, commands, target);
+    expect(result.ok).toBe(true);
+    const updated = sketch.get(profile.id) as ExtrusionEntity;
+    expect(updated.depth).toBe(100);
+    expect(nearlyEqual(updated.corners[2], add(CONCAVE[2], scale(face.normal, 12.345)), 1e-6)).toBe(true);
+    expect(nearlyEqual(updated.corners[3], add(CONCAVE[3], scale(face.normal, 12.345)), 1e-6)).toBe(true);
+    for (const i of [0, 1, 4, 5]) expect(updated.corners[i]).toEqual(CONCAVE[i]);
+    const twinAfter = profileFaces(updated).find((f) => f.edgeIndex === 4)!;
+    expect(twinAfter.quad.every((p, i) => nearlyEqual(p, twin.quad[i], 1e-6))).toBe(true);
+    expect(commands.undo()).toBeTruthy();
+  });
+
+  it('applies the exact spoken distance to an edge pull, ignoring a rough gesture and the grid step', () => {
+    const { sketch, commands, profile, session } = outlineFixture({ corners: TRIANGLE, depth: 100, faceIndex: 2, movePx: 37, step: 100 });
+    const face = profileFaces(profile)[2];
+    const target = captureVoiceTarget(null, session, true);
+    const result = dispatchVoiceCommand({ distance_mm: 12.345 }, target, commands, target);
+    expect(result.ok).toBe(true);
+    const updated = sketch.get(profile.id) as ExtrusionEntity;
+    const moved = profileFaces(updated)[2];
+    for (const p of moved.quad) {
+      expect(Math.abs(dot(sub(p, face.quad[0]), face.normal) - 12.345)).toBeLessThan(1e-6);
+    }
+    expect(updated.depth).toBe(100);
+    expect(commands.undo()).toBeTruthy();
+  });
+
+  it('moves only the contiguous boundary run, not a disjoint edge on the same support plane', () => {
+    const separated = [
+      v3(0, 0, 0), v3(100, 0, 0), v3(100, 200, 0), v3(300, 200, 0),
+      v3(300, 0, 0), v3(400, 0, 0), v3(400, 300, 0), v3(0, 300, 0),
+    ];
+    const { sketch, commands, profile, session } = outlineFixture({ corners: separated, depth: 100, faceIndex: 2, movePx: 37 });
+    const before = sketch.serialize();
+    const target = captureVoiceTarget(null, session, true);
+    const result = dispatchVoiceCommand({ distance_mm: 12.345 }, target, commands, target);
+    expect(result.ok).toBe(true);
+    const updated = sketch.get(profile.id) as ExtrusionEntity;
+    expect(updated.corners[0]).toEqual(v3(0, -12.345, 0));
+    expect(updated.corners[1]).toEqual(v3(100, -12.345, 0));
+    for (const i of [2, 3, 4, 5, 6, 7]) expect(updated.corners[i]).toEqual(separated[i]);
+    expect(updated.depth).toBe(100);
+    expect(commands.undo()).toBeTruthy();
+    expect(sketch.serialize()).toBe(before);
+  });
+
+  it('moves the whole contiguous collinear run as one face', () => {
+    const stepped = [v3(0, 0, 0), v3(200, 0, 0), v3(400, 0, 0), v3(400, 300, 0), v3(0, 300, 0)];
+    const { sketch, commands, profile, session } = outlineFixture({ corners: stepped, depth: 100, faceIndex: 2, movePx: 37 });
+    const target = captureVoiceTarget(null, session, true);
+    const result = dispatchVoiceCommand({ distance_mm: 12.345 }, target, commands, target);
+    expect(result.ok).toBe(true);
+    const updated = sketch.get(profile.id) as ExtrusionEntity;
+    expect(updated.corners[0]).toEqual(v3(0, -12.345, 0));
+    expect(updated.corners[1]).toEqual(v3(200, -12.345, 0));
+    expect(updated.corners[2]).toEqual(v3(400, -12.345, 0));
+    expect(updated.corners[3]).toEqual(v3(400, 300, 0));
+    expect(updated.corners[4]).toEqual(v3(0, 300, 0));
+    expect(updated.depth).toBe(100);
+    expect(commands.undo()).toBeTruthy();
+  });
+
+  it('rejects an inward pull that would collapse the outline before any commit or write', () => {
+    for (const [faceIndex, distanceMm] of [[0, 100], [2, 500], [4, 400]] as const) {
+      const { sketch, commands, session } = outlineFixture({ corners: CONCAVE, depth: 100, faceIndex, movePx: -37 });
+      const before = sketch.serialize();
+      const target = captureVoiceTarget(null, session, true);
+      const beforeCommit = vi.fn();
+      const result = dispatchVoiceCommand({ distance_mm: distanceMm }, target, commands, target, beforeCommit);
+      expect(result.ok).toBe(false);
+      expect(beforeCommit).not.toHaveBeenCalled();
+      expect(sketch.serialize()).toBe(before);
+    }
+  });
+
+  it('commits a virtual line loop once, consuming each unshared source line', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const lines = [
+      sketch.addEntity({ type: 'line', a: v3(0, 0, 0), b: v3(400, 0, 0) }),
+      sketch.addEntity({ type: 'line', a: v3(400, 0, 0), b: v3(100, 300, 0) }),
+      sketch.addEntity({ type: 'line', a: v3(100, 300, 0), b: v3(0, 0, 0) }),
+    ];
+    const loop = sketch.closedLineProfiles[0];
+    const session = new ExtrusionSession(loop, 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 263), true, 'mouse', UP);
+    const before = sketch.serialize();
+    const target = captureVoiceTarget(null, session, true);
+    const result = dispatchVoiceCommand({ distance_mm: 250 }, target, commands, target);
+    expect(result.ok).toBe(true);
+    expect(sketch.size).toBe(1);
+    expect(sketch.last).toMatchObject({ type: 'extrusion', depth: 250 });
+    for (const line of lines) expect(sketch.get(line.id)).toBeUndefined();
+    expect(commands.undo()).toBeTruthy();
+    expect(sketch.serialize()).toBe(before);
+    for (const line of lines) expect(sketch.get(line.id)?.id).toBe(line.id);
   });
 });
