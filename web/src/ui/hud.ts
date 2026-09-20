@@ -36,6 +36,8 @@ export interface HudState {
   dialogOpen?: boolean;
   /** Frozen voice draft, e.g. "Line · XY · 32.0°". */
   voice?: string | null;
+  /** Pen remote mode label, or null until a remote button has been seen. */
+  remoteMode?: string | null;
 }
 
 export interface KeyHint {
@@ -172,6 +174,7 @@ export class Hud {
       `Snap: ${snapText}`,
       `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` (${state.planeReason})` : ''}`,
       state.gridEnabled ? `Grid ${formatGridStep(state.gridStep)}` : 'Grid snap off',
+      ...(state.remoteMode ? [`Pen: ${state.remoteMode}`] : []),
       tracking.text,
     ].join('  ·  ');
     if (right !== this.lastRight && now - this.lastRightAt >= 100) {

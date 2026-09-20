@@ -10,6 +10,7 @@ import {
   type PressAction,
 } from './input/keymap';
 import { MouseSource } from './input/mouse-source';
+import { remoteButtonForCode, RemoteSource, type RemoteButton, type RemoteMode } from './input/remote';
 import { CALIBRATION_MIN_SAMPLES, SCALE_PRESETS, SpatialCursorSource, type ScalePreset } from './input/spatial-cursor';
 import {
   ClockSync,
@@ -109,6 +110,8 @@ import { VoiceControl } from './voice/control';
 
 const SNAP_TOLERANCE_PX = DEFAULT_SNAP_TOLERANCE_PX;
 const MIN_STROKE_PX = 6;
+/** Hold-source key for the grab the remote takes while button 4 moves a shape. */
+const REMOTE_MOVE_GRAB = 'remote:move';
 const WORKSPACE_CUBE_MM = 400;
 const DEPTH_SCALE_STORAGE_KEY = 'aircad.depthScale';
 const DEFAULT_DEPTH_SCALE = 10;
@@ -235,6 +238,10 @@ class App {
   private readonly spatial: SpatialCursorSource;
   private readonly inference = new PlaneInference();
   private readonly voice: VoiceControl;
+  private readonly remote: RemoteSource;
+  /** The pen remote stays invisible in the UI until one of its buttons arrives. */
+  private remoteSeen = false;
+  private remoteLastCode: string | null = null;
 
   private plane = new WorkPlane('XY');
   private planeMode: PlaneMode = 'auto';
@@ -386,7 +393,24 @@ class App {
       capture: () => this.captureVoiceOperation(),
       isCurrent: (target) => this.isVoiceOperationCurrent(target),
       execute: (command, target) => this.executeVoiceCommand(command, target),
-      notify: (message, error) => this.toasts.show(message, error ? 'error' : 'success', 6000),
+      notify: (message, error) => {
+        // A failed attempt must not leave the draft frozen: the rough gesture
+        // takes over again and the normal release commits it.
+        if (error) this.clearVoiceDraft();
+        this.toasts.show(message, error ? 'error' : 'success', 6000);
+      },
+    });
+
+    this.remote = new RemoteSource({
+      hold: (action, down) => this.setHold(action, down, `remote:${action}`),
+      press: (action) => this.doPress(action),
+      voice: (down) => this.setVoiceHold(down),
+      move: (down) => this.setMoveHold(down),
+      discardStroke: () => {
+        if (this.stroke) this.cancelStroke(false);
+      },
+      releaseAll: () => this.releaseAllInput(),
+      modeChanged: (mode) => this.onRemoteModeChanged(mode),
     });
 
     this.sketch.onChange(() => {
@@ -490,6 +514,8 @@ class App {
     window.addEventListener('keyup', (event) => this.onKeyUp(event));
     window.addEventListener('blur', () => {
       this.focused = false;
+      // A remote button held across a focus change never delivers its keyup.
+      this.remote.reset();
       this.cancelInteraction();
     });
     window.addEventListener('focus', () => {
@@ -498,6 +524,7 @@ class App {
     globalThis.document?.addEventListener?.('visibilitychange', () => {
       if (globalThis.document.hidden) {
         this.focused = false;
+        this.remote.reset();
         this.cancelInteraction();
       }
     });
@@ -551,6 +578,14 @@ class App {
   }
 
   private onKeyDown(event: KeyboardEvent): void {
+    // The remote is handled before the chrome check so a stray click in a panel
+    // cannot leave it dead, and before the keymap so its codes stay private.
+    const button = remoteButtonForCode(event.code);
+    if (button !== null) {
+      event.preventDefault();
+      this.onRemoteKey(button, true);
+      return;
+    }
     if (this.isChromeTarget(event) || this.measure.isOpen) return;
     const hold = resolveHold(event, this.platform);
     if (hold) {
@@ -559,14 +594,95 @@ class App {
       return;
     }
     const press = resolvePress(event, this.platform);
-    if (!press) return;
+    if (!press) {
+      // Diagnostic for pairing a new remote: report function keys nothing claims.
+      if (/^F\d+$/.test(event.code) && !event.repeat) this.hud.flash(`Unmapped key ${event.code}`);
+      return;
+    }
     event.preventDefault();
     if (!event.repeat || press === 'zoomIn' || press === 'zoomOut') this.doPress(press);
   }
 
   private onKeyUp(event: KeyboardEvent): void {
+    const button = remoteButtonForCode(event.code);
+    if (button !== null) {
+      event.preventDefault();
+      this.onRemoteKey(button, false);
+      return;
+    }
     const hold = holdActionForCode(event.code);
     if (hold) this.setHold(hold, false, event.code);
+  }
+
+  /**
+   * Pen remote buttons.  A press pulls focus back to the viewport, because the
+   * remote has no way to click the canvas, but the measure dialog keeps input
+   * so a button cannot interrupt typing.
+   */
+  private onRemoteKey(button: RemoteButton, down: boolean): void {
+    this.remoteLastCode = `F${12 + button}`;
+    if (this.measure.isOpen) return;
+    this.focused = true;
+    if (!this.remoteSeen) {
+      this.remoteSeen = true;
+      this.hud.flash(`Pen remote connected · ${this.remote.modeLabel} mode`);
+    }
+    if (down) {
+      this.focusViewport();
+      this.remote.down(button, performance.now());
+    } else {
+      this.remote.up(button, performance.now());
+    }
+  }
+
+  private onRemoteModeChanged(mode: RemoteMode): void {
+    const what = mode === 'draw' ? 'draw' : mode === 'orbit' ? 'orbit' : 'pan';
+    this.hud.flash(`Pen mode: ${this.remote.modeLabel} · hold button 1 to ${what}`);
+  }
+
+  /** Hold to talk: the recognizer runs for exactly as long as button 3 is down. */
+  private setVoiceHold(down: boolean): void {
+    if (this.help.visible || this.measure.isOpen) return;
+    if (down) void this.voice.start();
+    else this.voice.stop();
+  }
+
+  /**
+   * Hold to move: the press opens the move and takes the drag grab so the
+   * tracked tip repositions the shape, and the release applies it.  If nothing
+   * can be moved the press reports it and the release has nothing to commit.
+   */
+  private setMoveHold(down: boolean): void {
+    if (down) {
+      this.doPress('move');
+      if (this.movement) this.setHold('draw', true, REMOTE_MOVE_GRAB);
+      return;
+    }
+    this.setHold('draw', false, REMOTE_MOVE_GRAB);
+    if (this.movement) this.doPress('confirm');
+  }
+
+  /**
+   * Buttons 2+3.  Drops every hold, unwinds anything in progress and clears a
+   * pending voice draft, which is otherwise the one state the remote cannot
+   * leave: a failed draft blocks every action except voice and cancel.
+   */
+  private releaseAllInput(): void {
+    this.holdSources.clear();
+    this.held.clear();
+    this.mouse.releaseAll();
+    this.clearVoiceDraft();
+    this.voice.cancel();
+    this.cancelUnfinished();
+    this.synchronizeNavigation(false);
+    this.hud.flash('Released everything');
+  }
+
+  /** Unfreeze a voice draft without touching the geometry it was measuring. */
+  private clearVoiceDraft(): void {
+    if (!this.voiceCapture) return;
+    this.voiceCapture = null;
+    this.sketchRenderer.setLineGuide(null, null);
   }
 
   private setHold(action: HoldAction, down: boolean, source = `api:${action}`): void {
@@ -2517,7 +2633,8 @@ class App {
     }
   }
 
-  private cancelStroke(): void {
+  /** `announce` is off for a remote tap, where the discarded stroke is an implementation detail. */
+  private cancelStroke(announce = true): void {
     this.voiceCapture = null;
     this.voice.cancel();
     this.stroke = null;
@@ -2529,7 +2646,7 @@ class App {
     this.sketchRenderer.setEdgeGuide(null);
     this.sketchRenderer.setInk(null);
     this.sketchRenderer.setLineGuide(null, null);
-    this.hud.flash('Stroke cancelled');
+    if (announce) this.hud.flash('Stroke cancelled');
     this.synchronizeNavigation(false);
   }
 
@@ -2620,6 +2737,9 @@ class App {
   private frame(time: number): void {
     requestAnimationFrame((next) => this.frame(next));
     this.nowMs = time;
+    // Resolves the remote's hold thresholds and expires its tap window.  Read
+    // from the same clock its key stamps use, not the frame timestamp.
+    this.remote.tick(performance.now());
     this.orbit.update(time);
     if (this.cursor.tracking === 'hand' && performance.now() / 1000 - this.lastHandMessageAt > 0.6) {
       this.cursor.dropHand();
@@ -2719,6 +2839,7 @@ class App {
       extrusion: this.extrusion ? { depth: this.extrusion.depth, dragging: this.extrusion.dragging, face: this.extrusion.face.label, pulled: this.extrusion.pulled } : null,
       dialogOpen: this.measure.isOpen || this.help.visible,
       voice: this.voiceCapture?.target.description ?? null,
+      remoteMode: this.remoteSeen ? this.remote.modeLabel : null,
     });
     this.hud.setKeys(this.keyHints(mode));
     this.publishUiIfChanged();
@@ -2836,6 +2957,15 @@ class App {
       mappingScale: () => this.spatial.mapping.scale,
       pushSpatial: (message) => this.onSpatial(message),
       selected: () => this.selected,
+      remote: () => ({
+        seen: this.remoteSeen,
+        mode: this.remote.mode,
+        lastCode: this.remoteLastCode,
+        gesturing: this.remote.gesturing,
+        voiceHeld: this.remote.voiceHeld,
+        moveHeld: this.remote.moveHeld,
+      }),
+      remoteButton: (button, down) => this.onRemoteKey(button, down),
       extrusion: () => this.extrusion ? {
         depth: this.extrusion.depth,
         dragging: this.extrusion.dragging,
@@ -2859,6 +2989,17 @@ export interface AirCadApi {
   setCursor(point: Vec2): void;
   /** Reason and plane points of the most recent pen-up, for diagnostics. */
   lastRecognition(): { reason: string; points: Vec2[]; screenExtent: number } | null;
+  /** Pen remote state; `lastCode` confirms which key the firmware actually sent. */
+  remote(): {
+    seen: boolean;
+    mode: RemoteMode;
+    lastCode: string | null;
+    gesturing: boolean;
+    voiceHeld: boolean;
+    moveHeld: boolean;
+  };
+  /** Drive a remote button without hardware, for tests and demos. */
+  remoteButton(button: RemoteButton, down: boolean): void;
   setDrawingSpace(space: string): void;
   setTrackerSource(source: TrackerSource): void;
   setSpatialOrigin(cameraMm: Vec3): void;

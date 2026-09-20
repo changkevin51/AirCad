@@ -28,7 +28,12 @@ const state = vi.hoisted(() => ({
   windowListeners: {} as Record<string, ((event: Record<string, unknown>) => void)[]>,
   commands: null as any,
   voice: null as VoiceControlOptions | null,
-  voiceControl: null as null | { toggle: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> },
+  voiceControl: null as null | {
+    toggle: ReturnType<typeof vi.fn>;
+    cancel: ReturnType<typeof vi.fn>;
+    start: ReturnType<typeof vi.fn>;
+    stop: ReturnType<typeof vi.fn>;
+  },
   guide: vi.fn(),
   ghost: null as null | { points: Vec3[]; closed: boolean },
   glyph: { update: vi.fn() },
@@ -434,6 +439,8 @@ vi.mock('./voice/control', () => ({
   VoiceControl: class {
     toggle = vi.fn();
     cancel = vi.fn();
+    start = vi.fn(async () => {});
+    stop = vi.fn();
     constructor(_root: unknown, options: VoiceControlOptions) {
       state.voice = options;
       state.voiceControl = this;
@@ -674,6 +681,8 @@ beforeEach(() => {
   state.orbit.pan.mockClear();
   state.voiceControl?.toggle.mockClear();
   state.voiceControl?.cancel.mockClear();
+  state.voiceControl?.start.mockClear();
+  state.voiceControl?.stop.mockClear();
   state.ghost = null;
   dispatchWindow('focus', {});
 });
@@ -2537,5 +2546,314 @@ describe('parallel edge guides', () => {
     api.press('cancel');
     expect(state.renderer.guide).toBeNull();
     expect(api.sketch.size).toBe(1);
+  });
+});
+
+describe('pen remote', () => {
+  useScreenSpaceProjector();
+
+  const CODES = { 1: 'F13', 2: 'F14', 3: 'F15', 4: 'F16' } as const;
+  type Button = keyof typeof CODES;
+
+  const advance = (ms: number): void => {
+    state.nowMs += ms;
+  };
+  const down = (button: Button, over: Record<string, unknown> = {}): void =>
+    dispatchWindow('keydown', keyEvent(CODES[button], over));
+  const up = (button: Button, over: Record<string, unknown> = {}): void =>
+    dispatchWindow('keyup', keyEvent(CODES[button], over));
+  const tap = (button: Button): void => {
+    down(button);
+    advance(50);
+    up(button);
+  };
+  /** Past the hold threshold, with a frame so the threshold can resolve. */
+  const holdDown = (button: Button): void => {
+    down(button);
+    advance(200);
+    runFrame();
+  };
+  const rect = (): void => {
+    api.commands.addRect([v3(100, 100, 0), v3(500, 100, 0), v3(500, 400, 0), v3(100, 400, 0)]);
+  };
+  const freezeDraft = (): void => {
+    api.setCursor(v2(100, 100));
+    api.hold('draw', true);
+    api.setCursor(v2(130, 140));
+    h.voice!.capture();
+    runFrame();
+  };
+
+  beforeEach(() => {
+    // The app instance is shared, so the mode survives between tests.
+    for (let i = 0; i < 3 && api.remote().mode !== 'draw'; i++) tap(2);
+    expect(api.remote().mode).toBe('draw');
+    state.flashes.length = 0;
+  });
+
+  it('claims F13-F16 and reports the code it saw, for pairing a new remote', () => {
+    tap(3);
+    expect(api.remote().seen).toBe(true);
+    expect(api.remote().lastCode).toBe('F15');
+    dispatchWindow('keydown', keyEvent('F17'));
+    expect(api.remote().lastCode).toBe('F15');
+    expect(state.flashes).toContain('Unmapped key F17');
+  });
+
+  it('draws with button 1 held in draw mode', () => {
+    api.setCursor(v2(100, 100));
+    down(1);
+    api.setCursor(v2(400, 100));
+    advance(400);
+    up(1);
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.last?.type).toBe('line');
+  });
+
+  it('changes what button 1 does when button 2 cycles the mode', () => {
+    tap(2);
+    expect(api.remote().mode).toBe('orbit');
+    api.setCursor(v2(100, 100));
+    down(1);
+    api.setCursor(v2(400, 200));
+    advance(400);
+    up(1);
+    expect(api.sketch.size).toBe(0);
+    expect(h.orbit.orbit).toHaveBeenCalled();
+
+    tap(2);
+    expect(api.remote().mode).toBe('pan');
+    h.orbit.pan.mockClear();
+    api.setCursor(v2(100, 100));
+    down(1);
+    api.setCursor(v2(400, 200));
+    advance(400);
+    up(1);
+    expect(api.sketch.size).toBe(0);
+    expect(h.orbit.pan).toHaveBeenCalled();
+  });
+
+  it('selects on a tap of button 1 without leaving geometry behind', () => {
+    rect();
+    const serialized = api.sketch.serialize();
+    api.setCursor(v2(250, 250));
+    tap(1);
+    expect(api.selected()?.type).toBe('rect');
+    expect(api.sketch.serialize()).toBe(serialized);
+    expect(state.flashes).not.toContain('Stroke cancelled');
+  });
+
+  it('undoes on a double tap of button 1', () => {
+    rect();
+    api.setCursor(v2(250, 250));
+    expect(api.sketch.size).toBe(1);
+    tap(1);
+    advance(60);
+    tap(1);
+    expect(api.sketch.size).toBe(0);
+  });
+
+  it('keeps a drawn line when the taps are too far apart to be a double tap', () => {
+    rect();
+    api.setCursor(v2(250, 250));
+    tap(1);
+    advance(600);
+    runFrame();
+    tap(1);
+    expect(api.sketch.size).toBe(1);
+  });
+
+  it('records for the length of a button 3 hold and finalizes on release', () => {
+    holdDown(3);
+    expect(h.voiceControl!.start).toHaveBeenCalledTimes(1);
+    expect(h.voiceControl!.stop).not.toHaveBeenCalled();
+    runFrame();
+    expect(h.voiceControl!.start).toHaveBeenCalledTimes(1);
+    advance(500);
+    up(3);
+    expect(h.voiceControl!.stop).toHaveBeenCalledTimes(1);
+    expect(h.voiceControl!.toggle).not.toHaveBeenCalled();
+  });
+
+  it('sends Tab on a short button 3 without touching the recognizer', () => {
+    expect(api.plane().kind).toBe('XY');
+    tap(3);
+    expect(api.plane().kind).toBe('XZ');
+    expect(h.voiceControl!.start).not.toHaveBeenCalled();
+  });
+
+  it('opens a push/pull on button 4, pulls with button 1 and applies on the next button 4', () => {
+    rect();
+    const serialized = api.sketch.serialize();
+    api.setCursor(v2(250, 250));
+    tap(4);
+    expect(api.extrusion()).not.toBeNull();
+
+    down(1);
+    runFrame();
+    api.setCursor(v2(250, 200));
+    runFrame();
+    advance(400);
+    up(1);
+    expect(Math.abs(api.extrusion()!.depth)).toBeGreaterThan(0);
+
+    tap(4);
+    expect(api.extrusion()).toBeNull();
+    expect(api.sketch.last?.type).toBe('extrusion');
+    api.press('undo');
+    expect(api.sketch.serialize()).toBe(serialized);
+  });
+
+  it('switches the pulled face on a button 3 tap, leaving the work plane alone', () => {
+    rect();
+    api.setCursor(v2(250, 250));
+    tap(4);
+    runFrame();
+    const plane = api.plane().kind;
+    const first = api.extrusion()!.face;
+    tap(3);
+    expect(api.extrusion()!.face).not.toBe(first);
+    expect(api.plane().kind).toBe(plane);
+    api.press('cancel');
+  });
+
+  it('moves while button 4 is held and applies on release', () => {
+    rect();
+    const serialized = api.sketch.serialize();
+    api.setCursor(v2(250, 250));
+    tap(1);
+    expect(api.selected()?.type).toBe('rect');
+
+    holdDown(4);
+    expect(state.hud.last?.mode).toBe('MOVING');
+    api.setCursor(v2(300, 250));
+    runFrame();
+    advance(100);
+    up(4);
+    runFrame();
+    expect(state.hud.last?.mode).not.toBe('MOVING');
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.serialize()).not.toBe(serialized);
+    api.press('undo');
+    expect(api.sketch.serialize()).toBe(serialized);
+  });
+
+  it('reports a shape it cannot move and commits nothing on release', () => {
+    api.setCursor(v2(250, 250));
+    holdDown(4);
+    advance(100);
+    up(4);
+    expect(api.sketch.size).toBe(0);
+    expect(state.toasts.some((message) => message.includes('to move it'))).toBe(true);
+  });
+
+  it('fits the view on 2+4 without cycling the mode or opening a push/pull', () => {
+    rect();
+    const fit = vi.spyOn(OrbitController.prototype, 'fit');
+    try {
+      down(2);
+      down(4);
+      advance(400);
+      runFrame();
+      up(4);
+      up(2);
+      expect(fit).toHaveBeenCalledTimes(1);
+      expect(api.remote().mode).toBe('draw');
+      expect(api.extrusion()).toBeNull();
+    } finally {
+      fit.mockRestore();
+    }
+  });
+
+  it('frees a frozen voice draft on 2+3, the one state the remote cannot otherwise leave', () => {
+    freezeDraft();
+    expect(state.hud.last?.voice).not.toBeNull();
+    down(2);
+    down(3);
+    up(3);
+    up(2);
+    runFrame();
+    expect(state.hud.last?.voice).toBeNull();
+    expect(h.voiceControl!.cancel).toHaveBeenCalled();
+    expect(api.sketch.size).toBe(0);
+    // Input is usable again straight away.
+    api.setCursor(v2(100, 100));
+    down(1);
+    api.setCursor(v2(400, 100));
+    advance(400);
+    up(1);
+    expect(api.sketch.size).toBe(1);
+  });
+
+  it('unfreezes the draft when a voice attempt fails, so the aim follows the cursor again', () => {
+    freezeDraft();
+    api.setCursor(v2(400, 100));
+    runFrame();
+    // Frozen: the drawn aim ignores the cursor entirely.
+    const frozen = state.ghost!.points;
+    expect(frozen[frozen.length - 1].x).toBeCloseTo(130, 0);
+
+    h.voice!.notify('Voice command failed; see the voice panel', true);
+    runFrame();
+    expect(state.hud.last?.voice).toBeNull();
+
+    api.setCursor(v2(400, 500));
+    runFrame();
+    const live = state.ghost!.points;
+    expect(live[live.length - 1].x).toBeCloseTo(400, 0);
+
+    // Retry re-acquires the draft rather than resuming the frozen one.
+    expect(h.voice!.capture().operation.kind).toBe('line');
+    runFrame();
+    expect(state.hud.last?.voice).not.toBeNull();
+    api.press('cancel');
+    expect(api.sketch.size).toBe(0);
+  });
+
+  it('stays live when focus sits in docked chrome, unlike the keyboard', () => {
+    rect();
+    const target = { closest: () => ({}), isConnected: true };
+    dispatchWindow('keydown', keyEvent('KeyQ', { target }));
+    expect(api.extrusion()).toBeNull();
+
+    api.setCursor(v2(250, 250));
+    down(4, { target });
+    advance(50);
+    up(4, { target });
+    expect(api.extrusion()).not.toBeNull();
+    api.press('cancel');
+  });
+
+  it('yields to the measure dialog so a button cannot interrupt typing', () => {
+    state.measure.isOpen = true;
+    try {
+      down(1);
+      expect(api.remote().gesturing).toBe(false);
+      up(1);
+      expect(api.sketch.size).toBe(0);
+    } finally {
+      state.measure.isOpen = false;
+    }
+  });
+
+  it('drops a hold that never sees its keyup because focus went away', () => {
+    api.setCursor(v2(100, 100));
+    down(1);
+    expect(api.remote().gesturing).toBe(true);
+    dispatchWindow('blur', {});
+    expect(api.remote().gesturing).toBe(false);
+    dispatchWindow('focus', {});
+    up(1);
+    expect(api.sketch.size).toBe(0);
+  });
+
+  it('reports the mode to the status bar and drives buttons from the api', () => {
+    runFrame();
+    expect(state.hud.last?.remoteMode).toBe('Draw');
+    api.remoteButton(2, true);
+    api.remoteButton(2, false);
+    runFrame();
+    expect(api.remote().mode).toBe('orbit');
+    expect(state.hud.last?.remoteMode).toBe('Orbit');
   });
 });
