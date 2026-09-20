@@ -6,6 +6,7 @@ import {
   distance,
   dot,
   isFinite3,
+  length,
   roundTo,
   scale,
   sub,
@@ -45,6 +46,12 @@ export interface SpatialSnapContext {
   magnet?: number;
   /** Prefer this world point when two same-priority snaps are tied. */
   prefer?: Vec3 | null;
+  /** Camera view direction; used with depthWeight to tolerate stereo depth noise. */
+  viewDir?: Vec3 | null;
+  /** Scale the component of snap distance along viewDir. 1 = isotropic. */
+  depthWeight?: number;
+  /** When set with planeWorld, ignore targets farther than this off the plane. */
+  maxOffPlane?: number;
 }
 
 export const SPATIAL_OBJECT_RADIUS_MM = 40;
@@ -101,6 +108,14 @@ function snapGrid(point: Vec3, step: number): Vec3 {
   return v3(roundTo(point.x, step), roundTo(point.y, step), roundTo(point.z, step));
 }
 
+function snapDistance(from: Vec3, to: Vec3, viewDir: Vec3 | null, depthWeight: number): number {
+  const delta = sub(to, from);
+  if (!viewDir || depthWeight === 1) return length(delta);
+  const along = dot(delta, viewDir);
+  const perp = sub(delta, scale(viewDir, along));
+  return Math.hypot(length(perp), depthWeight * along);
+}
+
 interface Candidate {
   type: SpatialSnapType;
   world: Vec3;
@@ -116,13 +131,15 @@ function choose(
   radius: number,
   previous: SpatialSnapResult | null,
   prefer: Vec3 | null,
+  viewDir: Vec3 | null,
+  depthWeight: number,
 ): Candidate {
   candidates.sort((a, b) => {
     if (PRIORITY[a.type] !== PRIORITY[b.type]) return PRIORITY[a.type] - PRIORITY[b.type];
     if (a.distance !== b.distance) return a.distance - b.distance;
     if (prefer) {
-      const da = distance(a.world, prefer);
-      const db = distance(b.world, prefer);
+      const da = snapDistance(a.world, prefer, viewDir, depthWeight);
+      const db = snapDistance(b.world, prefer, viewDir, depthWeight);
       if (da !== db) return da - db;
     }
     const byId = (a.entityId ?? '').localeCompare(b.entityId ?? '');
@@ -132,7 +149,7 @@ function choose(
   const best = candidates[0];
   if (!previous || previous.type === 'free' || previous.type === 'lock') return best;
   if (PRIORITY[best.type] < PRIORITY[previous.type]) return best;
-  const previousDistance = distance(previous.world, raw);
+  const previousDistance = snapDistance(raw, previous.world, viewDir, depthWeight);
   if (previousDistance > radius * SPATIAL_EXIT_FACTOR) return best;
   if (PRIORITY[best.type] === PRIORITY[previous.type]) {
     if (best.distance + radius * SPATIAL_CHALLENGE_FACTOR < previousDistance) return best;
@@ -170,11 +187,27 @@ export function snapSpatial(context: SpatialSnapContext): SpatialSnapResult {
     worldPerPixel = 0,
     magnet = 1,
     prefer = null,
+    viewDir = null,
+    depthWeight = 1,
+    maxOffPlane,
   } = context;
   const point = planeWorld ? planeWorld(raw) : raw;
   const physical = objectRadius(scale) * Math.max(1, magnet);
   const radius = hybridRadius(scale, worldPerPixel, screenTolerancePx, magnet);
   const step = context.gridStep && context.gridStep > 0 ? context.gridStep : gridStepForScale(scale);
+  const viewLen = viewDir ? length(viewDir) : 0;
+  const view = viewDir && viewLen > 1e-12 ? { x: viewDir.x / viewLen, y: viewDir.y / viewLen, z: viewDir.z / viewLen } : null;
+  const onPlane = (world: Vec3): Vec3 | null => {
+    if (!planeWorld) return world;
+    const projected = planeWorld(world);
+    if (maxOffPlane != null && distance(world, projected) > maxOffPlane) return null;
+    return projected;
+  };
+  const planarDistance = (world: Vec3): number | null => {
+    const compared = onPlane(world);
+    if (!compared) return null;
+    return snapDistance(point, compared, view, depthWeight);
+  };
 
   if (axisLock && start) {
     const world = lockAxisPoint(point, start, axisLock, gridEnabled ? step : 0);
@@ -183,27 +216,28 @@ export function snapSpatial(context: SpatialSnapContext): SpatialSnapResult {
 
   const candidates: Candidate[] = [{ type: 'free', world: point, distance: 0 }];
   for (const vertex of targets.vertices) {
-    const d = distance(point, vertex.point);
-    if (d <= radius) {
+    const d = planarDistance(vertex.point);
+    if (d != null && d <= radius) {
       candidates.push({ type: 'vertex', world: vertex.point, distance: d, entityId: vertex.entityId, index: vertex.index });
     }
   }
   for (const mid of targets.midpoints) {
-    const d = distance(point, mid.point);
-    if (d <= radius) {
+    const d = planarDistance(mid.point);
+    if (d != null && d <= radius) {
       candidates.push({ type: 'midpoint', world: mid.point, distance: d, entityId: mid.entityId, index: mid.index });
     }
   }
   for (const segment of targets.segments) {
     const hit = closestPointOnSegment(point, segment.a, segment.b);
-    const d = distance(point, hit.point);
-    if (d <= radius) {
+    if (onPlane(hit.point) === null) continue;
+    const d = planarDistance(hit.point);
+    if (d != null && d <= radius) {
       candidates.push({ type: 'edge', world: hit.point, distance: d, entityId: segment.entityId, index: segment.index });
     }
   }
   if (gridEnabled && step > 0) {
     const snapped = snapGrid(point, step);
-    candidates.push({ type: 'grid', world: snapped, distance: distance(point, snapped) });
+    candidates.push({ type: 'grid', world: snapped, distance: snapDistance(point, snapped, view, depthWeight) });
   }
 
   const objectHits = candidates.filter((item) => item.type === 'vertex' || item.type === 'midpoint' || item.type === 'edge');
@@ -211,7 +245,7 @@ export function snapSpatial(context: SpatialSnapContext): SpatialSnapResult {
   const usable = closeHits.length
     ? [...closeHits, ...candidates.filter((item) => item.type === 'grid' || item.type === 'free' || item.type === 'lock')]
     : candidates;
-  const picked = choose(usable, point, radius, previous, prefer);
+  const picked = choose(usable, point, radius, previous, prefer, view, depthWeight);
   return {
     type: picked.type,
     world: picked.world,

@@ -1,14 +1,11 @@
 import type { ColorPreset, SpatialTarget, TrackerConfigJson, TrackerSource } from '../input/tracker-client';
 import { SCALE_PRESETS } from '../input/spatial-cursor';
 
-export type DrawingSpace = 'free3d' | 'planar';
-
 export interface InputPanelState {
   source: TrackerSource;
   target: SpatialTarget;
   colorPreset: ColorPreset;
   colorTolerance: number;
-  drawingSpace: DrawingSpace;
   scale: number;
   calibrated: boolean;
   depthaiInstalled: boolean;
@@ -21,7 +18,6 @@ export interface InputPanelHandlers {
   onTarget(target: SpatialTarget): void;
   onColorPreset(preset: ColorPreset): void;
   onColorTolerance(value: number): void;
-  onDrawingSpace(space: DrawingSpace): void;
   onScale(scale: number): void;
   onSetOrigin(): void;
   onRecenter(): void;
@@ -46,7 +42,6 @@ export function buildInputPanelState(
     target: config.target,
     colorPreset: config.colorPreset,
     colorTolerance: config.colorTolerance,
-    drawingSpace: extras.drawingSpace ?? 'free3d',
     scale: extras.scale ?? 1,
     calibrated: extras.calibrated ?? false,
     depthaiInstalled: extras.depthaiInstalled ?? false,
@@ -65,7 +60,6 @@ export class InputPanel {
   private readonly targetSelect: HTMLSelectElement;
   private readonly colorSelect: HTMLSelectElement;
   private readonly tolerance: HTMLInputElement;
-  private readonly spaceSelect: HTMLSelectElement;
   private readonly scaleSelect: HTMLSelectElement;
   private readonly hint: HTMLDivElement;
 
@@ -81,7 +75,6 @@ export class InputPanel {
           <label>Colour <select data-field="color"><option value="green">Green</option><option value="red">Red</option><option value="blue">Blue</option></select></label>
           <label>Tolerance <input data-field="tolerance" type="range" min="0.5" max="2" step="0.1" value="1"></label>
         </div>
-        <label>Space <select data-field="space"><option value="free3d">Free 3D</option><option value="planar">Planar</option></select></label>
         <label>Scale <select data-field="scale">${SCALE_PRESETS.map((s) => `<option value="${s}">1 physical mm = ${s} model mm</option>`).join('')}</select></label>
         <div class="input-panel__row">
           <button type="button" data-action="origin">Set Origin (O)</button>
@@ -99,7 +92,6 @@ export class InputPanel {
     this.targetSelect = this.element.querySelector('[data-field="target"]')!;
     this.colorSelect = this.element.querySelector('[data-field="color"]')!;
     this.tolerance = this.element.querySelector('[data-field="tolerance"]')!;
-    this.spaceSelect = this.element.querySelector('[data-field="space"]')!;
     this.scaleSelect = this.element.querySelector('[data-field="scale"]')!;
     this.depthFields = this.element.querySelector('[data-depth]')!;
     this.colorFields = this.element.querySelector('[data-color]')!;
@@ -139,10 +131,6 @@ export class InputPanel {
       this.handlers.onColorTolerance(Number(this.tolerance.value));
       afterControl();
     });
-    this.spaceSelect.addEventListener('change', () => {
-      this.handlers.onDrawingSpace(this.spaceSelect.value as DrawingSpace);
-      afterControl();
-    });
     this.scaleSelect.addEventListener('change', () => {
       this.handlers.onScale(Number(this.scaleSelect.value));
       afterControl();
@@ -170,7 +158,6 @@ export class InputPanel {
     this.targetSelect.value = state.target;
     this.colorSelect.value = state.colorPreset;
     this.tolerance.value = String(state.colorTolerance);
-    this.spaceSelect.value = state.drawingSpace;
     this.scaleSelect.value = String(state.scale);
     const depth = state.source === 'oak';
     this.depthFields.classList.toggle('hidden', !depth);
@@ -179,7 +166,7 @@ export class InputPanel {
     this.hint.textContent = depth
       ? state.depthaiInstalled
         ? state.calibrated
-          ? 'Hold Space for one straight 3D segment. O sets the origin.'
+          ? 'Hold Space to draw on the work plane. O sets the origin.'
           : 'Stand in a comfortable pose and press Set Origin (O).'
         : 'DepthAI is not installed. pip install -r requirements-depth.txt'
       : '';

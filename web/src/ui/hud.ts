@@ -22,11 +22,9 @@ export interface HudState {
   edgeOn: boolean;
   entityCount: number;
   depthMode?: boolean;
-  drawingSpace?: 'free3d' | 'planar' | null;
   spatialLabel?: string | null;
   scale?: number | null;
   trackingAgeMs?: number | null;
-  fittedPlane?: string | null;
 }
 
 export interface KeyHint {
@@ -97,9 +95,7 @@ export class Hud {
       ['Mode', state.mode, `mode-${state.mode.toLowerCase()}`],
       [
         'Plane',
-        state.fittedPlane
-          ? `Fitting ${state.fittedPlane}`
-          : `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` · ${state.planeReason}` : ''}`,
+        `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` · ${state.planeReason}` : ''}`,
         `axis-${state.plane.normalAxis}`,
       ],
       ['Snap', snapText, state.snap && state.snap !== 'free' ? `snap-${state.snap}` : 'muted'],
@@ -108,7 +104,6 @@ export class Hud {
       ['Tracking', tracking.text, tracking.tone],
     ];
     if (state.depthMode) {
-      chips.push(['Space', state.drawingSpace === 'planar' ? 'Planar' : 'Free 3D', '']);
       if (state.scale) chips.push(['Scale', `${state.scale}×`, '']);
       if (state.trackingAgeMs !== null && state.trackingAgeMs !== undefined) {
         chips.push(['Age', `${Math.round(state.trackingAgeMs)} ms`, state.trackingAgeMs > 200 ? 'warn' : 'muted']);

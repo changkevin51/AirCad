@@ -81,6 +81,22 @@ describe('Commands.setDimension', () => {
     expect(commands.addLine(v3(1, 1, 1), v3(1, 1, 1)).ok).toBe(false);
   });
 
+  it('sets a line angle in-plane, keeps length, and undoes', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const added = commands.addLine(v3(0, 0, 0), v3(100, 100, 0));
+    const id = added.ok ? added.entity.id : '';
+    const result = commands.setLineAngle(id, '30', 'XY');
+    expect(result.ok).toBe(true);
+    const line = sketch.get(id) as LineEntity;
+    expect(line.a).toEqual(v3(0, 0, 0));
+    expect(Math.hypot(line.b.x, line.b.y, line.b.z)).toBeCloseTo(Math.hypot(100, 100, 0), 6);
+    expect((Math.atan2(line.b.y, line.b.x) * 180) / Math.PI).toBeCloseTo(30, 5);
+    expect(commands.setLineAngle(id, 'abc', 'XY').ok).toBe(false);
+    expect(commands.undo()).toMatch(/set angle/);
+    expect((sketch.get(id) as LineEntity).b).toEqual(v3(100, 100, 0));
+  });
+
   it('keeps an arbitrary XYZ line through undo and export', () => {
     const sketch = new Sketch();
     const commands = new Commands(sketch);

@@ -60,8 +60,7 @@ export class HelpOverlay {
           Your index fingertip (or the mouse) is the cursor. Keys stand in for the pen buttons:
           hold <kbd>Space</kbd> to draw a straight line, a closed rectangle, or three wall sides onto a shared border on the work plane,
           hold <kbd>Shift</kbd> to orbit and <kbd>Ctrl</kbd> to pan. Everything is in millimetres.
-          An optional OAK-D depth camera draws true 3D segments after you press <kbd>O</kbd> to set the origin;
-          choose Planar in the input panel before using Tab / A.
+          An optional OAK-D depth camera draws on the work plane after you press <kbd>O</kbd> to set the origin.
         </p>
         <div class="help__grid">
           ${sections}

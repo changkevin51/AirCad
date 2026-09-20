@@ -25,11 +25,19 @@ import {
   type TrackerSource,
 } from './input/tracker-client';
 import { Commands } from './model/commands';
-import { nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
+import { PLANES, nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
 import { PlaneInference, type PlaneMode } from './model/plane-inference';
+import {
+  chooseStrokePlane,
+  DepthStrokeBuffer,
+  DEPTH_PLANE_LOCK_MM,
+  rebuildPlanarSession,
+  spatialToSnapResult,
+} from './model/depth-plane-lock';
+import { completeLineRectangle } from './model/rect-completion';
 import { adaptiveGridStep, DEFAULT_SNAP_TOLERANCE_PX, snapCursor, type SnapResult } from './model/snap';
-import { joinEndpoints } from './model/spatial-join';
-import { alignLineToWorldAxis, preferKindsFromEntity } from './model/spatial-plane-fit';
+import { joinEndpoints, snapLineToSegments } from './model/spatial-join';
+import { snapInPlaneAngle } from './model/spatial-plane-fit';
 import {
   gridStepForScale,
   hybridRadius,
@@ -39,8 +47,7 @@ import {
   SPATIAL_SCREEN_TOLERANCE_PX,
   type SpatialSnapResult,
 } from './model/spatial-snap';
-import { SpatialStrokeSession } from './model/spatial-stroke';
-import { describeEntity, entityCenter, entityMidpoints, entityPoints, entityVertices, Sketch, type Entity } from './model/sketch';
+import { describeEntity, entityCenter, entityMidpoints, entityPoints, entityVertices, Sketch, type Entity, type EntityInput } from './model/sketch';
 import { anchorAfterCommit, resolveStroke, StrokeSession, type StrokeResolution } from './model/stroke';
 import { dot, nearlyEqual, type Vec2, type Vec3 } from './model/vec';
 import { entityLabel, SketchRenderer } from './render/sketch-renderer';
@@ -52,18 +59,17 @@ import { WorkPlaneVisual } from './scene/workplane-visual';
 import { CursorGlyph } from './ui/cursor-glyph';
 import { HelpOverlay } from './ui/help';
 import { Hud, type KeyHint, type Mode } from './ui/hud';
-import { InputPanel, type DrawingSpace } from './ui/input-panel';
+import { InputPanel } from './ui/input-panel';
 import { MeasureInput } from './ui/measure-input';
 import { CameraPip } from './ui/pip';
 import { Toasts } from './ui/toast';
 
 const SNAP_TOLERANCE_PX = DEFAULT_SNAP_TOLERANCE_PX;
 const MIN_STROKE_PX = 6;
-const SPATIAL_STALL_MS = 300;
 const WORKSPACE_CUBE_MM = 400;
 const DEPTH_SCALE_STORAGE_KEY = 'aircad.depthScale';
 const DEFAULT_DEPTH_SCALE = 10;
-const SPATIAL_FIT_EXTENT_MM = 60;
+const SPATIAL_DEPTH_WEIGHT = 0.6;
 
 function loadStoredDepthScale(): number {
   try {
@@ -113,6 +119,9 @@ const REASON_LABELS: Record<string, string> = {
   face: 'hovered face',
   unavailable: 'unusable',
   manual: 'pinned',
+  stroke: 'decided by stroke',
+  pending: 'pending',
+  provisional: 'provisional',
 };
 
 const isObjectSnap = (snap: SnapResult): boolean =>
@@ -159,9 +168,8 @@ class App {
   private orbitGesture = false;
   private palmNavMode: 'one' | 'two' | null = null;
   private stroke: StrokeSession | null = null;
-  private spatialStroke: SpatialStrokeSession | null = null;
+  private depthBuffer: DepthStrokeBuffer | null = null;
   private spatialPreview: SpatialSnapResult | null = null;
-  private drawingSpace: DrawingSpace = 'free3d';
   private trackerConfig: TrackerConfigJson = {
     source: 'webcam',
     cameraIndex: 0,
@@ -201,7 +209,6 @@ class App {
   private lastRecognition: { reason: string; points: Vec2[]; screenExtent: number } | null = null;
   private nowMs = 0;
   private depthScaleApplied = false;
-  private fittedPlaneLabel: string | null = null;
 
   constructor(root: HTMLElement) {
     const viewportElement = document.createElement('div');
@@ -237,7 +244,6 @@ class App {
       onTarget: (target) => void this.applyTracker({ ...this.trackerConfig, target }),
       onColorPreset: (colorPreset) => void this.applyTracker({ ...this.trackerConfig, colorPreset }),
       onColorTolerance: (colorTolerance) => void this.applyTracker({ ...this.trackerConfig, colorTolerance }),
-      onDrawingSpace: (space) => this.setDrawingSpace(space),
       onScale: (scale) => this.changeScale(scale),
       onSetOrigin: () => this.beginCalibration('origin'),
       onRecenter: () => this.beginCalibration('recenter'),
@@ -343,7 +349,7 @@ class App {
   }
 
   private isDrawing(): boolean {
-    return !!this.stroke || !!this.spatialStroke;
+    return !!this.stroke;
   }
 
   private isDepthSource(): boolean {
@@ -351,7 +357,6 @@ class App {
   }
 
   private cancelUnfinished(): void {
-    if (this.spatialStroke) this.cancelSpatialStroke('Stroke cancelled');
     if (this.stroke) this.cancelStroke();
   }
 
@@ -389,7 +394,6 @@ class App {
     else if (!is && was) this.endHold(action);
     if (was !== is && this.isDrawing() && (action === 'lockX' || action === 'lockY' || action === 'lockZ')) {
       this.sampleStroke();
-      this.sampleSpatialStroke();
     }
   }
 
@@ -411,8 +415,7 @@ class App {
 
   private endHold(action: HoldAction): void {
     if (action === 'draw') {
-      if (this.spatialStroke) this.endSpatialStroke();
-      else this.endStroke();
+      this.endStroke();
       this.synchronizeNavigation(false);
       return;
     }
@@ -538,13 +541,9 @@ class App {
       case 'viewRight': {
         const preset = action === 'viewTop' ? 'top' : action === 'viewFront' ? 'front' : 'right';
         this.orbit.setView(preset, true, this.nowMs);
-        if (!this.isDepthSource() || this.drawingSpace === 'planar') {
-          this.setPlaneKind(PLANE_FOR_VIEW[preset], false);
-          this.pinManual();
-          this.toasts.show(`${preset[0].toUpperCase()}${preset.slice(1)} view · plane ${this.plane.label}`);
-        } else {
-          this.toasts.show(`${preset[0].toUpperCase()}${preset.slice(1)} view`);
-        }
+        this.setPlaneKind(PLANE_FOR_VIEW[preset], false);
+        this.pinManual();
+        this.toasts.show(`${preset[0].toUpperCase()}${preset.slice(1)} view · plane ${this.plane.label}`);
         break;
       }
       case 'viewIso':
@@ -565,18 +564,10 @@ class App {
         this.zoomAtCursor(1 / 1.25, this.cursor.position ?? undefined);
         break;
       case 'cyclePlane':
-        if (this.isDepthSource() && this.drawingSpace === 'free3d') {
-          this.toasts.show('Choose Planar in the input panel before changing the work plane');
-          break;
-        }
         this.setPlaneKind(nextPlaneKind(this.plane.kind), true);
         this.pinManual();
         break;
       case 'toggleAutoPlane': {
-        if (this.isDepthSource() && this.drawingSpace === 'free3d') {
-          this.toasts.show('Choose Planar in the input panel before using Auto plane');
-          break;
-        }
         this.planeMode = this.planeMode === 'auto' ? 'manual' : 'auto';
         if (this.planeMode === 'manual') {
           this.planeReason = 'manual';
@@ -748,32 +739,13 @@ class App {
       this.toasts.show('Origin capture timed out. Keep the tracked tip still and try again.', 'error');
     }
     if (this.mode === 'ORBIT' || this.mode === 'PAN') this.applyNavigationDelta(this.cursor.position ?? { x: 0, y: 0 });
-    if (this.drawingSpace === 'planar') this.samplePlanarDepthStroke();
-    else this.sampleSpatialStroke();
+    if (this.stroke) this.samplePlanarDepthStroke();
+    else if (this.spatial.world) this.updateSpatialHover(this.spatial.world);
     this.refreshPanel();
   }
 
   private beginDepthStroke(): void {
-    if (this.isDrawing()) return;
-    if (this.drawingSpace === 'planar') {
-      this.beginPlanarDepthStroke();
-      return;
-    }
-    const identity = this.spatial.identity();
-    if (!this.spatial.mapping.calibrated) {
-      this.toasts.show('Set the origin (O) before drawing', 'error');
-      return;
-    }
-    if (!identity || !this.spatial.world || !this.spatialReady()) {
-      this.toasts.show('Wait for a tracked point before drawing', 'error');
-      return;
-    }
-    this.orbit.cancelTransition(true);
-    const snap = this.computeSpatialSnap(this.spatial.world, { magnet: SPATIAL_MAGNET });
-    this.spatialStroke = new SpatialStrokeSession(snap, identity, this.nowMs || performance.now());
-    this.spatialPreview = snap;
-    this.hover = null;
-    this.sketchRenderer.setHover(null);
+    this.beginPlanarDepthStroke();
   }
 
   private lastEndpoint(): Vec3 | null {
@@ -791,37 +763,185 @@ class App {
   }
 
   private computeSpatialSnap(world: Vec3, options: { magnet?: number } = {}): SpatialSnapResult {
+    const plane = this.stroke?.plane ?? this.plane;
+    const magnet = options.magnet ?? 1;
+    const radius = this.spatialRadius(world, magnet);
+    const constrainToPlane = this.planeMode === 'manual' || this.depthBuffer?.state === 'locked';
     return this.spatialSnapper.snap({
       raw: world,
       targets: { vertices: this.sketch.vertices(), midpoints: this.sketch.midpoints(), segments: this.sketch.segments() },
       scale: this.spatial.mapping.scale,
       gridEnabled: this.depthGridEnabled,
-      start: this.spatialStroke?.start.world ?? null,
-      axisLock: this.spatialStroke ? this.axisLock : null,
+      start: this.stroke?.start.world ?? null,
+      axisLock: this.stroke ? this.axisLock : null,
+      planeWorld: (point) => plane.project(point),
       project: (point) => this.viewport.projector().project(point),
       worldPerPixel: this.spatialWorldPerPixel(world),
-      magnet: options.magnet ?? 1,
+      magnet,
       prefer: this.lastEndpoint(),
+      viewDir: this.viewport.viewDirection(),
+      depthWeight: SPATIAL_DEPTH_WEIGHT,
+      maxOffPlane: constrainToPlane ? radius : undefined,
     });
+  }
+
+  private depthRawSnap(world: Vec3, object: SpatialSnapResult): SpatialSnapResult {
+    return {
+      ...object,
+      world: isSpatialObjectSnap(object) ? object.world : world,
+      raw: world,
+    };
+  }
+
+  private applyChosenDepthPlane(world: Vec3 | null, announce: boolean): StrokeSession | null {
+    const buffer = this.depthBuffer;
+    const stroke = this.stroke;
+    if (!buffer || !stroke) return stroke;
+    const points = buffer.polyline(world ?? undefined);
+    const choice = chooseStrokePlane(points, buffer.start.world, {
+      preferKind: buffer.prestrokeKind,
+      preferPlane: buffer.prestroke,
+      viewDir: this.viewport.viewDirection(),
+      axisLock: this.axisLock,
+    });
+    buffer.state = choice.ambiguous ? 'provisional' : 'locked';
+    const last = world ? this.depthRawSnap(world, this.computeSpatialSnap(world)) : buffer.start;
+    if (choice.plane.equals(stroke.plane) && choice.kind === stroke.plane.kind) return stroke;
+    const next = rebuildPlanarSession(choice.plane, buffer.start, points, last, spatialToSnapResult);
+    this.stroke = next;
+    this.resolutionCache = null;
+    if (announce && !buffer.announced) {
+      this.toasts.show(`Plane ${choice.plane.label} from stroke direction`);
+      buffer.announced = true;
+    }
+    return next;
+  }
+
+  private updateSpatialHover(world: Vec3): void {
+    const snap = this.computeSpatialSnap(world, { magnet: SPATIAL_MAGNET });
+    this.spatialPreview = snap;
+    const hovered = snap.entityId ? this.sketch.get(snap.entityId) ?? null : null;
+    if (hovered !== this.hover) {
+      this.hover = hovered;
+      this.sketchRenderer.setHover(hovered);
+    }
   }
 
   private resolveSpatial(session: StrokeSession): StrokeResolution {
     const scale = this.spatial.mapping.scale;
-    const world = this.spatialStroke?.current.world ?? session.last.world;
+    const world = session.last.world;
     const wpp = this.spatialWorldPerPixel(world);
     const radius = this.spatialRadius(world, SPATIAL_MAGNET);
     const tolerancePx = wpp > 0 ? Math.max(SNAP_TOLERANCE_PX, radius / wpp) : SNAP_TOLERANCE_PX;
-    return resolveStroke(session, {
+    const resolution = resolveStroke(session, {
       projector: this.viewport.projector(),
       vertices: this.sketch.vertices(),
       tolerancePx,
       gridStep: this.depthGridEnabled ? gridStepForScale(scale) : 0,
       entities: this.sketch.all,
     });
+    if (resolution.status !== 'ready') return resolution;
+    if (resolution.input.type === 'line') {
+      const polished = this.polishDepthLine(session, resolution.input);
+      return {
+        status: 'ready',
+        input: polished.input,
+        removeIds: polished.removeIds.length ? polished.removeIds : resolution.removeIds,
+        reason: polished.reason,
+      };
+    }
+    const joinRadius = objectRadius(this.spatial.mapping.scale) * SPATIAL_MAGNET;
+    return { ...resolution, input: joinEndpoints(resolution.input, this.spatialJoinTargets(), joinRadius) };
   }
 
-  private preferFitKinds(): PlaneKind[] {
-    return this.lastCommitted ? preferKindsFromEntity(this.lastCommitted) : [];
+  private spatialJoinTargets() {
+    return {
+      vertices: this.sketch.vertices(),
+      midpoints: this.sketch.midpoints(),
+      segments: this.sketch.segments(),
+    };
+  }
+
+  private polishDepthLine(
+    session: StrokeSession,
+    line: Extract<EntityInput, { type: 'line' }>,
+  ): {
+    input: EntityInput;
+    reason: string;
+    angleDeg: number | null;
+    ambiguous: boolean;
+    removeIds: string[];
+  } {
+    const bothObject = isObjectSnap(session.start) && isObjectSnap(session.last);
+    const axisLocked = session.start.type === 'lock' || session.last.type === 'lock';
+    const joinRadius = objectRadius(this.spatial.mapping.scale) * SPATIAL_MAGNET;
+    const targets = this.spatialJoinTargets();
+    const planeKind = session.plane.kind;
+    let a = line.a;
+    let b = line.b;
+    let angleDeg: number | null = null;
+    let ambiguous = false;
+    let reason = axisLocked ? 'axis-locked line' : 'line';
+
+    if (!bothObject && !axisLocked) {
+      const snapped = snapLineToSegments(a, b, targets.segments, {
+        radius: joinRadius,
+        plane: planeKind,
+        startOnSegmentId: isObjectSnap(session.start) ? session.start.entityId ?? null : null,
+        lockStart: isObjectSnap(session.start),
+      });
+      if (snapped.mode) {
+        a = snapped.a;
+        b = snapped.b;
+        reason =
+          snapped.mode === 'collinear' ? 'collinear line' : snapped.mode === 'perpendicular' ? 'perpendicular line' : 'parallel line';
+      } else {
+        const inPlane = snapInPlaneAngle(a, b, planeKind);
+        a = inPlane.a;
+        b = inPlane.b;
+        angleDeg = inPlane.angleDeg;
+        ambiguous = inPlane.ambiguous;
+        reason = inPlane.axis ? 'axis-aligned line' : 'plane-locked line';
+      }
+    }
+
+    let input = joinEndpoints({ type: 'line', a, b }, targets, joinRadius);
+    if (input.type === 'line') {
+      const completion = completeLineRectangle(input, { plane: session.plane, entities: this.sketch.all });
+      if (completion) {
+        return {
+          input: { type: 'rect', corners: completion.corners },
+          reason: 'assembled rectangle',
+          angleDeg: null,
+          ambiguous: false,
+          removeIds: completion.removeIds,
+        };
+      }
+    }
+    return {
+      input,
+      reason,
+      angleDeg: input.type === 'line' ? angleDeg : null,
+      ambiguous: input.type === 'line' && ambiguous,
+      removeIds: [],
+    };
+  }
+
+  private openAnglePrompt(entity: Entity, kind: PlaneKind, angleDeg: number): void {
+    this.measure.open(
+      `Angle in ${kind} from ${PLANES[kind].uAxis.toUpperCase()} (°):`,
+      (text) => {
+        const result = this.commands.setLineAngle(entity.id, text, kind);
+        this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'success' : 'error');
+        if (result.ok) {
+          this.lastCommitted = result.entity;
+          this.sketchRenderer.setLastLabel(result.entity);
+          this.plane = this.plane.withAnchor(anchorAfterCommit(result.entity));
+        }
+      },
+      undefined,
+      String(Math.round(angleDeg)),
+    );
   }
 
   private applyDepthScalePreset(): void {
@@ -830,151 +950,36 @@ class App {
     this.depthScaleApplied = true;
   }
 
-  private sampleSpatialStroke(): void {
-    const session = this.spatialStroke;
-    if (!session) return;
-    const now = this.nowMs || performance.now();
-    const identity = this.spatial.identity();
-    const fresh = !!identity && this.spatialReady(now) && !!this.spatial.world;
-    if (!fresh || !identity || !this.spatial.world) {
-      session.pause(now);
-      if (session.isDead(now)) this.cancelSpatialStroke('Tracking lost; stroke cancelled');
-      return;
-    }
-    const snap = this.computeSpatialSnap(this.spatial.world);
-    if (!session.update(snap, identity, true, now, this.spatial.mapping.scale)) {
-      if (session.isDead(now)) this.cancelSpatialStroke('Tracking jumped; stroke cancelled');
-      return;
-    }
-    this.spatialPreview = snap;
-  }
-
-  private endSpatialStroke(): void {
-    const session = this.spatialStroke;
-    if (!session) return;
-    const now = this.nowMs || performance.now();
-    this.sampleSpatialStroke();
-    const identity = this.spatial.identity();
-    if (this.spatial.world && identity) {
-      const magnet = this.computeSpatialSnap(this.spatial.world, { magnet: SPATIAL_MAGNET });
-      session.update(magnet, identity, true, now, this.spatial.mapping.scale);
-    }
-    session.closeLoop(this.spatialRadius(session.current.world, SPATIAL_MAGNET));
-    this.spatialStroke = null;
-    this.fittedPlaneLabel = null;
-    this.sketchRenderer.setGhost(null, false, null);
-    this.sketchRenderer.setInk(null);
-    if (session.status !== 'active' || session.paused || !this.spatialReady(now)) {
-      this.toasts.show('Stroke cancelled: tracking was not fresh', 'error');
-      return;
-    }
-    if (!session.canCommit(this.spatial.mapping.scale)) return;
-
-    const fitted = session.fitted(this.preferFitKinds());
-    const targets = { vertices: this.sketch.vertices(), segments: this.sketch.segments() };
-    const joinRadius = objectRadius(this.spatial.mapping.scale) * SPATIAL_MAGNET;
-
-    if (fitted.straight && !fitted.planar) {
-      const bothObject = isSpatialObjectSnap(session.start) && isSpatialObjectSnap(session.current);
-      const aligned = bothObject
-        ? { a: session.start.world, b: session.current.world, axis: null as 'x' | 'y' | 'z' | null }
-        : alignLineToWorldAxis(session.start.world, session.current.world);
-      const input = joinEndpoints({ type: 'line', a: aligned.a, b: aligned.b }, targets, joinRadius);
-      this.lastRecognition = {
-        reason: aligned.axis ? 'axis-aligned line' : 'line',
-        points: fitted.session.planePoints(),
-        screenExtent: fitted.session.screenExtent(),
-      };
-      const commit = this.commands.commitStroke(input);
-      if (!commit.ok) {
-        this.toasts.show(commit.error, 'error');
-        return;
-      }
-      this.lastCommitted = commit.entity;
-      this.sketchRenderer.setLastLabel(commit.entity);
-      this.toasts.show(commit.message, 'success');
-      return;
-    }
-
-    const resolution = this.resolveSpatial(fitted.session);
-    if (resolution.status !== 'ready') {
-      this.lastRecognition = {
-        reason: resolution.reason,
-        points: fitted.session.planePoints(),
-        screenExtent: fitted.session.screenExtent(),
-      };
-      if (resolution.status === 'unrecognized') {
-        this.sketchRenderer.fadeOut(session.polyline());
-        this.toasts.show('Not recognized: draw a straight line or a closed rectangle', 'error');
-      } else {
-        this.toasts.show(resolution.reason, 'info');
-      }
-      return;
-    }
-    let input = resolution.input;
-    let reason = resolution.reason;
-    if (input.type === 'line') {
-      const bothObject = isSpatialObjectSnap(session.start) && isSpatialObjectSnap(session.current);
-      if (!bothObject) {
-        const aligned = alignLineToWorldAxis(input.a, input.b);
-        if (aligned.axis) {
-          input = { type: 'line', a: aligned.a, b: aligned.b };
-          reason = 'axis-aligned line';
-        }
-      }
-    }
-    input = joinEndpoints(input, targets, joinRadius);
-    this.lastRecognition = {
-      reason,
-      points: fitted.session.planePoints(),
-      screenExtent: fitted.session.screenExtent(),
-    };
-    const commit = this.commands.commitStroke(input, resolution.removeIds);
-    if (!commit.ok) {
-      this.toasts.show(commit.error, 'error');
-      return;
-    }
-    this.lastCommitted = commit.entity;
-    this.sketchRenderer.setLastLabel(commit.entity);
-    this.plane = this.plane.withAnchor(anchorAfterCommit(input));
-    this.toasts.show(commit.message, 'success');
-  }
-
-  private cancelSpatialStroke(message = 'Stroke cancelled'): void {
-    this.spatialStroke = null;
-    this.spatialPreview = null;
-    this.fittedPlaneLabel = null;
-    this.sketchRenderer.setGhost(null, false, null);
-    this.sketchRenderer.setInk(null);
-    this.toasts.show(message);
-    this.synchronizeNavigation(false);
-  }
-
   private beginPlanarDepthStroke(): void {
     if (this.stroke || !this.spatial.mapping.calibrated || !this.spatial.world || !this.spatialReady()) {
       this.toasts.show('Need a calibrated, tracked point to draw on the plane', 'error');
       return;
     }
     this.orbit.cancelTransition(true);
+    this.spatialSnapper.reset();
     const world = this.spatial.world;
     let plane = this.plane;
-    const object = this.computeSpatialSnap(world);
+    const object = this.computeSpatialSnap(world, { magnet: SPATIAL_MAGNET });
     if (object.type === 'vertex' || object.type === 'midpoint' || object.type === 'edge') {
       plane = plane.contains(object.world, 1e-6) ? plane : plane.withAnchor(object.world);
     }
     this.plane = plane;
-    const snap = this.planarDepthSnap(world, plane);
+    const snap = this.planarDepthSnap(world, plane, { magnet: SPATIAL_MAGNET });
+    this.spatialPreview = object;
     this.strokeGridStep = this.spatial.mapping.scale * 5;
     this.stroke = new StrokeSession(plane, snap, false);
+    this.depthBuffer = this.planeMode === 'auto' ? new DepthStrokeBuffer(this.depthRawSnap(world, object), plane) : null;
     this.resolutionCache = null;
-    if (plane.isEdgeOn(this.viewport.viewDirection())) {
+    this.hover = null;
+    this.sketchRenderer.setHover(null);
+    if (this.planeMode === 'manual' && plane.isEdgeOn(this.viewport.viewDirection())) {
       this.toasts.show(`Work plane ${plane.label} is edge-on in this view`, 'info');
     }
   }
 
   /** Project the measured world point onto the locked plane; never a screen-region ray. */
-  private planarDepthSnap(world: Vec3, plane: WorkPlane): SnapResult {
-    const object = this.computeSpatialSnap(world);
+  private planarDepthSnap(world: Vec3, plane: WorkPlane, options: { magnet?: number } = {}): SnapResult {
+    const object = this.computeSpatialSnap(world, options);
     const projected = plane.project(world);
     const useObject = object.type === 'vertex' || object.type === 'midpoint' || object.type === 'edge' || object.type === 'lock';
     const point = useObject ? object.world : projected;
@@ -992,10 +997,19 @@ class App {
   }
 
   private samplePlanarDepthStroke(): void {
-    const stroke = this.stroke;
-    if (!stroke || !this.isDepthSource() || this.drawingSpace !== 'planar') return;
+    if (!this.stroke || !this.isDepthSource()) return;
     if (!this.spatial.world || !this.spatialReady()) return;
-    const snap = this.planarDepthSnap(this.spatial.world, stroke.plane);
+    const world = this.spatial.world;
+    const buffer = this.depthBuffer;
+    if (buffer && buffer.state !== 'locked') {
+      const scale = this.spatial.mapping.scale;
+      buffer.append(world, scale);
+      if (buffer.worldExtent(world) >= DEPTH_PLANE_LOCK_MM * scale) this.applyChosenDepthPlane(world, true);
+    }
+    const stroke = this.stroke;
+    if (!stroke) return;
+    const snap = this.planarDepthSnap(world, stroke.plane);
+    this.spatialPreview = this.computeSpatialSnap(world);
     stroke.add(snap, snap.raw, snap.screen, 2, Math.max(1, this.spatial.mapping.scale));
   }
 
@@ -1043,9 +1057,7 @@ class App {
     this.refreshPanel();
   }
 
-  private setDrawingSpace(space: DrawingSpace): void {
-    this.cancelUnfinished();
-    this.drawingSpace = space;
+  private setDrawingSpace(_space?: string): void {
     this.refreshPanel();
   }
 
@@ -1115,13 +1127,28 @@ class App {
       target: this.trackerConfig.target,
       colorPreset: this.trackerConfig.colorPreset,
       colorTolerance: this.trackerConfig.colorTolerance,
-      drawingSpace: this.drawingSpace,
       scale: this.spatial.mapping.scale,
       calibrated: this.spatial.mapping.calibrated,
       depthaiInstalled: this.depthaiInstalled,
       status: captureStatus,
       applying: this.applyingTracker,
     });
+  }
+
+  private depthHudPlaneMode(): 'Auto' | 'Manual' | 'Locked' {
+    if (!this.stroke) return this.planeMode === 'auto' ? 'Auto' : 'Manual';
+    if (this.isDepthSource() && this.planeMode === 'auto' && this.depthBuffer && this.depthBuffer.state !== 'locked') {
+      return 'Auto';
+    }
+    return 'Locked';
+  }
+
+  private depthHudPlaneReason(): string | null {
+    if (!this.stroke) return REASON_LABELS[this.planeReason] ?? null;
+    if (this.isDepthSource() && this.planeMode === 'auto' && this.depthBuffer && this.depthBuffer.state !== 'locked') {
+      return REASON_LABELS[this.depthBuffer.state] ?? this.depthBuffer.state;
+    }
+    return 'locked';
   }
 
   private spatialHudLabel(): string {
@@ -1167,6 +1194,10 @@ class App {
       this.planeReason = 'manual';
       return;
     }
+    if (this.isDepthSource()) {
+      this.planeReason = 'stroke';
+      return;
+    }
     if (
       this.mode !== 'READY' ||
       this.orbit.transitioning ||
@@ -1174,8 +1205,7 @@ class App {
       this.measure.isOpen ||
       this.cursor.isLost ||
       !this.cursor.position ||
-      this.palmNavMode ||
-      (this.isDepthSource() && this.drawingSpace === 'free3d')
+      this.palmNavMode
     ) {
       return;
     }
@@ -1278,7 +1308,7 @@ class App {
 
   /** Capture the current cursor into the active stroke; tracking loss pauses capture. */
   private sampleStroke(): void {
-    if (this.isDepthSource() && this.drawingSpace === 'planar') {
+    if (this.isDepthSource()) {
       this.samplePlanarDepthStroke();
       return;
     }
@@ -1286,9 +1316,7 @@ class App {
     const position = this.cursor.position;
     if (!stroke || !position || this.cursor.isLost) return;
     const snap = this.computeSnap(position);
-    const minWorld =
-      this.isDepthSource() && this.drawingSpace === 'planar' ? Math.max(1, this.spatial.mapping.scale) : undefined;
-    stroke.add(snap, snap.raw, position, 2, minWorld);
+    stroke.add(snap, snap.raw, position, 2);
   }
 
   private resolveFor(stroke: StrokeSession): StrokeResolution {
@@ -1304,13 +1332,15 @@ class App {
     ) {
       return cache.resolution;
     }
-    const resolution = resolveStroke(stroke, {
-      projector: this.viewport.projector(),
-      vertices: this.sketch.vertices(),
-      tolerancePx: SNAP_TOLERANCE_PX,
-      gridStep: this.gridEnabled ? this.strokeGridStep : 0,
-      entities: this.sketch.all,
-    });
+    const resolution = this.isDepthSource()
+      ? this.resolveSpatial(stroke)
+      : resolveStroke(stroke, {
+          projector: this.viewport.projector(),
+          vertices: this.sketch.vertices(),
+          tolerancePx: SNAP_TOLERANCE_PX,
+          gridStep: this.gridEnabled ? this.strokeGridStep : 0,
+          entities: this.sketch.all,
+        });
     this.resolutionCache = {
       session: stroke,
       revision: stroke.revision,
@@ -1324,10 +1354,20 @@ class App {
   }
 
   private endStroke(): void {
-    const stroke = this.stroke;
+    let stroke = this.stroke;
     if (!stroke) return;
-    this.sampleStroke();
+    if (this.isDepthSource() && this.spatial.world) {
+      const magnet = this.planarDepthSnap(this.spatial.world, stroke.plane, { magnet: SPATIAL_MAGNET });
+      stroke.add(magnet, magnet.raw, magnet.screen, 0, 0);
+    } else {
+      this.sampleStroke();
+    }
+    if (this.isDepthSource() && this.depthBuffer && this.depthBuffer.state !== 'locked') {
+      if (this.spatial.world) this.depthBuffer.append(this.spatial.world, this.spatial.mapping.scale);
+      stroke = this.applyChosenDepthPlane(this.spatial.world, true) ?? stroke;
+    }
     this.stroke = null;
+    this.depthBuffer = null;
     this.sketchRenderer.setGhost(null, false, null);
     this.sketchRenderer.setInk(null);
     const minExtent = this.isDepthSource() ? 5 * this.spatial.mapping.scale : MIN_STROKE_PX;
@@ -1360,12 +1400,21 @@ class App {
     }
     this.lastCommitted = commit.entity;
     this.sketchRenderer.setLastLabel(commit.entity);
-    this.plane = this.plane.withAnchor(anchorAfterCommit(resolution.input));
+    this.plane = stroke.plane.withAnchor(anchorAfterCommit(resolution.input));
     this.toasts.show(commit.message, 'success');
+    if (
+      this.isDepthSource() &&
+      commit.entity.type === 'line' &&
+      resolution.reason === 'plane-locked line'
+    ) {
+      const inPlane = snapInPlaneAngle(commit.entity.a, commit.entity.b, stroke.plane.kind);
+      if (inPlane.angleDeg != null) this.openAnglePrompt(commit.entity, stroke.plane.kind, inPlane.angleDeg);
+    }
   }
 
   private cancelStroke(): void {
     this.stroke = null;
+    this.depthBuffer = null;
     this.resolutionCache = null;
     this.sketchRenderer.setGhost(null, false, null);
     this.sketchRenderer.setInk(null);
@@ -1404,6 +1453,11 @@ class App {
   }
 
   private updateGhost(stroke: StrokeSession): void {
+    if (this.depthBuffer?.state === 'pending') {
+      this.sketchRenderer.setInk(this.depthBuffer.polyline(this.spatial.world ?? undefined));
+      this.sketchRenderer.setGhost(null, false, null);
+      return;
+    }
     this.sketchRenderer.setInk(stroke.worldPath());
     this.applyGhost(this.resolveFor(stroke));
   }
@@ -1419,11 +1473,6 @@ class App {
     const viewDirection = this.viewport.viewDirection();
     const mode = this.mode;
 
-    if (this.isDepthSource() && this.lastSpatialAt && time - this.lastSpatialAt > SPATIAL_STALL_MS) {
-      if (this.spatialStroke) this.spatialStroke.pause(time);
-      if (this.spatialStroke?.isDead(time)) this.cancelSpatialStroke('Tracking stalled; stroke cancelled');
-    }
-
     this.updatePlaneInference(time);
 
     const cursorRay = cursorPx ? projector.ray(cursorPx) : null;
@@ -1433,39 +1482,10 @@ class App {
 
     const snap: SnapResult | null = cursorPx ? this.computeSnap(cursorPx) : null;
 
-    if (this.spatialStroke) {
-      const points = this.spatialStroke.polyline();
-      this.sketchRenderer.setInk(points);
-      const scale = this.spatial.mapping.scale;
-      if (this.spatialStroke.worldExtent() >= SPATIAL_FIT_EXTENT_MM * scale) {
-        const fitted = this.spatialStroke.fitted(this.preferFitKinds());
-        this.fittedPlaneLabel = fitted.plane.label;
-        if (fitted.straight && !fitted.planar) {
-          const bothObject = isSpatialObjectSnap(this.spatialStroke.start) && isSpatialObjectSnap(this.spatialStroke.current);
-          const aligned = bothObject
-            ? this.spatialStroke.preview()
-            : alignLineToWorldAxis(this.spatialStroke.start.world, this.spatialStroke.current.world);
-          const { a, b } = aligned;
-          this.sketchRenderer.setGhost([a, b], false, {
-            text: `${Math.round(this.spatialStroke.length())} mm`,
-            at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 },
-          });
-        } else {
-          this.applyGhost(this.resolveSpatial(fitted.session));
-          this.sketchRenderer.setInk(points);
-        }
-      } else {
-        this.fittedPlaneLabel = null;
-        const { a, b } = this.spatialStroke.preview();
-        const delta = this.spatialStroke.delta();
-        this.sketchRenderer.setGhost([a, b], false, {
-          text: `${Math.round(this.spatialStroke.length())} mm  Δ ${Math.round(delta.x)} ${Math.round(delta.y)} ${Math.round(delta.z)}`,
-          at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 },
-        });
-      }
-    } else if (this.stroke) {
-      // Points are captured in onCursorMoved; the ghost follows the camera too.
+    if (this.stroke) {
       this.updateGhost(this.stroke);
+    } else if (this.isDepthSource() && this.spatial.world && mode === 'READY') {
+      this.updateSpatialHover(this.spatial.world);
     } else {
       const hovered = snap && mode === 'READY' ? this.hoveredEntity(snap) : null;
       if (hovered !== this.hover) {
@@ -1474,21 +1494,15 @@ class App {
       }
     }
 
-    const fittedLive = this.spatialStroke && this.fittedPlaneLabel ? this.spatialStroke.fitted(this.preferFitKinds()) : null;
-    const displayedPlane = this.stroke
-      ? this.stroke.plane
-      : fittedLive
-        ? fittedLive.plane
-        : planeThroughSnap(this.plane, snap);
+    const displayedPlane = this.stroke ? this.stroke.plane : planeThroughSnap(this.plane, snap);
     const focus =
       snap && isObjectSnap(snap)
         ? displayedPlane.toPlane(snap.world)
         : snap?.onPlane
           ? snap.plane
           : displayedPlane.toPlane(displayedPlane.anchor);
-    const hidePlane = this.isDepthSource() && this.drawingSpace === 'free3d' && !this.stroke && !fittedLive;
-    this.planeVisual.setVisible(!hidePlane);
-    if (!hidePlane) this.planeVisual.update(displayedPlane, this.gridStep, focus);
+    this.planeVisual.setVisible(true);
+    this.planeVisual.update(displayedPlane, this.gridStep, focus);
     const spatialWorld = this.isDepthSource() ? this.spatial.world : null;
     const spatialScreen = spatialWorld ? projector.project(spatialWorld) : null;
     if (this.isDepthSource()) {
@@ -1496,7 +1510,7 @@ class App {
       const cursorWorld = preview?.world ?? spatialWorld;
       this.spatialVisual.update(cursorWorld, !!spatialWorld && !!spatialScreen, {
         workspace: WORKSPACE_CUBE_MM * this.spatial.mapping.scale,
-        radius: cursorWorld ? this.spatialRadius(cursorWorld, this.spatialStroke ? 1 : SPATIAL_MAGNET) : 4,
+        radius: cursorWorld ? this.spatialRadius(cursorWorld, this.stroke ? 1 : SPATIAL_MAGNET) : 4,
         snapType: preview?.type ?? 'free',
         target: preview && isSpatialObjectSnap(preview) ? preview.world : null,
       });
@@ -1520,8 +1534,8 @@ class App {
     this.hud.update({
       mode,
       plane: displayedPlane.info,
-      planeMode: this.stroke ? 'Locked' : this.isDepthSource() && this.drawingSpace === 'free3d' ? 'Manual' : this.planeMode === 'auto' ? 'Auto' : 'Manual',
-      planeReason: this.stroke ? 'locked' : REASON_LABELS[this.planeReason] ?? null,
+      planeMode: this.depthHudPlaneMode(),
+      planeReason: this.depthHudPlaneReason(),
       snap: (this.isDepthSource() ? this.spatialPreview?.type ?? null : snap?.type) ?? null,
       snapAxis: this.isDepthSource() ? this.spatialPreview?.axis ?? null : snap?.axis ?? null,
       gridStep: this.isDepthSource() ? this.spatial.mapping.scale * 5 : this.gridStep,
@@ -1534,11 +1548,9 @@ class App {
       edgeOn: displayedPlane.isEdgeOn(viewDirection),
       entityCount: this.sketch.size,
       depthMode: this.isDepthSource(),
-      drawingSpace: this.isDepthSource() ? this.drawingSpace : null,
       spatialLabel: this.isDepthSource() ? this.spatialHudLabel() : null,
       scale: this.isDepthSource() ? this.spatial.mapping.scale : null,
       trackingAgeMs: this.isDepthSource() && this.spatial.last?.ageMs !== undefined ? this.spatial.last.ageMs : null,
-      fittedPlane: this.spatialStroke ? this.fittedPlaneLabel : null,
     });
     this.hud.setKeys(this.keyHints(mode));
 
@@ -1640,7 +1652,7 @@ export interface AirCadApi {
   setCursor(point: Vec2): void;
   /** Reason and plane points of the most recent pen-up, for diagnostics. */
   lastRecognition(): { reason: string; points: Vec2[]; screenExtent: number } | null;
-  setDrawingSpace(space: DrawingSpace): void;
+  setDrawingSpace(space: string): void;
   setTrackerSource(source: TrackerSource): void;
   setSpatialOrigin(cameraMm: Vec3): void;
   setDepthScale(scale: number): void;

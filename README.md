@@ -145,15 +145,15 @@ Keep the camera **fixed, upright, and approximately level**. The browser maps ca
 
 | Control | Action |
 | --- | --- |
-| Input panel | Webcam / Depth camera / Mouse, Finger or LED/Colour, Free 3D or Planar, scale |
+| Input panel | Webcam / Depth camera / Mouse, Finger or LED/Colour, scale |
 | **O** | Set origin from a 400 ms stable capture (maps that pose to world 0,0,0) |
 | **R** | Recenter mapping on the last committed endpoint |
 | **F** | Fit a local workspace cube (about 400 mm physical × scale) |
-| **Space** | Freehand stroke: fit XY / XZ / YZ from the path, then line / rectangle / assembled / shared-border (Free 3D) |
+| **Space** | Draw a line or rectangle on the current work plane (assembled / shared-border still apply) |
 | **G** | Optional XYZ grid (off by default in depth mode) |
 | **X / Y / Z** | Hard axis lock in millimetres |
 
-Free 3D records a polyline while Space is held, fits the nearest world plane (or a 3D line if the path is straight and not planar), then reuses the webcam recogniser. Snapping uses the larger of 40 mm × scale and ~22 screen pixels, with a 1.5× magnet at pen-down and pen-up so endpoints join. Default scale is 10 (1 physical mm = 10 model mm) and is remembered. A short tracking gap can resume the same stroke; a long loss, a distant re-lock, or release while paused cancels without adding history. Colour tracking prefers a textured/opaque tip — a bare LED often has no measurable stereo surface.
+Depth drawing is always planar. In Auto mode the last-used plane is only a provisional reference (HUD: *decided by stroke*); the plane is chosen from the stroke direction after pen-down and then locked. Tab / 1 / 2 / 3 still pin a plane in Manual mode and force every sample onto it. Nearby vertices, midpoints, and edges attract the cursor before pen-down, with a 1.5× magnet at pen-down and pen-up. In-plane distance is used so stereo depth noise is less likely to miss a point on the plane. Straight strokes snap to an axis if the in-plane angle is under 30° or over 60°; between 30° and 60° the line is committed and you are prompted to type the exact angle (any finite angle is allowed). A stroke drawn near an existing line adopts that line's direction (parallel, or collinear if close enough); starting on an edge can snap perpendicular to it. Snapping uses the larger of 40 mm × scale and ~22 screen pixels. Default scale is 10 (1 physical mm = 10 model mm) and is remembered. Colour tracking prefers a textured/opaque tip — a bare LED often has no measurable stereo surface.
 
 If you move or unplug the camera, press **Retry** and set the origin again. Calibration is not saved.
 

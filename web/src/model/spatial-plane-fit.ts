@@ -1,11 +1,23 @@
-import { WorkPlane, type PlaneKind } from './plane';
-import { add, distance, dot, length, scale, sub, v3, type Vec3 } from './vec';
+import { PLANES, WorkPlane, type Axis, type PlaneKind } from './plane';
+import { add, clone, distance, dot, length, scale, sub, v3, type Vec3 } from './vec';
 
 export const STRAIGHT_PATH_RATIO = 1.15;
 export const STRAIGHT_DEVIATION_FRAC = 0.1;
 export const AXIS_ALIGN_DEG = 12;
 /** Smallest / largest extent below this is treated as planar. */
 export const PLANAR_FLATNESS = 0.25;
+export const PLANE_LOCK_MAX_DEG = 30;
+export const IN_PLANE_SNAP_LOW_DEG = 30;
+export const IN_PLANE_SNAP_HIGH_DEG = 60;
+
+export interface LineConstraint {
+  a: Vec3;
+  b: Vec3;
+  plane: PlaneKind | null;
+  axis: Axis | null;
+  angleDeg: number | null;
+  ambiguous: boolean;
+}
 
 export interface StrokePlaneFit {
   plane: WorkPlane;
@@ -14,6 +26,8 @@ export interface StrokePlaneFit {
   straight: boolean;
   planar: boolean;
   extents: Vec3;
+  ambiguous: boolean;
+  candidates: PlaneKind[];
 }
 
 function axisExtents(points: readonly Vec3[]): Vec3 {
@@ -111,6 +125,8 @@ export function fitStrokePlane(points: readonly Vec3[], anchor: Vec3, preferKind
     straight,
     planar: flatness <= PLANAR_FLATNESS,
     extents,
+    ambiguous,
+    candidates,
   };
 }
 
@@ -127,4 +143,88 @@ export function alignLineToWorldAxis(a: Vec3, b: Vec3, deg = AXIS_ALIGN_DEG): { 
   const sign = delta[axis] >= 0 ? 1 : -1;
   const aligned = add(a, scale(v3(axis === 'x' ? 1 : 0, axis === 'y' ? 1 : 0, axis === 'z' ? 1 : 0), sign * len));
   return { a, b: aligned, axis };
+}
+
+function signOrOne(value: number): number {
+  return value < 0 ? -1 : 1;
+}
+
+function flattenOntoPlane(a: Vec3, b: Vec3, kind: PlaneKind, len: number): Vec3 {
+  const plane = PLANES[kind];
+  const delta = sub(b, a);
+  const planar = sub(delta, scale(plane.normal, dot(delta, plane.normal)));
+  const planarLen = length(planar);
+  if (planarLen < 1e-9) return add(a, scale(plane.u, signOrOne(dot(delta, plane.u)) * len));
+  return add(a, scale(planar, len / planarLen));
+}
+
+function inPlaneComponents(delta: Vec3, kind: PlaneKind): { du: number; dv: number; angleDeg: number } {
+  const plane = PLANES[kind];
+  const du = dot(delta, plane.u);
+  const dv = dot(delta, plane.v);
+  const angleDeg = (Math.atan2(Math.abs(dv), Math.abs(du)) * 180) / Math.PI;
+  return { du, dv, angleDeg };
+}
+
+/** Zero the smallest direction when tilt out of the nearest principal plane is <= 30°. */
+export function lockLineToNearestPlane(a: Vec3, b: Vec3): { a: Vec3; b: Vec3; plane: PlaneKind | null } {
+  const delta = sub(b, a);
+  const len = length(delta);
+  if (len < 1e-9) return { a: clone(a), b: clone(b), plane: null };
+  const abs = { x: Math.abs(delta.x), y: Math.abs(delta.y), z: Math.abs(delta.z) };
+  const normalAxis: Axis = abs.x <= abs.y && abs.x <= abs.z ? 'x' : abs.y <= abs.z ? 'y' : 'z';
+  const kind: PlaneKind = kindForNormal(normalAxis);
+  const tilt = (Math.asin(Math.min(1, abs[normalAxis] / len)) * 180) / Math.PI;
+  if (tilt > PLANE_LOCK_MAX_DEG) return { a: clone(a), b: clone(b), plane: null };
+  return { a: clone(a), b: flattenOntoPlane(a, b, kind, len), plane: kind };
+}
+
+/** Apply the 30/60 in-plane snap on an already flattened line. */
+export function snapInPlaneAngle(a: Vec3, b: Vec3, kind: PlaneKind): LineConstraint {
+  const delta = sub(b, a);
+  const len = length(delta);
+  if (len < 1e-9) return { a: clone(a), b: clone(b), plane: kind, axis: null, angleDeg: null, ambiguous: false };
+  const { angleDeg } = inPlaneComponents(delta, kind);
+  const plane = PLANES[kind];
+  if (angleDeg < IN_PLANE_SNAP_LOW_DEG) {
+    return {
+      a: clone(a),
+      b: add(a, scale(plane.u, signOrOne(dot(delta, plane.u)) * len)),
+      plane: kind,
+      axis: plane.uAxis,
+      angleDeg: 0,
+      ambiguous: false,
+    };
+  }
+  if (angleDeg > IN_PLANE_SNAP_HIGH_DEG) {
+    return {
+      a: clone(a),
+      b: add(a, scale(plane.v, signOrOne(dot(delta, plane.v)) * len)),
+      plane: kind,
+      axis: plane.vAxis,
+      angleDeg: 90,
+      ambiguous: false,
+    };
+  }
+  return { a: clone(a), b: clone(b), plane: kind, axis: null, angleDeg, ambiguous: true };
+}
+
+/** Flatten onto the nearest principal plane when tilt <= 30°, then snap the in-plane angle. */
+export function constrainSpatialLine(a: Vec3, b: Vec3): LineConstraint {
+  const locked = lockLineToNearestPlane(a, b);
+  if (!locked.plane) return { a: locked.a, b: locked.b, plane: null, axis: null, angleDeg: null, ambiguous: false };
+  return snapInPlaneAngle(locked.a, locked.b, locked.plane);
+}
+
+/** Rebuild `b` about `a` at `deg` from the plane U axis, keeping the drawn length and quadrant. */
+export function applyInPlaneAngle(a: Vec3, b: Vec3, kind: PlaneKind, deg: number): Vec3 {
+  const plane = PLANES[kind];
+  const delta = sub(b, a);
+  const len = length(delta);
+  if (len < 1e-9 || !Number.isFinite(deg)) return clone(b);
+  const radians = (deg * Math.PI) / 180;
+  const direction = add(scale(plane.u, Math.cos(radians) * signOrOne(dot(delta, plane.u))), scale(plane.v, Math.sin(radians) * signOrOne(dot(delta, plane.v))));
+  const dirLen = length(direction);
+  if (dirLen < 1e-12) return clone(b);
+  return add(a, scale(direction, len / dirLen));
 }

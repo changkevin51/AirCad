@@ -147,4 +147,54 @@ describe('spatial snapping', () => {
     });
     expect(preferred.entityId).toBe('last');
   });
+
+  it('tolerates depth error along the view direction without grabbing a far vertex', () => {
+    const farAndNear = {
+      vertices: [
+        { point: v3(0, 0, 200), entityId: 'far', index: 0 },
+        { point: v3(5, 0, 0), entityId: 'near', index: 0 },
+      ],
+      midpoints: [],
+      segments: [],
+    };
+    const near = snapSpatial({ raw: v3(0, 0, 0), scale: 1, targets: farAndNear, viewDir: v3(0, 0, 1), depthWeight: 0.6 });
+    expect(near.entityId).toBe('near');
+
+    const depthNoise = snapSpatial({
+      raw: v3(0, 0, 0),
+      scale: 1,
+      viewDir: v3(0, 1, 0),
+      depthWeight: 0.6,
+      targets: { vertices: [{ point: v3(0, 55, 0), entityId: 'aligned', index: 0 }], midpoints: [], segments: [] },
+    });
+    expect(depthNoise.type).toBe('vertex');
+    expect(depthNoise.entityId).toBe('aligned');
+    const isotropic = snapSpatial({
+      raw: v3(0, 0, 0),
+      scale: 1,
+      targets: { vertices: [{ point: v3(0, 55, 0), entityId: 'aligned', index: 0 }], midpoints: [], segments: [] },
+    });
+    expect(isotropic.type).toBe('free');
+  });
+
+  it('uses in-plane distance and ignores far-off-plane vertices', () => {
+    const planeWorld = (point: ReturnType<typeof v3>) => v3(point.x, point.y, 0);
+    const onPlane = snapSpatial({
+      raw: v3(0, 0, 80),
+      scale: 1,
+      planeWorld,
+      maxOffPlane: 40,
+      targets: { vertices: [{ point: v3(30, 0, 0), entityId: 'floor', index: 0 }], midpoints: [], segments: [] },
+    });
+    expect(onPlane.type).toBe('vertex');
+    expect(onPlane.entityId).toBe('floor');
+    const off = snapSpatial({
+      raw: v3(0, 0, 0),
+      scale: 1,
+      planeWorld,
+      maxOffPlane: 40,
+      targets: { vertices: [{ point: v3(0, 0, 200), entityId: 'high', index: 0 }], midpoints: [], segments: [] },
+    });
+    expect(off.type).toBe('free');
+  });
 });

@@ -200,14 +200,26 @@ vi.mock('./ui/help', () => {
 vi.mock('./ui/measure-input', () => {
   class MeasureInput {
     isOpen = false;
+    lastLabel = '';
+    lastInitial = '';
+    onSubmit: ((text: string) => void) | null = null;
     constructor() {
       state.measure = this;
     }
-    open() {
+    open(label: string, onSubmit: (text: string) => void, _onClose?: () => void, initialValue?: string) {
       this.isOpen = true;
+      this.lastLabel = label;
+      this.lastInitial = initialValue ?? '';
+      this.onSubmit = onSubmit;
     }
     close() {
       this.isOpen = false;
+      this.onSubmit = null;
+    }
+    submit(text: string) {
+      const submit = this.onSubmit;
+      this.close();
+      if (text && submit) submit(text);
     }
   }
   return { MeasureInput };
@@ -407,7 +419,6 @@ beforeEach(() => {
   if (state.measure) state.measure.isOpen = false;
   dispatchWindow('blur', {});
   api.setTrackerSource('webcam');
-  api.setDrawingSpace('free3d');
   state.tracker?.onConnection('closed');
   api.sketch.load({ version: 1, units: 'mm', entities: [] });
   api.press('clear');
@@ -1110,14 +1121,6 @@ function spatialAt(world: Vec3, over: Partial<SpatialMessage> = {}): SpatialMess
 function enablePlanarDepth(): void {
   api.setTrackerSource('oak');
   api.setDepthScale(1);
-  api.setDrawingSpace('planar');
-  api.setSpatialOrigin(ORIGIN_CAM);
-}
-
-function enableFree3dDepth(): void {
-  api.setTrackerSource('oak');
-  api.setDepthScale(1);
-  api.setDrawingSpace('free3d');
   api.setSpatialOrigin(ORIGIN_CAM);
 }
 
@@ -1193,7 +1196,7 @@ describe('depth planar strokes', () => {
   });
 });
 
-describe('depth Free 3D strokes', () => {
+describe('depth planar snapping', () => {
   it('defaults depth scale to 10 when entering depth mode', () => {
     try {
       globalThis.localStorage?.removeItem('aircad.depthScale');
@@ -1205,7 +1208,7 @@ describe('depth Free 3D strokes', () => {
   });
 
   it('recognizes a jittered loop as a rectangle', () => {
-    enableFree3dDepth();
+    enablePlanarDepth();
     strokeThroughSpatial([
       v3(0, 0, 12),
       v3(2000, 20, -8),
@@ -1223,7 +1226,7 @@ describe('depth Free 3D strokes', () => {
   });
 
   it('assembles four chained strokes into a rectangle', () => {
-    enableFree3dDepth();
+    enablePlanarDepth();
     strokeThroughSpatial([v3(0, 0, 0), v3(2000, 0, 8), v3(4000, 0, 0)]);
     expect(api.sketch.size).toBe(1);
     strokeThroughSpatial([v3(4000, 0, 0), v3(4000, 1500, -6), v3(4000, 3000, 0)]);
@@ -1236,26 +1239,9 @@ describe('depth Free 3D strokes', () => {
     expect(api.sketch.all[0].type).toBe('rect');
   });
 
-  it('completes a shared-border wall from a floor edge', () => {
-    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
-    enableFree3dDepth();
-    strokeThroughSpatial([
-      v3(4000, 1500, 0),
-      v3(4000, 1500, 1200),
-      v3(4000, 1500, 2500),
-      v3(4000, 2000, 2500),
-      v3(4000, 2500, 2500),
-      v3(4000, 2500, 1200),
-      v3(4000, 2500, 0),
-    ]);
-    expect(api.lastRecognition()?.reason).toBe('shared-border rectangle');
-    expect(api.sketch.size).toBe(2);
-    expect(api.sketch.all[1].type).toBe('rect');
-  });
-
   it('joins an endpoint 35 mm off a vertex', () => {
     api.commands.addLine(v3(0, 0, 0), v3(500, 0, 0));
-    enableFree3dDepth();
+    enablePlanarDepth();
     strokeThroughSpatial([v3(2000, 0, 0), v3(1000, 0, 4), v3(35, 0, 0)]);
     expect(api.sketch.size).toBe(2);
     const line = api.sketch.all[1];
@@ -1266,7 +1252,7 @@ describe('depth Free 3D strokes', () => {
   });
 
   it('commits a near-axis stroke as an axis-aligned line', () => {
-    enableFree3dDepth();
+    enablePlanarDepth();
     strokeThroughSpatial([v3(0, 0, 0), v3(500, 20, 8), v3(1000, 80, 40)]);
     expect(api.lastRecognition()?.reason).toBe('axis-aligned line');
     expect(api.sketch.size).toBe(1);
@@ -1274,6 +1260,155 @@ describe('depth Free 3D strokes', () => {
     expect(line.type).toBe('line');
     if (line.type === 'line') {
       expect(line.a).toEqual(v3(0, 0, 0));
+      expect(line.b.y).toBeCloseTo(0, 5);
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('projects a tilted stroke onto the work plane', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([v3(0, 0, 0), v3(500, 80, 20), v3(1000, 150, 40)]);
+    expect(api.sketch.size).toBe(1);
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('snaps a 20° planar stroke to a world axis', () => {
+    enablePlanarDepth();
+    const angle = (20 * Math.PI) / 180;
+    strokeThroughSpatial([
+      v3(0, 0, 0),
+      v3(Math.cos(angle) * 400, Math.sin(angle) * 400, 8),
+      v3(Math.cos(angle) * 800, Math.sin(angle) * 800, 12),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('axis-aligned line');
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.y).toBeCloseTo(0, 5);
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('prompts for a 45° planar angle and applies the typed value', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([v3(0, 0, 0), v3(400, 400, 10), v3(800, 800, 20)]);
+    expect(api.lastRecognition()?.reason).toBe('plane-locked line');
+    expect(state.measure.isOpen).toBe(true);
+    expect(Number(state.measure.lastInitial)).toBeCloseTo(45, 0);
+    state.measure.submit('30');
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect((Math.atan2(line.b.y, line.b.x) * 180) / Math.PI).toBeCloseTo(30, 4);
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('snaps a nearby stroke onto an existing diagonal as a parallel line', () => {
+    const angle = (38 * Math.PI) / 180;
+    const along = { x: Math.cos(angle), y: Math.sin(angle) };
+    api.commands.addLine(v3(0, 0, 0), v3(along.x * 4000, along.y * 4000, 0));
+    enablePlanarDepth();
+    api.press('fitAll');
+    finishTransitions();
+    const drawn = (46 * Math.PI) / 180;
+    const perp = { x: -along.y, y: along.x };
+    const start = v3(along.x * 1600 + perp.x * 520, along.y * 1600 + perp.y * 520, 0);
+    strokeThroughSpatial([
+      start,
+      v3(start.x + Math.cos(drawn) * 700, start.y + Math.sin(drawn) * 700, 4),
+      v3(start.x + Math.cos(drawn) * 1400, start.y + Math.sin(drawn) * 1400, 6),
+      v3(start.x + Math.cos(drawn) * 2000, start.y + Math.sin(drawn) * 2000, 8),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('parallel line');
+    expect(state.measure.isOpen).toBe(false);
+    const line = api.sketch.all[1];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect((Math.atan2(line.b.y - line.a.y, line.b.x - line.a.x) * 180) / Math.PI).toBeCloseTo(38, 4);
+    }
+  });
+
+  it('shows a vertex snap in the HUD before pen-down', () => {
+    api.commands.addLine(v3(0, 0, 0), v3(500, 0, 0));
+    enablePlanarDepth();
+    api.pushSpatial(spatialAt(v3(10, 0, 0)));
+    tick();
+    expect(state.hud.last?.snap).toBe('vertex');
+  });
+
+  it('shows decided-by-stroke before pen-down in depth auto', () => {
+    enablePlanarDepth();
+    tick();
+    expect(state.hud.last?.planeMode).toBe('Auto');
+    expect(state.hud.last?.planeReason).toBe('decided by stroke');
+    expect(api.plane().kind).toBe('XY');
+  });
+
+  it('commits a vertical stroke as a standing line while the last plane was XY', () => {
+    enablePlanarDepth();
+    expect(api.plane().kind).toBe('XY');
+    strokeThroughSpatial([v3(0, 0, 0), v3(4, 2, 400), v3(8, 3, 800)]);
+    expect(api.sketch.size).toBe(1);
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.z).toBeGreaterThan(700);
+      expect(Math.abs(line.b.x) + Math.abs(line.b.y)).toBeLessThan(20);
+    }
+    expect(api.plane().kind).not.toBe('XY');
+  });
+
+  it('locks an X-then-Z wall rectangle onto XZ', () => {
+    enablePlanarDepth();
+    expect(api.plane().kind).toBe('XY');
+    strokeThroughSpatial([
+      v3(0, 0, 0),
+      v3(2000, 0, 8),
+      v3(4000, 0, 0),
+      v3(4000, 20, 1200),
+      v3(4000, -10, 2500),
+      v3(2000, 15, 2500),
+      v3(0, -8, 2500),
+      v3(0, 12, 1200),
+      v3(0, 0, 0),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('rectangle');
+    expect(api.sketch.size).toBe(1);
+    const entity = api.sketch.all[0];
+    expect(entity.type).toBe('rect');
+    if (entity.type === 'rect') {
+      for (const corner of entity.corners) expect(corner.y).toBeCloseTo(0, 3);
+      expect(entity.corners.some((corner) => Math.abs(corner.z - 2500) < 1)).toBe(true);
+    }
+    expect(api.plane().kind).toBe('XZ');
+  });
+
+  it('keeps a straight floor stroke on XY by continuity', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([v3(0, 0, 0), v3(400, 0, 6), v3(800, 0, 4)]);
+    expect(api.plane().kind).toBe('XY');
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.y).toBeCloseTo(0, 5);
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('still flattens onto a pinned plane in manual depth mode', () => {
+    enablePlanarDepth();
+    api.press('cyclePlane');
+    expect(api.planeMode()).toBe('manual');
+    expect(api.plane().kind).toBe('XZ');
+    strokeThroughSpatial([v3(0, 0, 0), v3(500, 400, 8), v3(1000, 800, 12)]);
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
       expect(line.b.y).toBeCloseTo(0, 5);
       expect(line.b.z).toBeCloseTo(0, 5);
     }

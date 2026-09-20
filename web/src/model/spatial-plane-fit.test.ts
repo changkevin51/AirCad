@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { alignLineToWorldAxis, fitStrokePlane } from './spatial-plane-fit';
+import { alignLineToWorldAxis, applyInPlaneAngle, constrainSpatialLine, fitStrokePlane } from './spatial-plane-fit';
+import { distance } from './vec';
 import { v3 } from './vec';
 
 function jittered(points: { x: number; y: number; z: number }[], amp = 30): { x: number; y: number; z: number }[] {
@@ -50,6 +51,19 @@ describe('fitStrokePlane', () => {
     expect(fit.plane.anchor).toEqual(v3(100, 200, 50));
     expect(fit.kind).toBe('XY');
   });
+
+  it('exposes two candidates for an axis-aligned stroke', () => {
+    const fit = fitStrokePlane([v3(0, 0, 0), v3(200, 0, 0)], v3(0, 0, 0));
+    expect(fit.ambiguous).toBe(true);
+    expect(fit.candidates).toEqual(['XY', 'XZ']);
+  });
+
+  it('is unambiguous for a 45° floor stroke', () => {
+    const fit = fitStrokePlane([v3(0, 0, 0), v3(200, 200, 4)], v3(0, 0, 0));
+    expect(fit.kind).toBe('XY');
+    expect(fit.ambiguous).toBe(false);
+    expect(fit.candidates).toEqual(['XY']);
+  });
 });
 
 describe('alignLineToWorldAxis', () => {
@@ -66,5 +80,68 @@ describe('alignLineToWorldAxis', () => {
     const aligned = alignLineToWorldAxis(v3(0, 0, 0), v3(100, 80, 60), 12);
     expect(aligned.axis).toBeNull();
     expect(aligned.b).toEqual(v3(100, 80, 60));
+  });
+});
+
+describe('constrainSpatialLine', () => {
+  it('flattens a 15° tilt onto XY and keeps length', () => {
+    const a = v3(0, 0, 0);
+    const tilt = 15 * (Math.PI / 180);
+    const planar = Math.cos(tilt) * 100;
+    const b = v3(planar * 0.8, planar * 0.6, Math.sin(tilt) * 100);
+    const constrained = constrainSpatialLine(a, b);
+    expect(constrained.plane).toBe('XY');
+    expect(constrained.b.z).toBeCloseTo(0, 6);
+    expect(distance(constrained.a, constrained.b)).toBeCloseTo(100, 6);
+  });
+
+  it('snaps a 25° in-plane angle to the U axis', () => {
+    const angle = 25 * (Math.PI / 180);
+    const constrained = constrainSpatialLine(v3(0, 0, 0), v3(Math.cos(angle) * 200, Math.sin(angle) * 200, 8));
+    expect(constrained.plane).toBe('XY');
+    expect(constrained.axis).toBe('x');
+    expect(constrained.ambiguous).toBe(false);
+    expect(constrained.b.y).toBeCloseTo(0, 6);
+    expect(constrained.b.z).toBeCloseTo(0, 6);
+  });
+
+  it('snaps a 70° in-plane angle to the V axis', () => {
+    const angle = 70 * (Math.PI / 180);
+    const constrained = constrainSpatialLine(v3(0, 0, 0), v3(Math.cos(angle) * 200, Math.sin(angle) * 200, 0));
+    expect(constrained.plane).toBe('XY');
+    expect(constrained.axis).toBe('y');
+    expect(constrained.b.x).toBeCloseTo(0, 6);
+    expect(constrained.b.z).toBeCloseTo(0, 6);
+  });
+
+  it('flags a 45° in-plane line as ambiguous', () => {
+    const constrained = constrainSpatialLine(v3(0, 0, 0), v3(100, 100, 6));
+    expect(constrained.plane).toBe('XY');
+    expect(constrained.axis).toBeNull();
+    expect(constrained.ambiguous).toBe(true);
+    expect(constrained.angleDeg).toBeCloseTo(45, 4);
+    expect(constrained.b.z).toBeCloseTo(0, 6);
+  });
+
+  it('leaves a body diagonal as a true 3D line', () => {
+    const b = v3(100, 100, 100);
+    const constrained = constrainSpatialLine(v3(0, 0, 0), b);
+    expect(constrained.plane).toBeNull();
+    expect(constrained.ambiguous).toBe(false);
+    expect(constrained.b).toEqual(b);
+  });
+});
+
+describe('applyInPlaneAngle', () => {
+  it('rebuilds the endpoint in the drawn quadrant at the typed angle', () => {
+    const a = v3(10, 20, 0);
+    const b = v3(110, 120, 4);
+    const next = applyInPlaneAngle(a, b, 'XY', 30);
+    const delta = { x: next.x - a.x, y: next.y - a.y, z: next.z - a.z };
+    expect(distance(a, next)).toBeCloseTo(distance(a, b), 6);
+    expect(Math.abs((Math.atan2(delta.y, delta.x) * 180) / Math.PI)).toBeCloseTo(30, 5);
+    expect(delta.x).toBeGreaterThan(0);
+    expect(delta.y).toBeGreaterThan(0);
+    expect(delta.z).toBeCloseTo(0, 6);
   });
 });

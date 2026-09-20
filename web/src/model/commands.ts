@@ -1,3 +1,5 @@
+import type { PlaneKind } from './plane';
+import { applyInPlaneAngle } from './spatial-plane-fit';
 import {
   describeEntity,
   formatMm,
@@ -8,7 +10,7 @@ import {
   type EntityInput,
   type Sketch,
 } from './sketch';
-import { add, distance, isFinite3, normalize, scale, sub, toArray, type Vec3 } from './vec';
+import { add, distance, isFinite3, nearlyEqual, normalize, scale, sub, toArray, type Vec3 } from './vec';
 
 export interface DimensionSpec {
   /** New length for a line, in mm. */
@@ -49,6 +51,14 @@ function parseNumber(text: string): number | null {
  *
  * `"4000"` → `{ length: 4000 }`, `"4000x3000"` / `"4 m by 3 m"` → `{ width, height }`.
  */
+/** Parse a typed in-plane angle: `45`, `45°`, `45 deg`. */
+export function parseAngleDeg(text: string): number | null {
+  const match = /^\s*(-?\d+(?:[.,]\d+)?)\s*(?:°|deg(?:rees?)?)?\s*$/i.exec(text);
+  if (!match) return null;
+  const value = Number(match[1].replace(',', '.'));
+  return Number.isFinite(value) ? value : null;
+}
+
 export function parseDimensionSpec(text: string): DimensionSpec | null {
   const parts = text
     .trim()
@@ -115,6 +125,22 @@ export class Commands {
   deleteLast(): CommandResult {
     const entity = this.sketch.last;
     return entity ? this.deleteEntity(entity.id) : { ok: false, error: 'nothing to delete' };
+  }
+
+  setLineAngle(id: string, spec: string | number, kind: PlaneKind): CommandResult {
+    const entity = this.sketch.get(id);
+    if (!entity) return { ok: false, error: 'no entity selected' };
+    if (entity.type !== 'line') return { ok: false, error: 'angle applies to a line' };
+    const deg = typeof spec === 'number' ? spec : parseAngleDeg(spec);
+    if (deg === null || !Number.isFinite(deg)) return { ok: false, error: `could not read angle "${spec}" (try 45 or 45°)` };
+    const nextB = applyInPlaneAngle(entity.a, entity.b, kind, deg);
+    if (nearlyEqual(nextB, entity.b, 1e-6)) {
+      return { ok: true, entity, message: `Line angle already ${deg}°` };
+    }
+    const next = this.sketch.replaceEntity(id, { type: 'line', a: entity.a, b: nextB }, `set angle ${deg}°`);
+    return next
+      ? { ok: true, entity: next, message: `Line angle set to ${deg}°` }
+      : { ok: false, error: 'entity vanished' };
   }
 
   setDimension(id: string, spec: DimensionSpec | string): CommandResult {
