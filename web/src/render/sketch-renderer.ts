@@ -5,7 +5,7 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-import { cylinderTopCenter, entityCenter, entitySegments, entityTriangles, entityVertices, extrusionOffset, formatMm, lineLength, rectFrame, type Entity, type SolidEntity } from '../model/sketch';
+import { entityCenter, entitySegments, entityTriangles, entityVertices, extrusionOffset, formatMm, lineLength, rectFrame, type Entity, type SolidEntity } from '../model/sketch';
 import type { ProfileFace } from '../model/faces';
 import { add, lerp, v3 } from '../model/vec';
 import type { Vec3 } from '../model/vec';
@@ -66,8 +66,6 @@ class Label {
 
 export function entityLabel(entity: Entity): string {
   if (entity.type === 'line') return formatMm(lineLength(entity));
-  if (entity.type === 'circle') return `Ø ${formatMm(entity.radius * 2)}`;
-  if (entity.type === 'cylinder') return `Ø ${formatMm(entity.radius * 2)} × ${formatMm(entity.depth)}`;
   const { width, height } = rectFrame(entity);
   if (entity.type === 'extrusion') return `${formatMm(width).replace(' mm', '')} × ${formatMm(height).replace(' mm', '')} × ${formatMm(entity.depth)}`;
   return `${formatMm(width).replace(' mm', '')} × ${formatMm(height)}`;
@@ -245,9 +243,7 @@ export class SketchRenderer {
     this.extrusionFaces.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     this.extrusionFaces.visible = positions.length > 0;
     const top = entity
-      ? entity.type === 'cylinder'
-        ? cylinderTopCenter(entity)
-        : add(lerp(entity.corners[0], entity.corners[2], 0.5), extrusionOffset(entity))
+      ? add(lerp(entity.corners[0], entity.corners[2], 0.5), extrusionOffset(entity))
       : undefined;
     this.extrusionLabel.set(entity ? `Depth ${formatMm(entity.depth)}` : null, top);
     this.lastLabel.object.visible = false;

@@ -6,7 +6,6 @@ import {
   closestPointOnSegmentToRay,
   distance2,
   dot,
-  normalize,
   roundTo,
   scale,
   sub,
@@ -69,8 +68,8 @@ export interface SnapContext {
   disableObjectSnaps?: boolean;
 }
 
-export const DEFAULT_SNAP_TOLERANCE_PX = 22;
-export const DEFAULT_AXIS_SNAP_DEG = 8;
+export const DEFAULT_SNAP_TOLERANCE_PX = 40;
+export const DEFAULT_AXIS_SNAP_DEG = 16;
 export const GRID_STEPS = [1, 10, 100, 1000];
 
 function makeResult(
@@ -262,14 +261,7 @@ export function snapCursor(context: SnapContext): SnapResult {
     for (const segment of targets.segments) {
       if (excludeEntityId && segment.entityId === excludeEntityId) continue;
       const { point } = closestPointOnSegmentToRay(ray.origin, ray.dir, segment.a, segment.b);
-      const world = segment.circle
-        ? (() => {
-            const radial = sub(point, segment.circle.center);
-            const normal = normalize(segment.circle.normal);
-            const planar = sub(radial, scale(normal, dot(radial, normal)));
-            return add(segment.circle.center, scale(normalize(planar), segment.circle.radius));
-          })()
-        : point;
+      const world = point;
       const screen = projector.project(world);
       if (!screen) continue;
       const depth = rayDepth(ray, world);

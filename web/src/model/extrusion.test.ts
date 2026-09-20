@@ -212,20 +212,4 @@ describe('extrusion gesture transaction', () => {
     expect(box.depth).toBe(300);
     expect(box.changed).toBe(true);
   });
-
-  it('reports circle and cylinder cap changes without editing their sources', () => {
-    const profile = { id: 'c', type: 'circle' as const, center: v3(100, 200, 0), normal: v3(0, 0, 1), radius: 50 };
-    const circle = new ExtrusionSession(profile, 1, 0, 0);
-    expect(circle.changed).toBe(false);
-    circle.setPull(100);
-    expect(circle.changed).toBe(true);
-    circle.setPull(0);
-    expect(circle.changed).toBe(false);
-    const cylinder = new ExtrusionSession({ ...profile, type: 'cylinder', depth: 300 }, 1, 0, 0);
-    expect(cylinder.changed).toBe(false);
-    cylinder.setFace(1);
-    cylinder.setPull(50);
-    expect(cylinder.changed).toBe(true);
-    expect(profile.center).toEqual(v3(100, 200, 0));
-  });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { pickFace } from './pick';
-import { makeRect, type CircleEntity, type RectEntity, type ExtrusionEntity } from './sketch';
+import { makeRect, type RectEntity, type ExtrusionEntity } from './sketch';
 import { frontViewProjector, topViewProjector } from './test-helpers';
 import { v2, v3 } from './vec';
 
@@ -24,31 +24,5 @@ describe('face selection', () => {
     expect(pickFace([solid], v2(420, 285), topViewProjector())?.id).toBe('solid');
     expect(pickFace([solid], v2(420, 290), frontViewProjector())?.id).toBe('solid');
     expect(pickFace([rect], v2(420, 290), frontViewProjector())).toBeNull();
-  });
-
-  it('selects a circle inside its disk and nowhere else', () => {
-    const circle: CircleEntity = { id: 'c', type: 'circle', center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 100 };
-    const projector = topViewProjector(1, 0, 0);
-    expect(pickFace([circle], v2(0, 0), projector)?.id).toBe('c');
-    expect(pickFace([circle], v2(99.99, 0), projector)?.id).toBe('c');
-    expect(pickFace([circle], v2(101, 0), projector)).toBeNull();
-    expect(pickFace([circle], v2(90, 90), projector)).toBeNull();
-    expect(pickFace([circle], v2(0, 0), { ...projector, ray: () => ({ origin: v3(0, 0, -100), dir: v3(0, 0, -1) }) })).toBeNull();
-    expect(pickFace([circle], v2(0, 0), { ...projector, ray: () => ({ origin: v3(-1000, 0, 0), dir: v3(1, 0, 0) }) })).toBeNull();
-  });
-
-  it('selects a circle standing in the XZ plane', () => {
-    const circle: CircleEntity = { id: 'c', type: 'circle', center: v3(0, 0, 0), normal: v3(0, 1, 0), radius: 100 };
-    const projector = frontViewProjector(1, 0, 0);
-    expect(pickFace([circle], v2(0, 0), projector)?.id).toBe('c');
-    expect(pickFace([circle], v2(0, 101), projector)).toBeNull();
-  });
-
-  it('prefers the nearer of an overlapping circle and rectangle regardless of order', () => {
-    const circle: CircleEntity = { id: 'c', type: 'circle', center: v3(0, 0, 100), normal: v3(0, 0, 1), radius: 100 };
-    const projector = topViewProjector(1, 0, 0);
-    for (const entities of [[circle, rect], [rect, circle]]) {
-      expect(pickFace(entities, v2(0, 0), projector)?.id).toBe('c');
-    }
   });
 });

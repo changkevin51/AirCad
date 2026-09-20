@@ -742,7 +742,7 @@ describe('drawing commits through the timed hand path', () => {
     expect(api.sketch.last?.type).toBe('rect');
   });
 
-  it('commits a real circle stroke, selects it, and opens a cylinder preview with Q', () => {
+  it('commits a closed circular stroke as a rectangle and opens a box preview with Q', () => {
     const points = circleStroke(300, 250, 100);
     api.press('toggleGrid');
     api.setCursor(points[0]);
@@ -750,11 +750,11 @@ describe('drawing commits through the timed hand path', () => {
     for (const point of points.slice(1)) api.setCursor(point);
     api.hold('draw', false);
 
-    expect(api.lastRecognition()?.reason).toBe('circle');
-    expect(api.sketch.last?.type).toBe('circle');
+    expect(api.lastRecognition()?.reason).toMatch(/rectangle/);
+    expect(api.sketch.last?.type).toBe('rect');
     expect(api.selected()?.id).toBe(api.sketch.last?.id);
     api.press('extrude');
-    expect(api.extrusion()?.preview.type).toBe('cylinder');
+    expect(api.extrusion()?.preview.type).toBe('extrusion');
   });
 });
 
@@ -789,78 +789,6 @@ describe('preview rendering invalidation', () => {
       expect(after.preview.corners[1].x).toBeGreaterThan(before.preview.corners[1].x);
       expect(h.renderer.extrusions.at(-1)).toMatchObject({ type: 'extrusion', corners: expect.any(Array) });
     }
-  });
-});
-
-describe('circle push/pull controls', () => {
-  function addCircleAndStart(): string {
-    const added = api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
-    if (!added.ok) throw new Error(added.error);
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    api.press('toggleGrid');
-    api.press('extrude');
-    return added.entity.id;
-  }
-
-  it('pulls a selected circle into a native cylinder, then undo restores the circle', () => {
-    const id = addCircleAndStart();
-    expect(api.extrusion()).toMatchObject({ depth: 0, dragging: false, face: 'top', preview: { type: 'cylinder', center: v3(250, 250, 0), radius: 100 } });
-
-    api.hold('draw', true);
-    api.setCursor(v2(250, 200));
-    expect(api.extrusion()).toMatchObject({ depth: 50, dragging: true, preview: { type: 'cylinder', depth: 50 } });
-    api.hold('draw', false);
-    api.press('confirm');
-
-    expect(api.sketch.get(id)?.type).toBe('cylinder');
-    expect(api.sketch.get(id)).toMatchObject({ type: 'cylinder', center: v3(250, 250, 0), radius: 100, depth: 50 });
-    expect(api.extrusion()).toBeNull();
-    api.press('undo');
-    expect(api.sketch.get(id)).toMatchObject({ type: 'circle', center: v3(250, 250, 0), radius: 100 });
-    api.press('redo');
-    expect(api.sketch.get(id)?.type).toBe('cylinder');
-  });
-
-  it('shows a cylinder shortcut in the HUD for a selected circle', () => {
-    api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    runFrame();
-    expect(h.hudKeys.at(-1)).toContainEqual({ key: 'Q', label: 'extrude cylinder' });
-    expect(h.hudKeys.at(-1)).toContainEqual({ key: 'L', label: 'diameter' });
-  });
-
-  it('accepts an exact signed pull, cancels without changing the circle, and exposes a circular preview', () => {
-    const id = addCircleAndStart();
-    api.press('measure');
-    h.measure.submit?.('-250');
-    h.measure.isOpen = false;
-    expect(api.extrusion()).toMatchObject({ depth: -250, dragging: false, preview: { type: 'cylinder', depth: -250 } });
-    api.press('cancel');
-    expect(api.extrusion()).toBeNull();
-    expect(api.sketch.get(id)?.type).toBe('circle');
-    expect(api.sketch.get(id)).toMatchObject({ radius: 100, center: v3(250, 250, 0) });
-  });
-
-  it('re-edits an existing cylinder and can pull its opposite cap', () => {
-    const added = api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
-    if (!added.ok) throw new Error(added.error);
-    expect(api.commands.extrude(added.entity.id, 400).ok).toBe(true);
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    api.press('extrude');
-    expect(api.extrusion()).toMatchObject({ depth: 400, preview: { type: 'cylinder', depth: 400 } });
-    api.press('cyclePlane');
-    api.press('measure');
-    h.measure.submit?.('100');
-    h.measure.isOpen = false;
-    const preview = api.extrusion();
-    expect(preview?.depth).toBe(500);
-    expect(preview?.preview.type).toBe('cylinder');
-    if (preview?.preview.type === 'cylinder') expect(preview.preview.center).toEqual(v3(250, 250, -100));
-    api.press('confirm');
-    expect(api.sketch.last).toMatchObject({ type: 'cylinder', depth: 500, center: v3(250, 250, -100), radius: 100 });
   });
 });
 

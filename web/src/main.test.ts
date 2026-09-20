@@ -1279,7 +1279,7 @@ describe('depth planar snapping', () => {
     }
   });
 
-  it('snaps a 20â¬â planar stroke to a world axis', () => {
+  it('snaps a 20Ã¢ÂÂ¬Ã¢ÂÂ planar stroke to a world axis', () => {
     enablePlanarDepth();
     const angle = (20 * Math.PI) / 180;
     strokeThroughSpatial([
@@ -1296,7 +1296,7 @@ describe('depth planar snapping', () => {
     }
   });
 
-  it('prompts for a 45â¬â planar angle and applies the typed value', () => {
+  it('prompts for a 45Ã¢ÂÂ¬Ã¢ÂÂ planar angle and applies the typed value', () => {
     enablePlanarDepth();
     strokeThroughSpatial([v3(0, 0, 0), v3(400, 400, 10), v3(800, 800, 20)]);
     expect(api.lastRecognition()?.reason).toBe('plane-locked line');
@@ -1320,7 +1320,7 @@ describe('depth planar snapping', () => {
     finishTransitions();
     const drawn = (46 * Math.PI) / 180;
     const perp = { x: -along.y, y: along.x };
-    const start = v3(along.x * 1600 + perp.x * 520, along.y * 1600 + perp.y * 520, 0);
+    const start = v3(along.x * 1600 + perp.x * 650, along.y * 1600 + perp.y * 650, 0);
     strokeThroughSpatial([
       start,
       v3(start.x + Math.cos(drawn) * 700, start.y + Math.sin(drawn) * 700, 4),

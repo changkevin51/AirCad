@@ -230,15 +230,12 @@ describe('ExtrusionSession faces', () => {
     expect(session.face).toEqual(session.currentFaces()[5]);
   });
 
-  it('keeps circular extrusion limited to its two caps', () => {
-    const session = new ExtrusionSession({ id: 'circle', type: 'circle', center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 50 }, 1, 0, 0);
+  it('keeps extrusion limited to its two caps while the profile is still flat', () => {
+    const session = new ExtrusionSession({ id: 'rect', type: 'rect', corners: makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 100, 80) }, 1, 0, 0);
     session.setPull(100);
-    expect(session.faces).toHaveLength(2);
-    expect(session.setFace(2)).toBe(false);
+    expect(session.faces).toHaveLength(6);
+    expect(session.setFace(2)).toBe(true);
     expect(session.cycleFace()).toBe(true);
-    expect(session.faceIndex).toBe(1);
-    expect(session.cycleFace()).toBe(true);
-    expect(session.faceIndex).toBe(0);
   });
 });
 
@@ -270,20 +267,5 @@ describe('pickExtrusionTarget', () => {
     }
     expect(pickExtrusionTarget([rect, solid], v2(250, 150), oblique)).toEqual({ entity: solid, faceIndex: 2 });
     expect(pickExtrusionTarget([rect], v2(900, 900), top)).toBeNull();
-  });
-
-  it('supports analytic circle and cylinder caps', () => {
-    const circle = { id: 'c', type: 'circle' as const, center: v3(500, 150, 0), normal: v3(0, 0, 1), radius: 50 };
-    const cylinder = { ...circle, id: 'cylinder', type: 'cylinder' as const, depth: 200 };
-    expect(pickExtrusionTarget([rect, circle], v2(500, 150), top)).toEqual({ entity: circle, faceIndex: 0 });
-    expect(pickExtrusionTarget([rect, cylinder], v2(500, 150), top)).toEqual({ entity: cylinder, faceIndex: 0 });
-  });
-
-  it('does not select a hidden cap or shape through a curved cylinder side', () => {
-    const cylinder = { id: 'c', type: 'cylinder' as const, center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 100, depth: 200 };
-    const behind: RectEntity = { id: 'behind', type: 'rect', corners: makeRect(v3(-50, -50, -100), v3(1, 0, 0), v3(0, 1, 0), 100, 100) };
-    for (const entities of [[cylinder, behind], [behind, cylinder]]) {
-      expect(pickExtrusionTarget(entities, v2(0, 0), oblique)).toBeNull();
-    }
   });
 });

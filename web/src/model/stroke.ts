@@ -152,9 +152,9 @@ export class StrokeSession {
       this.plane.toPlane(this.lastSnap.raw ?? this.lastSnap.world),
     ];
     const result = recognizeStroke(raw, options);
-    if (result.shape?.kind === 'circle') return result;
+    if (result.shape?.kind === 'rect') return result;
     const snapped = recognizeStroke(this.planePoints(), options);
-    return snapped.shape?.kind === 'circle' ? result : snapped;
+    return snapped.shape ? snapped : result;
   }
 }
 
@@ -264,9 +264,6 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
     const b = isObjectSnap(session.last) ? session.last.world : plane.toWorld(shape.b);
     return { type: 'line', a, b };
   }
-  if (shape.kind === 'circle') {
-    return { type: 'circle', center: plane.toWorld(shape.center), normal: { ...plane.normal }, radius: shape.radius };
-  }
   const corners2 = shape.oriented ? shape.corners : alignRectToStart(shape.corners, session.start.plane, context.gridStep ?? 0);
   const rawCorners = corners2.map((c) => plane.toWorld(c));
   const aligned = context.entities
@@ -283,7 +280,6 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
 
 /** The point the work-plane anchor moves to after a commit. */
 export function anchorAfterCommit(entity: EntityInput): Vec3 {
-  if (entity.type === 'circle' || entity.type === 'cylinder') return entity.center;
   return entity.type === 'line' ? entity.b : entity.corners[0];
 }
 
@@ -329,10 +325,6 @@ export function resolveStroke(
       return { status: 'duplicate', input: null, removeIds: [], reason: 'rectangle already exists' };
     }
     return { status: 'ready', input, removeIds: [], reason: result.reason };
-  }
-
-  if (result.shape?.kind === 'circle') {
-    return { status: 'ready', input: buildEntityFromStroke(session, result.shape, context), removeIds: [], reason: result.reason };
   }
 
   if (isBorderSnap(session.start) && isBorderSnap(session.last)) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Commands, parseDimensionSpec } from './commands';
-import { makeRect, Sketch, type CircleEntity, type LineEntity, type RectEntity, type SolidEntity } from './sketch';
+import { makeRect, Sketch, type LineEntity, type RectEntity, type SolidEntity } from './sketch';
 import { v3 } from './vec';
 
 describe('parseDimensionSpec', () => {
@@ -185,91 +185,22 @@ describe('Commands.commitStroke', () => {
   });
 });
 
-describe('Commands: circles', () => {
-  it('adds a circle and sets its diameter with units, undoable', () => {
-    const sketch = new Sketch();
-    const commands = new Commands(sketch);
-    const added = commands.addCircle(v3(100, 200, 300), v3(0, 1, 0), 50);
-    expect(added.ok).toBe(true);
-    const id = added.ok ? added.entity.id : '';
-    expect(commands.setDimension(id, '5 cm').ok).toBe(true);
-    let circle = sketch.get(id) as CircleEntity;
-    expect(circle.radius).toBe(25);
-    expect(circle.center).toEqual(v3(100, 200, 300));
-    expect(circle.normal).toEqual(v3(0, 1, 0));
-    expect(commands.undo()).toMatch(/set diameter/);
-    expect((sketch.get(id) as CircleEntity).radius).toBe(50);
-    expect(commands.redo()).toMatch(/set diameter/);
-    expect((sketch.get(id) as CircleEntity).radius).toBe(25);
-    expect(commands.setDimension(id, '2 m').ok).toBe(true);
-    circle = sketch.get(id) as CircleEntity;
-    expect(circle.radius).toBe(1000);
-  });
-
-  it('rejects bad diameters without changing geometry or history', () => {
-    const sketch = new Sketch();
-    const commands = new Commands(sketch);
-    const added = commands.addCircle(v3(100, 200, 300), v3(0, 1, 0), 50);
-    const id = added.ok ? added.entity.id : '';
-    const before = sketch.get(id);
-    const undoable = sketch.canUndo;
-    for (const spec of ['10x20', '0', 'NaN', '-5', '0.000001', { length: NaN }, { length: -5 }]) {
-      expect(commands.setDimension(id, spec).ok).toBe(false);
-    }
-    expect(sketch.get(id)).toBe(before);
-    expect(sketch.canUndo).toBe(undoable);
-    expect(commands.undo()).toBe('add circle');
-    expect(sketch.size).toBe(0);
-  });
-
-  it('serializes circles alongside lines and rectangles', () => {
-    const sketch = new Sketch();
-    const commands = new Commands(sketch);
-    commands.addLine(v3(0, 0, 0), v3(0, 0, 10));
-    commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 10, 20));
-    commands.addCircle(v3(100, 200, 300), v3(0, 1, 0), 50);
-    const restored = Sketch.fromJSON(JSON.parse(sketch.serialize()));
-    expect(restored.toJSON()).toEqual(sketch.toJSON());
-    expect(restored.all.map((entity) => entity.type)).toEqual(['line', 'rect', 'circle']);
-    expect(restored.last).toEqual({ id: 'e3', type: 'circle', center: v3(100, 200, 300), normal: v3(0, 1, 0), radius: 50 });
-  });
-
-  it('extrudes a circle and validates circle inputs', () => {
-    const sketch = new Sketch();
-    const commands = new Commands(sketch);
-    const added = commands.addCircle(v3(100, 200, 300), v3(0, 1, 0), 50);
-    const id = added.ok ? added.entity.id : '';
-    expect(commands.extrude(id, 100).ok).toBe(true);
-    expect(sketch.get(id)?.type).toBe('cylinder');
-    expect((sketch.get(id) as { radius: number }).radius).toBe(50);
-    expect(commands.undo()).toMatch(/extrude/);
-    expect((sketch.get(id) as CircleEntity).radius).toBe(50);
-    expect(commands.redo()).toMatch(/extrude/);
-    expect(sketch.get(id)?.type).toBe('cylinder');
-    expect(commands.deleteEntity(id).ok).toBe(true);
-    expect(sketch.size).toBe(0);
-    commands.undo();
-    expect(sketch.size).toBe(1);
-    expect(commands.addCircle(v3(0, 0, 0), v3(0, 0, 0), 10).ok).toBe(false);
-    expect(commands.addCircle(v3(0, 0, 0), v3(0, 0, 1), -5).ok).toBe(false);
-  });
-});
-
 describe('Commands.extrudeMany', () => {
   function setup() {
     const sketch = new Sketch();
     const commands = new Commands(sketch);
     const corners = makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300);
     const a = sketch.addEntity({ type: 'rect', corners });
-    const b = sketch.addEntity({ type: 'circle', center: v3(700, 200, 0), normal: v3(0, 0, 1), radius: 50 });
+    const other = makeRect(v3(700, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 100, 80);
+    const b = sketch.addEntity({ type: 'rect', corners: other });
     const previews: SolidEntity[] = [
       { id: a.id, type: 'extrusion', corners, depth: 100 },
-      { id: b.id, type: 'cylinder', center: v3(700, 200, 0), normal: v3(0, 0, 1), radius: 50, depth: -200 },
+      { id: b.id, type: 'extrusion', corners: other, depth: -200 },
     ];
     return { sketch, commands, previews };
   }
 
-  it('applies mixed box and cylinder previews atomically and undoes both together', () => {
+  it('applies mixed box previews atomically and undoes both together', () => {
     const { sketch, commands, previews } = setup();
     const before = sketch.serialize();
     const reasons: string[] = [];
@@ -287,18 +218,14 @@ describe('Commands.extrudeMany', () => {
 
   it('validates every preview and rejects duplicates before any mutation', () => {
     const { sketch, commands, previews } = setup();
-    const [box, cylinder] = previews;
-    if (cylinder.type !== 'cylinder') throw new Error('expected cylinder fixture');
+    const [box, other] = previews;
+    if (other.type !== 'extrusion') throw new Error('expected extrusion fixture');
     const before = sketch.serialize();
     const invalid: SolidEntity[][] = [
-      [box, { ...cylinder, depth: 0 }],
-      [box, { ...cylinder, depth: NaN }],
-      [box, { ...cylinder, radius: 0 }],
-      [box, { ...cylinder, normal: v3(0, 0, 0) }],
-      [box, { ...cylinder, id: 'missing' }],
+      [box, { ...other, depth: 0 }],
+      [box, { ...other, depth: NaN }],
+      [box, { ...other, id: 'missing' }],
       [box, box],
-      [{ ...cylinder, id: box.id }],
-      [{ ...box, id: cylinder.id }],
     ];
     const reasons: string[] = [];
     sketch.onChange((reason) => reasons.push(reason));
@@ -307,7 +234,7 @@ describe('Commands.extrudeMany', () => {
       expect(sketch.serialize()).toBe(before);
     }
     expect(reasons).toEqual([]);
-    expect(commands.undo()).toBe('add circle');
+    expect(commands.undo()).toBe('add rect');
   });
 
   it('keeps single-shape undo labels and does not record empty or unchanged batches', () => {

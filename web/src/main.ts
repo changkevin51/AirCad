@@ -51,7 +51,6 @@ import {
   type SpatialSnapResult,
 } from './model/spatial-snap';
 import {
-  circlePoints,
   describeEntity,
   entityCenter,
   entityMidpoints,
@@ -59,7 +58,6 @@ import {
   entityVertices,
   isExtrudableProfile,
   Sketch,
-  type CircleGeometry,
   type Entity,
   type EntityInput,
   type ExtrusionEntity,
@@ -151,16 +149,8 @@ function planeThroughSnap(plane: WorkPlane, snap: SnapResult | null): WorkPlane 
 }
 
 function sameSolidPreview(a: SolidEntity, b: SolidEntity): boolean {
-  if (a.type !== b.type || a.depth !== b.depth) return false;
-  if (a.type === 'extrusion' && b.type === 'extrusion') {
-    return a.corners.every((corner, index) => nearlyEqual(corner, b.corners[index], 1e-6));
-  }
-  if (a.type === 'cylinder' && b.type === 'cylinder') {
-    return nearlyEqual(a.center, b.center, 1e-6)
-      && nearlyEqual(a.normal, b.normal, 1e-6)
-      && Math.abs(a.radius - b.radius) <= 1e-6;
-  }
-  return false;
+  if (a.depth !== b.depth) return false;
+  return a.corners.every((corner, index) => nearlyEqual(corner, b.corners[index], 1e-6));
 }
 
 class App {
@@ -822,11 +812,7 @@ class App {
       ? `Length of ${describeEntity(target)} (mm):`
       : target.type === 'extrusion'
         ? 'Extrusion depth (mm) or base size (W x H mm):'
-        : target.type === 'cylinder'
-          ? 'Cylinder pull depth (mm; negative pushes the active cap in):'
-          : target.type === 'circle'
-            ? 'Circle diameter (mm; e.g. 50 or 5 cm):'
-            : `Size of ${describeEntity(target)} (W x H mm):`;
+        : `Size of ${describeEntity(target)} (W x H mm):`;
     this.cancelInteraction();
     this.measure.open(prompt, (text) => {
       const result = this.commands.setDimension(target.id, text);
@@ -858,7 +844,7 @@ class App {
   private selectAtCursor(): void {
     const entity = this.entityAtCursor();
     this.selectEntity(entity);
-    if (entity) this.toasts.show(`Selected ${describeEntity(entity)}${entity.type === 'line' ? '' : entity.type === 'circle' ? ' · Q to extrude · L to set diameter' : ' · Q to push/pull'}`);
+    if (entity) this.toasts.show(`Selected ${describeEntity(entity)}${entity.type === 'line' ? '' : ' · Q to push/pull'}`);
   }
 
   private beginExtrusion(): void {
@@ -868,7 +854,7 @@ class App {
     }
     const target = this.selected ?? this.entityAtCursor();
     if (!target || target.type === 'line') {
-      this.toasts.show('Select a closed rectangle or circle: point inside it and pinch, click, or press S.', 'error', 5000);
+      this.toasts.show('Select a closed rectangle: point inside it and pinch, click, or press S.', 'error', 5000);
       return;
     }
     if ((target.type === 'rect' || target.type === 'extrusion') && !isExtrudableProfile(target.corners)) {
@@ -937,16 +923,9 @@ class App {
       this.toasts.show('The preview is degenerate — pull the face back out or press Esc.', 'error');
       return;
     }
-    if (preview.type === 'cylinder' && (!Number.isFinite(preview.radius) || preview.radius < 1e-6 || !Number.isFinite(preview.depth) || Math.abs(preview.depth) < 1e-6)) {
-      this.toasts.show('The preview is degenerate — pull the cap back out or press Esc.', 'error');
-      return;
-    }
     // Clear the preview transaction before the command emits its model change.
     this.extrusion = null;
-    const geometry = preview.type === 'extrusion'
-      ? preview.corners
-      : { center: preview.center, normal: preview.normal, radius: preview.radius } satisfies CircleGeometry;
-    const result = this.commands.extrude(session.profile.id, session.depth, geometry);
+    const result = this.commands.extrude(session.profile.id, session.depth, preview.corners);
     this.sketchRenderer.setExtrusion(null);
     this.sketchRenderer.setActiveFace(null);
     this.sketchRenderer.setSketch(this.sketch.all);
@@ -1026,7 +1005,6 @@ class App {
     const entity = this.lastCommitted;
     if (!entity) return null;
     if (entity.type === 'line') return entity.b;
-    if (entity.type === 'circle' || entity.type === 'cylinder') return entity.center;
     return entity.corners[0];
   }
 
@@ -1675,7 +1653,7 @@ class App {
     if (resolution.status !== 'ready') {
       if (resolution.status === 'unrecognized') {
         this.sketchRenderer.fadeOut(stroke.worldPath());
-        this.toasts.show('Not recognized: draw a straight line, a closed rectangle, or most of a circle', 'error');
+        this.toasts.show('Not recognized: draw a straight line or a closed rectangle', 'error');
       } else {
         this.toasts.show(resolution.reason, 'info');
       }
@@ -1733,18 +1711,16 @@ class App {
       return;
     }
     const input = resolution.input;
-    if (input.type !== 'line' && input.type !== 'circle' && input.type !== 'rect') {
+    if (input.type !== 'line' && input.type !== 'rect') {
       this.sketchRenderer.setGhost(null, false, null);
       return;
     }
     const fake: Entity =
       input.type === 'line'
         ? { id: 'ghost', type: 'line', a: input.a, b: input.b }
-        : input.type === 'circle'
-          ? { id: 'ghost', type: 'circle', center: input.center, normal: input.normal, radius: input.radius }
-          : { id: 'ghost', type: 'rect', corners: input.corners };
+        : { id: 'ghost', type: 'rect', corners: input.corners };
     const shared = resolution.reason === 'shared-border rectangle' || resolution.reason === 'assembled rectangle';
-    this.sketchRenderer.setGhost(input.type === 'circle' ? circlePoints(input) : entityPoints(fake), fake.type !== 'line', {
+    this.sketchRenderer.setGhost(entityPoints(fake), fake.type !== 'line', {
       text: `${entityLabel(fake)}${shared ? ' · shared border' : ''}`,
       at: entityCenter(fake),
     });
@@ -1914,8 +1890,8 @@ class App {
         ];
         const target = this.selected ?? this.hover;
         if (this.hover) hints.push({ key: key('select'), label: 'select' });
-        if (target && target.type !== 'line') hints.push({ key: key('extrude'), label: target.type === 'circle' ? 'extrude cylinder' : 'push/pull' });
-        if (target) hints.push({ key: key('measure'), label: target.type === 'circle' ? 'diameter' : target.type === 'cylinder' ? 'depth' : 'size' }, { key: key('delete'), label: 'delete' });
+        if (target && target.type !== 'line') hints.push({ key: key('extrude'), label: 'push/pull' });
+        if (target) hints.push({ key: key('measure'), label: target.type === 'extrusion' ? 'depth' : 'size' }, { key: key('delete'), label: 'delete' });
         else if (this.sketch.size) hints.push({ key: key('measure'), label: 'size' }, { key: key('undo'), label: 'undo' });
         hints.push({ key: key('export'), label: 'FreeCAD' }, { key: key('help'), label: 'help' });
         return hints;

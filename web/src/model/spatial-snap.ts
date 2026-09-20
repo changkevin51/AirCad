@@ -58,7 +58,7 @@ export const SPATIAL_OBJECT_RADIUS_MM = 40;
 export const SPATIAL_GRID_STEP_MM = 5;
 export const SPATIAL_EXIT_FACTOR = 1.5;
 export const SPATIAL_CHALLENGE_FACTOR = 0.2;
-export const SPATIAL_SCREEN_TOLERANCE_PX = 22;
+export const SPATIAL_SCREEN_TOLERANCE_PX = 40;
 export const SPATIAL_MAGNET = 1.5;
 
 const PRIORITY: Record<SpatialSnapType, number> = {

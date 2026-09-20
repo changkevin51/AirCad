@@ -112,13 +112,13 @@ describe('spatial snapping', () => {
     expect(result.entityId).toBe('edge');
   });
 
-  it('uses the larger of 40 mm × scale and 22 px × worldPerPixel', () => {
+  it('uses the larger of 40 mm × scale and 40 px × worldPerPixel', () => {
     const targets = { vertices: [{ point: v3(50, 0, 0), entityId: 'v', index: 0 }], midpoints: [], segments: [] };
     const physical = snapSpatial({ raw: v3(0, 0, 0), scale: 1, targets });
     expect(physical.type).toBe('free');
     const hybrid = snapSpatial({ raw: v3(0, 0, 0), scale: 1, worldPerPixel: 3, targets });
     expect(hybrid.type).toBe('vertex');
-    expect(hybridRadius(1, 3)).toBe(66);
+    expect(hybridRadius(1, 3)).toBe(120);
     expect(hybridRadius(2, 0.5)).toBe(80);
   });
 

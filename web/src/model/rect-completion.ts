@@ -134,7 +134,7 @@ export function alignRectangleToBorder(
         const b = forward ? segment.b : segment.a;
         const u = scale(sub(b, a), 1 / len);
         const cosine = dot(edge, u) / edgeLength;
-        if (cosine < Math.cos((12 * Math.PI) / 180)) continue;
+        if (cosine < Math.cos((22 * Math.PI) / 180)) continue;
         const v = cross(plane.normal, u);
         const lo = dot(sub(corners[i], a), u);
         const hi = dot(sub(corners[j], a), u);
@@ -280,7 +280,7 @@ export function completeSharedBorder(
   }
   if (!baseline || Math.abs(h) <= eps) return null;
 
-  const fitTol = Math.max(1e-3, 0.15 * Math.min(chordLength, Math.abs(h)));
+  const fitTol = Math.max(1e-3, 0.28 * Math.min(chordLength, Math.abs(h)));
   const far0 = v2(0, h);
   const far1 = v2(chordLength, h);
   const visits = (target: Vec2) => local.some((p) => distance2(p, target) <= fitTol);

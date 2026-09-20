@@ -137,7 +137,7 @@ describe('axis-aligned edge snaps', () => {
   function sketchWithCrossing(): Sketch {
     const sketch = floorSketch();
     sketch.addEntity({ type: 'line', a: v3(2537, -500, 0), b: v3(2537, 1600, 0) });
-    sketch.addEntity({ type: 'line', a: v3(2000, 2537, 0), b: v3(3500, 2537, 0) });
+    sketch.addEntity({ type: 'line', a: v3(2000, 2537, 0), b: v3(5200, 2537, 0) });
     return sketch;
   }
 
@@ -213,7 +213,7 @@ describe('axis-aligned edge snaps', () => {
 
   it('ignores crossings behind the stroke start or outside the tolerance', () => {
     const sketch = new Sketch();
-    sketch.addEntity({ type: 'line', a: v3(500, 0, 0), b: v3(500, 2000, 0) });
+    sketch.addEntity({ type: 'line', a: v3(200, 0, 0), b: v3(200, 2000, 0) });
     sketch.addEntity({ type: 'line', a: v3(1500, 0, 0), b: v3(1500, 2000, 0) });
     const result = snapCursor(
       context({ cursor: screenOf(800, 1010), strokeStart: v3(1000, 1000, 0), targets: targetsOf(sketch) }),
@@ -243,7 +243,7 @@ describe('lenient edge snapping', () => {
     expect(edge.type).toBe('edge');
     expect(edge.world).toEqual(v3(1000, 0, 0));
     expect(snapCursor(context({ ...base, cursor: screenOf(1000, 180), tolerancePx: 14 })).type).toBe('free');
-    expect(snapCursor(context({ ...base, cursor: screenOf(1000, 230) })).type).toBe('free');
+    expect(snapCursor(context({ ...base, cursor: screenOf(1000, 410) })).type).toBe('free');
     expect(snapCursor(context({ ...base, cursor: screenOf(1000, 180), disableObjectSnaps: true })).type).toBe('free');
     expect(snapCursor(context({ ...base, cursor: screenOf(1000, 180), excludeEntityId: 'e1' })).type).toBe('free');
     const locked = snapCursor(
@@ -329,38 +329,6 @@ describe('snap tie-breaking', () => {
     expect(result.type).toBe('vertex');
     expect(result.onPlane).toBe(false);
     expect(result.world).toEqual(v3(100, 100, 2500));
-  });
-});
-
-describe('snapCursor: circles', () => {
-  const circleSketch = () => {
-    const sketch = new Sketch();
-    sketch.addEntity({ type: 'circle', center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 1000 });
-    return sketch;
-  };
-
-  it('offers only centre and quadrant vertices, no tessellation midpoints', () => {
-    const targets = targetsOf(circleSketch());
-    expect(targets.vertices).toHaveLength(5);
-    expect(targets.midpoints).toHaveLength(0);
-    expect(targets.segments).toHaveLength(96);
-    const centre = snapCursor(context({ cursor: screenOf(5, -5), targets }));
-    expect(centre.type).toBe('vertex');
-    expect(centre.world).toEqual(v3(0, 0, 0));
-    const quad = screenOf(1000, 0);
-    const quadrant = snapCursor(context({ cursor: v2(quad.x - 6, quad.y + 6), targets }));
-    expect(quadrant.type).toBe('vertex');
-    expect(quadrant.world).toEqual(v3(1000, 0, 0));
-  });
-
-  it('snaps edges exactly onto the analytic circle, not the tessellation chord', () => {
-    const targets = targetsOf(circleSketch());
-    const along = 1000 / Math.sqrt(2) + 20;
-    const result = snapCursor(context({ cursor: screenOf(along, along), targets }));
-    expect(result.type).toBe('edge');
-    expect(result.entityId).toBe('e1');
-    expect(Math.hypot(result.world.x, result.world.y)).toBeCloseTo(1000, 6);
-    expect(result.world.z).toBe(0);
   });
 });
 
