@@ -24,7 +24,10 @@ import {
   type TrackerConfigJson,
   type TrackerSource,
 } from './input/tracker-client';
-import { Commands } from './model/commands';
+import { Commands, parseDepth } from './model/commands';
+import { ExtrusionSession } from './model/extrusion';
+import { defaultFaceIndex, pickProfileFace, profileFaces } from './model/faces';
+import { pickFace } from './model/pick';
 import { PLANES, nextPlaneKind, WorkPlane, type Axis, type PlaneKind } from './model/plane';
 import { PlaneInference, type PlaneMode } from './model/plane-inference';
 import {
@@ -47,9 +50,23 @@ import {
   SPATIAL_SCREEN_TOLERANCE_PX,
   type SpatialSnapResult,
 } from './model/spatial-snap';
-import { describeEntity, entityCenter, entityMidpoints, entityPoints, entityVertices, Sketch, type Entity, type EntityInput } from './model/sketch';
+import {
+  circlePoints,
+  describeEntity,
+  entityCenter,
+  entityMidpoints,
+  entityPoints,
+  entityVertices,
+  isExtrudableProfile,
+  Sketch,
+  type CircleGeometry,
+  type Entity,
+  type EntityInput,
+  type ExtrusionEntity,
+  type SolidEntity,
+} from './model/sketch';
 import { anchorAfterCommit, resolveStroke, StrokeSession, type StrokeResolution } from './model/stroke';
-import { dot, nearlyEqual, type Vec2, type Vec3 } from './model/vec';
+import { add, dot, length2, nearlyEqual, normalize2, scale, sub2, v2, type Vec2, type Vec3 } from './model/vec';
 import { entityLabel, SketchRenderer } from './render/sketch-renderer';
 import { AxisTriad, createGroundGrid } from './scene/grid';
 import { OrbitController, type ViewPreset } from './scene/orbit';
@@ -133,6 +150,19 @@ function planeThroughSnap(plane: WorkPlane, snap: SnapResult | null): WorkPlane 
   return plane.contains(snap.world, 1e-6) ? plane : plane.withAnchor(snap.world);
 }
 
+function sameSolidPreview(a: SolidEntity, b: SolidEntity): boolean {
+  if (a.type !== b.type || a.depth !== b.depth) return false;
+  if (a.type === 'extrusion' && b.type === 'extrusion') {
+    return a.corners.every((corner, index) => nearlyEqual(corner, b.corners[index], 1e-6));
+  }
+  if (a.type === 'cylinder' && b.type === 'cylinder') {
+    return nearlyEqual(a.center, b.center, 1e-6)
+      && nearlyEqual(a.normal, b.normal, 1e-6)
+      && Math.abs(a.radius - b.radius) <= 1e-6;
+  }
+  return false;
+}
+
 class App {
   private readonly platform = detectPlatform();
   private readonly viewport: Viewport;
@@ -197,6 +227,12 @@ class App {
   private cursorSourceTag: 'hand' | 'mouse' | null = null;
   private lastHandId: number | null = null;
   private previousCursor: Vec2 | null = null;
+  private extrusion: ExtrusionSession | null = null;
+  private selectedId: string | null = null;
+  private lastPinching = false;
+  private lastHandMessageAt = 0;
+  private focused = true;
+  private planeBeforeStroke: WorkPlane | null = null;
   private hover: Entity | null = null;
   private lastCommitted: Entity | null = null;
   private gridEnabled = true;
@@ -256,7 +292,12 @@ class App {
 
     this.sketch.onChange(() => {
       this.sketchRevision++;
-      this.sketchRenderer.setSketch(this.sketch.all);
+      this.sketchRenderer.setSketch(this.sketch.all.filter((entity) => entity.id !== this.extrusion?.profile.id));
+      if (this.selectedId && !this.sketch.get(this.selectedId)) this.selectedId = null;
+      this.sketchRenderer.setSelected(this.extrusion ? null : this.selected);
+      this.hover = null;
+      this.sketchRenderer.setHover(null);
+      if (this.extrusion && this.sketch.get(this.extrusion.profile.id) !== this.extrusion.profile) this.cancelExtrusion();
       if (this.lastCommitted && !this.sketch.get(this.lastCommitted.id)) this.lastCommitted = this.sketch.last ?? null;
       this.sketchRenderer.setLastLabel(this.lastCommitted && this.sketch.get(this.lastCommitted.id) ? this.sketch.get(this.lastCommitted.id)! : null);
     });
@@ -269,7 +310,9 @@ class App {
         }
       },
       onHold: (action, down) => this.setHold(action, down, `mouse:${action}`),
-      onWheel: (factor, point) => this.zoomAtCursor(factor, point),
+      onWheel: (factor, point) => {
+        if (!this.extrusion?.dragging) this.zoomAtCursor(factor, point);
+      },
       onCancel: () => this.cancelInteraction(),
     });
 
@@ -306,6 +349,8 @@ class App {
           this.synchronizeNavigation(false);
           this.cancelUnfinished();
           this.clockSync.reset();
+          this.extrusion?.pause();
+          this.previousCursor = null;
         }
         this.pip.setCameraState(this.cameraState, state === 'open');
       },
@@ -314,13 +359,22 @@ class App {
 
     window.addEventListener('keydown', (event) => this.onKeyDown(event));
     window.addEventListener('keyup', (event) => this.onKeyUp(event));
-    window.addEventListener('blur', () => this.cancelInteraction());
+    window.addEventListener('blur', () => {
+      this.focused = false;
+      this.cancelInteraction();
+    });
+    window.addEventListener('focus', () => {
+      this.focused = true;
+    });
     globalThis.document?.addEventListener?.('visibilitychange', () => {
-      if (globalThis.document.hidden) this.cancelInteraction();
+      if (globalThis.document.hidden) {
+        this.focused = false;
+        this.cancelInteraction();
+      }
     });
     viewportElement.focus();
 
-    this.toasts.show('Hold Space to draw, Shift to orbit, Ctrl to pan. H for help.', 'info', 5000);
+    this.toasts.show('Space to draw · pinch or click to select · Q to extrude · H for help', 'info', 6000);
     requestAnimationFrame((time) => this.frame(time));
   }
 
@@ -358,6 +412,7 @@ class App {
 
   private cancelUnfinished(): void {
     if (this.stroke) this.cancelStroke();
+    if (this.extrusion) this.cancelExtrusion();
   }
 
   private onKeyDown(event: KeyboardEvent): void {
@@ -380,6 +435,7 @@ class App {
   }
 
   private setHold(action: HoldAction, down: boolean, source = `api:${action}`): void {
+    this.focused = true;
     if (down) {
       if (this.help.visible || this.measure.isOpen) return;
       this.holdSources.set(source, action);
@@ -400,7 +456,13 @@ class App {
   private beginHold(action: HoldAction, source = `api:${action}`): void {
     if (action === 'draw') {
       this.endPalmNav(false);
-      this.synchronizeNavigation(false);
+      if (this.navMode === 'orbit') this.endOrbitGesture(false);
+      this.navMode = null;
+      this.previousCursor = null;
+      if (this.extrusion) {
+        this.updateExtrusion();
+        return;
+      }
       if (this.isDepthSource()) {
         if (source.startsWith('mouse:')) return;
         this.beginDepthStroke();
@@ -411,22 +473,30 @@ class App {
     }
     this.pixelNavLast = null;
     this.synchronizeNavigation(false);
+    if (this.cursor.position) this.previousCursor = { ...this.cursor.position };
+    if (this.extrusion && (action === 'orbit' || action === 'pan')) this.extrusion.pause(false);
   }
 
   private endHold(action: HoldAction): void {
     if (action === 'draw') {
+      if (this.extrusion) {
+        this.updateExtrusion();
+        return;
+      }
       this.endStroke();
       this.synchronizeNavigation(false);
       return;
     }
     this.pixelNavLast = null;
     this.synchronizeNavigation(action === 'orbit');
+    if ((action === 'orbit' || action === 'pan') && this.navMode && this.cursor.position) {
+      this.previousCursor = { ...this.cursor.position };
+    }
+    if (this.extrusion) this.updateExtrusion();
   }
 
   private synchronizeNavigation(allowSettle = false): void {
     const blocked =
-      this.isDrawing() ||
-      this.held.has('draw') ||
       this.help.visible ||
       this.measure.isOpen ||
       (!this.isDepthSource() && this.cursor.isLost);
@@ -441,6 +511,7 @@ class App {
       this.orbit.beginOrbit(this.sketch.center());
       this.orbitGesture = true;
     }
+    if (desired && this.extrusion) this.extrusion.pause(false);
   }
 
   private endOrbitGesture(settle: boolean): void {
@@ -463,10 +534,21 @@ class App {
     return null;
   }
 
+  private get cursorSource(): string | null {
+    if (this.cursor.isLost) return null;
+    const hand = this.cursor.hand;
+    return hand ? `hand:${hand.id}` : this.cursor.tracking === 'mouse' ? 'mouse' : null;
+  }
+
+  private get navigationMode(): 'ORBIT' | 'PAN' | null {
+    return this.held.has('orbit') ? 'ORBIT' : this.held.has('pan') ? 'PAN' : null;
+  }
+
   private get mode(): Mode {
-    if (this.isDrawing()) return 'DRAWING';
     if (this.navMode === 'orbit') return 'ORBIT';
     if (this.navMode === 'pan') return 'PAN';
+    if (this.extrusion) return 'EXTRUDING';
+    if (this.isDrawing()) return 'DRAWING';
     return 'READY';
   }
 
@@ -486,6 +568,7 @@ class App {
 
   private onHands(message: HandsMessage): void {
     const now = performance.now() / 1000;
+    this.lastHandMessageAt = now;
     this.cursor.updateHands(message, { w: this.viewport.width, h: this.viewport.height }, now);
     const hasHand = this.cursor.tracking === 'hand' && !!this.cursor.hand;
     if (hasHand) {
@@ -493,15 +576,24 @@ class App {
       this.onCursorMoved();
     } else if (this.cursor.isLost) {
       this.synchronizeNavigation(false);
+      this.extrusion?.pause();
     }
+    const pinching = this.cursor.hand?.pinching ?? false;
+    if (this.focused && this.cursor.hand && pinching && !this.lastPinching && this.mode === 'READY' && !this.measure.isOpen && !this.help.visible) {
+      this.selectAtCursor();
+    }
+    if (this.cursor.hand) this.lastPinching = pinching;
     this.pip.setHands(message, this.cursor.handId);
     const navAllowed =
       this.navAssist &&
       hasHand &&
+      this.focused &&
       !this.held.has('draw') &&
       !this.held.has('orbit') &&
       !this.held.has('pan') &&
       !this.isDrawing() &&
+      !this.extrusion &&
+      !pinching &&
       !this.help.visible &&
       !this.measure.isOpen;
     if (navAllowed && message.nav) this.applyPalmNav(message.nav, message.frame);
@@ -532,10 +624,26 @@ class App {
   // ---------------------------------------------------------------- actions
 
   private doPress(action: PressAction): void {
+    this.focused = true;
     if ((this.help.visible || this.measure.isOpen) && action !== 'help' && action !== 'cancel') return;
     if (this.isDrawing() && BLOCKED_WHILE_DRAWING.has(action)) return;
     if (this.isDrawing() && CANCEL_STROKE_FIRST.has(action)) this.cancelUnfinished();
+    if (this.extrusion && !['extrude', 'confirm', 'cancel', 'measure', 'help', 'togglePip', 'cyclePlane', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'zoomIn', 'zoomOut'].includes(action)) {
+      this.toasts.show('Finish the extrusion with Enter, or cancel with Esc');
+      return;
+    }
+    if (this.extrusion && ['viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'zoomIn', 'zoomOut'].includes(action)) this.extrusion.pause();
     switch (action) {
+      case 'select':
+        if (!this.stroke) this.selectAtCursor();
+        break;
+      case 'extrude':
+        if (this.extrusion) this.commitExtrusion();
+        else this.beginExtrusion();
+        break;
+      case 'confirm':
+        if (this.extrusion) this.commitExtrusion();
+        break;
       case 'viewTop':
       case 'viewFront':
       case 'viewRight': {
@@ -564,8 +672,14 @@ class App {
         this.zoomAtCursor(1 / 1.25, this.cursor.position ?? undefined);
         break;
       case 'cyclePlane':
-        this.setPlaneKind(nextPlaneKind(this.plane.kind), true);
-        this.pinManual();
+        if (this.extrusion) {
+          if (this.extrusion.cycleFace()) this.toasts.show(`Extruding ${this.extrusion.face.label} face`);
+          else this.toasts.show('Release to switch faces');
+          this.sketchRenderer.setActiveFace(this.extrusion.face);
+        } else {
+          this.setPlaneKind(nextPlaneKind(this.plane.kind), true);
+          this.pinManual();
+        }
         break;
       case 'toggleAutoPlane': {
         this.planeMode = this.planeMode === 'auto' ? 'manual' : 'auto';
@@ -614,7 +728,7 @@ class App {
         break;
       }
       case 'delete': {
-        const target = this.hover ?? this.sketch.last;
+        const target = this.selected ?? this.hover ?? this.sketch.last;
         const result = target ? this.commands.deleteEntity(target.id) : this.commands.deleteLast();
         this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'info' : 'error');
         if (result.ok) this.hover = null;
@@ -628,8 +742,10 @@ class App {
         break;
       }
       case 'cancel':
-        if (this.isDrawing()) this.cancelUnfinished();
-        else if (this.help.visible) this.help.hide();
+        if (this.help.visible) this.help.hide();
+        else if (this.extrusion) this.cancelExtrusion();
+        else if (this.isDrawing()) this.cancelUnfinished();
+        else this.selectEntity(null);
         break;
       case 'measure':
         this.openMeasure();
@@ -641,7 +757,8 @@ class App {
         this.toasts.show(this.pip.toggle() ? 'Camera preview on' : 'Camera preview off');
         break;
       case 'help':
-        this.cancelInteraction();
+        if (this.stroke) this.cancelStroke();
+        this.extrusion?.pause();
         this.help.toggle();
         this.synchronizeNavigation(false);
         break;
@@ -681,12 +798,35 @@ class App {
   }
 
   private openMeasure(): void {
-    const target = this.hover ?? this.lastCommitted ?? this.sketch.last ?? null;
+    if (this.extrusion) {
+      const session = this.extrusion;
+      session.pause();
+      this.held.delete('draw');
+      this.measure.open(`Pull distance for the ${session.face.label} face (mm; negative pushes in):`, (text) => {
+        const pull = parseDepth(text);
+        if (pull === null) this.toasts.show('Enter a non-zero depth, such as 500, -250, or 2 m. Press L to retry.', 'error');
+        else if (this.extrusion === session) {
+          session.setPull(pull);
+          this.sketchRenderer.setExtrusion(session.preview);
+          this.sketchRenderer.setActiveFace(session.face.outline);
+        }
+      });
+      return;
+    }
+    const target = this.selected ?? this.hover ?? this.lastCommitted ?? this.sketch.last ?? null;
     if (!target) {
       this.toasts.show('Draw something first, then press L to set its size', 'error');
       return;
     }
-    const prompt = target.type === 'line' ? `Length of ${describeEntity(target)} (mm):` : `Size of ${describeEntity(target)} (W x H mm):`;
+    const prompt = target.type === 'line'
+      ? `Length of ${describeEntity(target)} (mm):`
+      : target.type === 'extrusion'
+        ? 'Extrusion depth (mm) or base size (W x H mm):'
+        : target.type === 'cylinder'
+          ? 'Cylinder pull depth (mm; negative pushes the active cap in):'
+          : target.type === 'circle'
+            ? 'Circle diameter (mm; e.g. 50 or 5 cm):'
+            : `Size of ${describeEntity(target)} (W x H mm):`;
     this.cancelInteraction();
     this.measure.open(prompt, (text) => {
       const result = this.commands.setDimension(target.id, text);
@@ -696,6 +836,140 @@ class App {
         this.plane = this.plane.withAnchor(anchorAfterCommit(result.entity));
       }
     });
+  }
+
+  // ----------------------------------------------------------- selection / extrusion
+
+  private get selected(): Entity | null {
+    return this.selectedId ? this.sketch.get(this.selectedId) ?? null : null;
+  }
+
+  private entityAtCursor(): Entity | null {
+    const position = this.cursor.position;
+    if (!position || this.cursor.isLost) return null;
+    return this.hoveredEntity(this.computeSnap(position)) ?? pickFace(this.sketch.all, position, this.viewport.projector());
+  }
+
+  private selectEntity(entity: Entity | null): void {
+    this.selectedId = entity?.id ?? null;
+    this.sketchRenderer.setSelected(entity);
+  }
+
+  private selectAtCursor(): void {
+    const entity = this.entityAtCursor();
+    this.selectEntity(entity);
+    if (entity) this.toasts.show(`Selected ${describeEntity(entity)}${entity.type === 'line' ? '' : entity.type === 'circle' ? ' · Q to extrude · L to set diameter' : ' · Q to push/pull'}`);
+  }
+
+  private beginExtrusion(): void {
+    if (this.stroke) {
+      this.toasts.show('Finish drawing before extruding', 'error');
+      return;
+    }
+    const target = this.selected ?? this.entityAtCursor();
+    if (!target || target.type === 'line') {
+      this.toasts.show('Select a closed rectangle or circle: point inside it and pinch, click, or press S.', 'error', 5000);
+      return;
+    }
+    if ((target.type === 'rect' || target.type === 'extrusion') && !isExtrudableProfile(target.corners)) {
+      this.toasts.show('This shape is not a planar rectangle. Draw a new closed rectangle to extrude.', 'error');
+      return;
+    }
+    this.selectEntity(target);
+    const faces = profileFaces(target);
+    const faceIndex = defaultFaceIndex(faces, this.viewport.viewDirection());
+    this.extrusion = new ExtrusionSession(target, this.orbit.worldPerPixel(), this.gridEnabled ? this.gridStep : 0, faceIndex);
+    this.sketchRenderer.setSketch(this.sketch.all.filter((entity) => entity.id !== target.id));
+    this.sketchRenderer.setSelected(null);
+    this.hover = null;
+    this.sketchRenderer.setHover(null);
+    this.sketchRenderer.setExtrusion(this.extrusion.preview);
+    this.sketchRenderer.setActiveFace(this.extrusion.face);
+    this.updateExtrusion();
+    this.toasts.show(`Extruding ${this.extrusion.face.label} face · hover another face or Tab to switch · pinch/drag to pull`, 'info', 6000);
+  }
+
+  private updateExtrusion(): void {
+    const session = this.extrusion;
+    if (!session) return;
+    if (!this.focused || this.measure.isOpen || this.help.visible) {
+      session.pause();
+      return;
+    }
+    if (this.navigationMode) {
+      session.pause(false);
+      return;
+    }
+    const projector = this.viewport.projector();
+    const hand = this.cursor.hand;
+    const source = this.cursorSource;
+    const gripping = this.held.has('draw') || !!hand?.pinching;
+    const before = { preview: session.preview, faceIndex: session.faceIndex };
+    if (!session.dragging && !gripping && this.cursor.position && source) {
+      const hovered = pickProfileFace(session.currentFaces(), this.cursor.position, projector);
+      if (hovered !== null && hovered !== session.faceIndex) session.setFace(hovered);
+    }
+    // Screen direction that pulls the active face outward: the projected normal.
+    const face = session.face;
+    const p0 = projector.project(face.center);
+    const p1 = projector.project(add(face.center, scale(face.normal, 100 * session.mmPerPixel)));
+    let along = v2(0, -1);
+    if (p0 && p1) {
+      const projected = sub2(p1, p0);
+      if (length2(projected) >= 2) along = normalize2(projected);
+    }
+    session.update(this.cursor.position, gripping, source, along);
+    if (!sameSolidPreview(session.preview, before.preview) || session.faceIndex !== before.faceIndex) {
+      this.sketchRenderer.setExtrusion(session.preview);
+      this.sketchRenderer.setActiveFace(session.face);
+    }
+  }
+
+  private commitExtrusion(): void {
+    const session = this.extrusion;
+    if (!session) return;
+    if (Math.abs(session.depth) < 1e-6) {
+      this.toasts.show('Set a non-zero depth: pinch and move up/down, or press L to type one.', 'error');
+      return;
+    }
+    const preview = session.preview;
+    if (preview.type === 'extrusion' && !isExtrudableProfile(preview.corners)) {
+      this.toasts.show('The preview is degenerate — pull the face back out or press Esc.', 'error');
+      return;
+    }
+    if (preview.type === 'cylinder' && (!Number.isFinite(preview.radius) || preview.radius < 1e-6 || !Number.isFinite(preview.depth) || Math.abs(preview.depth) < 1e-6)) {
+      this.toasts.show('The preview is degenerate — pull the cap back out or press Esc.', 'error');
+      return;
+    }
+    // Clear the preview transaction before the command emits its model change.
+    this.extrusion = null;
+    const geometry = preview.type === 'extrusion'
+      ? preview.corners
+      : { center: preview.center, normal: preview.normal, radius: preview.radius } satisfies CircleGeometry;
+    const result = this.commands.extrude(session.profile.id, session.depth, geometry);
+    this.sketchRenderer.setExtrusion(null);
+    this.sketchRenderer.setActiveFace(null);
+    this.sketchRenderer.setSketch(this.sketch.all);
+    this.held.clear();
+    this.mouse.releaseAll();
+    if (result.ok) {
+      this.lastCommitted = result.entity;
+      this.selectEntity(result.entity);
+      this.sketchRenderer.setLastLabel(result.entity);
+    }
+    this.toasts.show(result.ok ? result.message : result.error, result.ok ? 'success' : 'error');
+  }
+
+  private cancelExtrusion(): void {
+    this.extrusion = null;
+    this.sketchRenderer.setExtrusion(null);
+    this.sketchRenderer.setActiveFace(null);
+    this.sketchRenderer.setSketch(this.sketch.all);
+    this.sketchRenderer.setSelected(this.selected);
+    this.sketchRenderer.setLastLabel(this.selected);
+    this.held.clear();
+    this.mouse.releaseAll();
+    this.toasts.show('Extrusion cancelled');
   }
 
   private async exportToFreeCad(): Promise<void> {
@@ -751,7 +1025,9 @@ class App {
   private lastEndpoint(): Vec3 | null {
     const entity = this.lastCommitted;
     if (!entity) return null;
-    return entity.type === 'line' ? entity.b : entity.corners[0];
+    if (entity.type === 'line') return entity.b;
+    if (entity.type === 'circle' || entity.type === 'cylinder') return entity.center;
+    return entity.corners[0];
   }
 
   private spatialWorldPerPixel(world: Vec3): number {
@@ -1217,11 +1493,12 @@ class App {
   }
 
   private beginStroke(): void {
-    if (this.stroke || !this.cursor.position) return;
+    if (this.stroke || this.extrusion || this.navMode || !this.cursor.position) return;
     if (this.help.visible || this.measure.isOpen || this.cursor.isLost) return;
     this.orbit.cancelTransition(true);
     const position = this.cursor.position;
     const snap = this.computeSnap(position);
+    this.planeBeforeStroke = this.plane;
     let plane = this.plane;
     if (this.planeMode === 'auto') {
       const choice = this.inference.update(this.inferenceContext(position, snap), this.nowMs);
@@ -1261,17 +1538,22 @@ class App {
   private onCursorMoved(): void {
     const position = this.cursor.position;
     if (!position) return;
+    this.focused = true;
     if (this.cursor.isLost || this.help.visible || this.measure.isOpen) {
       this.previousCursor = null;
+      this.extrusion?.pause();
       return;
     }
     this.synchronizeNavigation(false);
     const mode = this.mode;
     if (mode === 'ORBIT' || mode === 'PAN') {
+      this.extrusion?.pause(false);
       this.applyNavigationDelta(position);
       return;
     }
-    this.sampleStroke();
+    this.previousCursor = null;
+    if (this.extrusion) this.updateExtrusion();
+    else this.sampleStroke();
   }
 
   private applyNavigationDelta(position: Vec2): void {
@@ -1300,8 +1582,10 @@ class App {
     if (this.previousCursor) {
       const dx = position.x - this.previousCursor.x;
       const dy = position.y - this.previousCursor.y;
-      if (mode === 'ORBIT') this.orbit.orbit(dx, dy, this.sketch.center());
-      else this.orbit.pan(dx, dy);
+      if (dx !== 0 || dy !== 0) {
+        if (mode === 'ORBIT') this.orbit.orbit(dx, dy, this.sketch.center());
+        else this.orbit.pan(dx, dy);
+      }
     }
     this.previousCursor = { ...position };
   }
@@ -1314,7 +1598,7 @@ class App {
     }
     const stroke = this.stroke;
     const position = this.cursor.position;
-    if (!stroke || !position || this.cursor.isLost) return;
+    if (!stroke || !position || this.cursor.isLost || this.navigationMode) return;
     const snap = this.computeSnap(position);
     stroke.add(snap, snap.raw, position, 2);
   }
@@ -1374,8 +1658,12 @@ class App {
     const extent = this.isDepthSource() ? stroke.worldExtent() : stroke.screenExtent();
     if (extent < minExtent) {
       this.resolutionCache = null;
+      if (this.planeBeforeStroke) this.plane = this.planeBeforeStroke;
+      this.planeBeforeStroke = null;
+      this.selectAtCursor();
       return;
     }
+    this.planeBeforeStroke = null;
 
     const resolution = this.resolveFor(stroke);
     this.resolutionCache = null;
@@ -1387,7 +1675,7 @@ class App {
     if (resolution.status !== 'ready') {
       if (resolution.status === 'unrecognized') {
         this.sketchRenderer.fadeOut(stroke.worldPath());
-        this.toasts.show('Not recognized: draw a straight line or a closed rectangle', 'error');
+        this.toasts.show('Not recognized: draw a straight line, a closed rectangle, or most of a circle', 'error');
       } else {
         this.toasts.show(resolution.reason, 'info');
       }
@@ -1399,6 +1687,7 @@ class App {
       return;
     }
     this.lastCommitted = commit.entity;
+    this.selectEntity(commit.entity);
     this.sketchRenderer.setLastLabel(commit.entity);
     this.plane = stroke.plane.withAnchor(anchorAfterCommit(resolution.input));
     this.toasts.show(commit.message, 'success');
@@ -1416,6 +1705,8 @@ class App {
     this.stroke = null;
     this.depthBuffer = null;
     this.resolutionCache = null;
+    if (this.planeBeforeStroke) this.plane = this.planeBeforeStroke;
+    this.planeBeforeStroke = null;
     this.sketchRenderer.setGhost(null, false, null);
     this.sketchRenderer.setInk(null);
     this.toasts.show('Stroke cancelled');
@@ -1423,7 +1714,8 @@ class App {
   }
 
   private cancelInteraction(): void {
-    this.cancelUnfinished();
+    if (this.stroke) this.cancelStroke();
+    this.extrusion?.pause();
     this.holdSources.clear();
     this.held.clear();
     this.navMode = null;
@@ -1441,12 +1733,18 @@ class App {
       return;
     }
     const input = resolution.input;
+    if (input.type !== 'line' && input.type !== 'circle' && input.type !== 'rect') {
+      this.sketchRenderer.setGhost(null, false, null);
+      return;
+    }
     const fake: Entity =
       input.type === 'line'
         ? { id: 'ghost', type: 'line', a: input.a, b: input.b }
-        : { id: 'ghost', type: 'rect', corners: input.corners };
+        : input.type === 'circle'
+          ? { id: 'ghost', type: 'circle', center: input.center, normal: input.normal, radius: input.radius }
+          : { id: 'ghost', type: 'rect', corners: input.corners };
     const shared = resolution.reason === 'shared-border rectangle' || resolution.reason === 'assembled rectangle';
-    this.sketchRenderer.setGhost(entityPoints(fake), fake.type === 'rect', {
+    this.sketchRenderer.setGhost(input.type === 'circle' ? circlePoints(input) : entityPoints(fake), fake.type !== 'line', {
       text: `${entityLabel(fake)}${shared ? ' · shared border' : ''}`,
       at: entityCenter(fake),
     });
@@ -1468,6 +1766,11 @@ class App {
     requestAnimationFrame((next) => this.frame(next));
     this.nowMs = time;
     this.orbit.update(time);
+    if (this.cursor.tracking === 'hand' && performance.now() / 1000 - this.lastHandMessageAt > 0.6) {
+      this.cursor.dropHand();
+      this.extrusion?.pause();
+      this.previousCursor = null;
+    }
     const cursorPx = this.cursor.position;
     const projector = this.viewport.projector();
     const viewDirection = this.viewport.viewDirection();
@@ -1487,7 +1790,7 @@ class App {
     } else if (this.isDepthSource() && this.spatial.world && mode === 'READY') {
       this.updateSpatialHover(this.spatial.world);
     } else {
-      const hovered = snap && mode === 'READY' ? this.hoveredEntity(snap) : null;
+      const hovered = snap && cursorPx && mode === 'READY' && !this.cursor.isLost ? this.hoveredEntity(snap) ?? pickFace(this.sketch.all, cursorPx, projector) : null;
       if (hovered !== this.hover) {
         this.hover = hovered;
         this.sketchRenderer.setHover(hovered);
@@ -1547,6 +1850,8 @@ class App {
       navAssist: this.navAssist,
       edgeOn: displayedPlane.isEdgeOn(viewDirection),
       entityCount: this.sketch.size,
+      selected: this.selected ? describeEntity(this.selected) : null,
+      extrusion: this.extrusion ? { depth: this.extrusion.depth, dragging: this.extrusion.dragging, face: this.extrusion.face.label, pulled: this.extrusion.pulled } : null,
       depthMode: this.isDepthSource(),
       spatialLabel: this.isDepthSource() ? this.spatialHudLabel() : null,
       scale: this.isDepthSource() ? this.spatial.mapping.scale : null,
@@ -1577,6 +1882,17 @@ class App {
     const key = (action: PressAction | HoldAction) => labelForAction(action, this.platform);
     if (this.measure.isOpen) return [{ key: 'Enter', label: 'apply' }, { key: 'Esc', label: 'cancel' }];
     switch (mode) {
+      case 'EXTRUDING':
+        return [
+          { key: this.cursor.hand ? 'Pinch' : 'Drag / Space', label: 'pull face' },
+          { key: key('cyclePlane'), label: 'switch face' },
+          { key: key('orbit'), label: 'orbit' },
+          { key: key('pan'), label: 'pan' },
+          { key: 'Enter / Q', label: 'apply' },
+          { key: key('measure'), label: 'exact pull' },
+          { key: '0', label: '3D view' },
+          { key: key('cancel'), label: 'cancel' },
+        ];
       case 'DRAWING':
         return [
           { key: key('draw'), label: 'release to commit' },
@@ -1596,7 +1912,10 @@ class App {
           { key: key('cyclePlane'), label: 'pin plane' },
           { key: '1 2 3 0', label: 'views' },
         ];
-        if (this.hover) hints.push({ key: key('measure'), label: `size ${entityLabel(this.hover)}` }, { key: key('delete'), label: 'delete' });
+        const target = this.selected ?? this.hover;
+        if (this.hover) hints.push({ key: key('select'), label: 'select' });
+        if (target && target.type !== 'line') hints.push({ key: key('extrude'), label: target.type === 'circle' ? 'extrude cylinder' : 'push/pull' });
+        if (target) hints.push({ key: key('measure'), label: target.type === 'circle' ? 'diameter' : target.type === 'cylinder' ? 'depth' : 'size' }, { key: key('delete'), label: 'delete' });
         else if (this.sketch.size) hints.push({ key: key('measure'), label: 'size' }, { key: key('undo'), label: 'undo' });
         hints.push({ key: key('export'), label: 'FreeCAD' }, { key: key('help'), label: 'help' });
         return hints;
@@ -1616,6 +1935,7 @@ class App {
       press: (action) => this.doPress(action),
       hold: (action, down) => this.setHold(action, down),
       setCursor: (point) => {
+        this.focused = true;
         if (this.cursor.updateMouse(point, performance.now() / 1000)) {
           this.noteCursorSource('mouse');
           this.onCursorMoved();
@@ -1636,6 +1956,14 @@ class App {
       setDepthScale: (scale) => this.changeScale(scale),
       mappingScale: () => this.spatial.mapping.scale,
       pushSpatial: (message) => this.onSpatial(message),
+      selected: () => this.selected,
+      extrusion: () => this.extrusion ? {
+        depth: this.extrusion.depth,
+        dragging: this.extrusion.dragging,
+        face: this.extrusion.face.label,
+        preview: this.extrusion.preview,
+        ...(this.extrusion.preview.type === 'extrusion' ? { corners: this.extrusion.preview.corners } : {}),
+      } : null,
     };
   }
 }
@@ -1658,6 +1986,8 @@ export interface AirCadApi {
   setDepthScale(scale: number): void;
   mappingScale(): number;
   pushSpatial(message: SpatialMessage): void;
+  selected(): Entity | null;
+  extrusion(): { depth: number; dragging: boolean; face: string; preview: SolidEntity; corners?: ExtrusionEntity['corners'] } | null;
 }
 
 declare global {

@@ -5,7 +5,9 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-import { entityCenter, entitySegments, entityVertices, formatMm, lineLength, rectFrame, type Entity } from '../model/sketch';
+import { cylinderTopCenter, entityCenter, entitySegments, entityTriangles, entityVertices, extrusionOffset, formatMm, lineLength, rectFrame, type Entity, type SolidEntity } from '../model/sketch';
+import type { ProfileFace } from '../model/faces';
+import { add, lerp, v3 } from '../model/vec';
 import type { Vec3 } from '../model/vec';
 import type { Viewport } from '../scene/viewport';
 
@@ -64,7 +66,10 @@ class Label {
 
 export function entityLabel(entity: Entity): string {
   if (entity.type === 'line') return formatMm(lineLength(entity));
+  if (entity.type === 'circle') return `Ø ${formatMm(entity.radius * 2)}`;
+  if (entity.type === 'cylinder') return `Ø ${formatMm(entity.radius * 2)} × ${formatMm(entity.depth)}`;
   const { width, height } = rectFrame(entity);
+  if (entity.type === 'extrusion') return `${formatMm(width).replace(' mm', '')} × ${formatMm(height).replace(' mm', '')} × ${formatMm(entity.depth)}`;
   return `${formatMm(width).replace(' mm', '')} × ${formatMm(height)}`;
 }
 
@@ -78,6 +83,11 @@ export class SketchRenderer {
   private readonly fadeMaterial: LineMaterial;
   private lines: LineSegments2;
   private hover: LineSegments2;
+  private readonly selected: LineSegments2;
+  private readonly extrusionLines: LineSegments2;
+  private readonly extrusionFaces: THREE.Mesh;
+  private readonly activeFace: THREE.Mesh;
+  private readonly activeFaceOutline: LineSegments2;
   private ghost: Line2;
   private fadeLine: Line2;
   private fadeUntil = 0;
@@ -87,6 +97,7 @@ export class SketchRenderer {
   private readonly ghostLabel = new Label('dim-label--ghost');
   private readonly hoverLabel = new Label('dim-label--hover');
   private readonly lastLabel = new Label('dim-label--last');
+  private readonly extrusionLabel = new Label('dim-label--ghost');
 
   constructor(private readonly viewport: Viewport) {
     this.group.name = 'sketch';
@@ -105,6 +116,24 @@ export class SketchRenderer {
 
     this.lines = new LineSegments2(new LineSegmentsGeometry(), this.lineMaterial);
     this.hover = new LineSegments2(new LineSegmentsGeometry(), this.hoverMaterial);
+    this.selected = new LineSegments2(new LineSegmentsGeometry(), this.hoverMaterial);
+    this.extrusionLines = new LineSegments2(new LineSegmentsGeometry(), this.ghostMaterial);
+    this.extrusionFaces = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({
+      color: COLORS.ghost, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false,
+    }));
+    this.activeFace = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({
+      color: COLORS.hover, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false,
+    }));
+    this.activeFaceOutline = new LineSegments2(new LineSegmentsGeometry(), this.hoverMaterial);
+    this.selected.visible = false;
+    this.extrusionLines.visible = false;
+    this.extrusionFaces.visible = false;
+    this.activeFace.visible = false;
+    this.activeFaceOutline.visible = false;
+    this.selected.renderOrder = 5;
+    this.extrusionLines.renderOrder = 6;
+    this.activeFace.renderOrder = 6;
+    this.activeFaceOutline.renderOrder = 6;
     this.ghost = new Line2(new LineGeometry(), this.ghostMaterial);
     this.fadeLine = new Line2(new LineGeometry(), this.fadeMaterial);
     this.lines.visible = false;
@@ -134,8 +163,8 @@ export class SketchRenderer {
     this.vertices.visible = false;
     this.vertices.renderOrder = 7;
 
-    this.group.add(this.faces, this.lines, this.hover, this.ink, this.fadeLine, this.ghost, this.vertices);
-    this.group.add(this.ghostLabel.object, this.hoverLabel.object, this.lastLabel.object);
+    this.group.add(this.faces, this.lines, this.hover, this.selected, this.ink, this.fadeLine, this.ghost, this.vertices, this.extrusionFaces, this.extrusionLines, this.activeFace, this.activeFaceOutline);
+    this.group.add(this.ghostLabel.object, this.hoverLabel.object, this.lastLabel.object, this.extrusionLabel.object);
     viewport.scene.add(this.group);
     viewport.onResize(() => this.updateResolution());
     this.updateResolution();
@@ -174,10 +203,7 @@ export class SketchRenderer {
     for (const entity of entities) {
       for (const segment of entitySegments(entity)) segmentPositions.push(...flatten([segment.a, segment.b]));
       for (const vertex of entityVertices(entity)) vertexPositions.push(vertex.point.x, vertex.point.y, vertex.point.z);
-      if (entity.type === 'rect') {
-        const [a, b, c, d] = entity.corners;
-        facePositions.push(...flatten([a, b, c, a, c, d]));
-      }
+      for (const triangle of entityTriangles(entity)) facePositions.push(...flatten(triangle));
     }
     this.replaceSegments(this.lines, segmentPositions);
 
@@ -204,6 +230,59 @@ export class SketchRenderer {
 
   setLastLabel(entity: Entity | null): void {
     this.lastLabel.set(entity ? entityLabel(entity) : null, entity ? entityCenter(entity) : undefined);
+  }
+
+  setSelected(entity: Entity | null): void {
+    this.replaceSegments(this.selected, entity ? entitySegments(entity).flatMap((edge) => flatten([edge.a, edge.b])) : []);
+  }
+
+  /** A separate preview mesh keeps the committed model and undo history untouched. */
+  setExtrusion(entity: SolidEntity | null): void {
+    this.replaceSegments(this.extrusionLines, entity ? entitySegments(entity).flatMap((edge) => flatten([edge.a, edge.b])) : []);
+    if (entity) this.extrusionLines.computeLineDistances();
+    const positions = entity ? entityTriangles(entity).flatMap((triangle) => flatten(triangle)) : [];
+    this.extrusionFaces.geometry.dispose();
+    this.extrusionFaces.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    this.extrusionFaces.visible = positions.length > 0;
+    const top = entity
+      ? entity.type === 'cylinder'
+        ? cylinderTopCenter(entity)
+        : add(lerp(entity.corners[0], entity.corners[2], 0.5), extrusionOffset(entity))
+      : undefined;
+    this.extrusionLabel.set(entity ? `Depth ${formatMm(entity.depth)}` : null, top);
+    this.lastLabel.object.visible = false;
+  }
+
+  /** Highlight the face currently being pushed/pulled during an extrusion. */
+  setActiveFace(face: Pick<ProfileFace, 'outline' | 'center'> | readonly Vec3[] | null, center?: Vec3): void {
+    const profileFace = face && !Array.isArray(face) ? face as Pick<ProfileFace, 'outline' | 'center'> : null;
+    const outline = Array.isArray(face) ? face : profileFace?.outline;
+    const faceCenter = Array.isArray(face) ? center : profileFace?.center;
+    if (!outline || outline.length < 3) {
+      this.activeFace.visible = false;
+      this.activeFaceOutline.visible = false;
+      return;
+    }
+    const centre = faceCenter ?? outline.reduce((sum: Vec3, point: Vec3) => add(sum, point), v3(0, 0, 0));
+    if (!faceCenter) {
+      centre.x /= outline.length;
+      centre.y /= outline.length;
+      centre.z /= outline.length;
+    }
+    this.activeFace.geometry.dispose();
+    const fill: Vec3[] = [];
+    for (let index = 0; index < outline.length; index += 1) {
+      fill.push(centre, outline[index], outline[(index + 1) % outline.length]);
+    }
+    this.activeFace.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(flatten(fill), 3));
+    this.activeFace.visible = true;
+    this.activeFaceOutline.geometry.dispose();
+    const outlineGeometry = new LineSegmentsGeometry();
+    const ring: Vec3[] = [];
+    for (let index = 0; index < outline.length; index += 1) ring.push(outline[index], outline[(index + 1) % outline.length]);
+    outlineGeometry.setPositions(flatten(ring));
+    this.activeFaceOutline.geometry = outlineGeometry;
+    this.activeFaceOutline.visible = true;
   }
 
   /** Live raw ink while the pen is down. */

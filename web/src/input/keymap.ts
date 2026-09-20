@@ -27,6 +27,9 @@ export type PressAction =
   | 'toggleGrid'
   | 'toggleNavAssist'
   | 'measure'
+  | 'select'
+  | 'extrude'
+  | 'confirm'
   | 'export'
   | 'togglePip'
   | 'help'
@@ -72,16 +75,19 @@ export const PRESS_BINDINGS: readonly KeyBinding<PressAction>[] = [
   { action: 'fitAll', codes: ['KeyF'], label: 'F', help: 'Fit the sketch in view', group: 'view' },
   { action: 'zoomIn', codes: ['Equal', 'NumpadAdd'], label: '=', help: 'Zoom in (or mouse wheel)', group: 'view' },
   { action: 'zoomOut', codes: ['Minus', 'NumpadSubtract'], label: '-', help: 'Zoom out (or mouse wheel)', group: 'view' },
-  { action: 'cyclePlane', codes: ['Tab'], label: 'Tab', help: 'Cycle work plane XY -> XZ -> YZ (pins; A returns to auto)', group: 'plane' },
+  { action: 'cyclePlane', codes: ['Tab'], label: 'Tab', help: 'Cycle work plane XY -> XZ -> YZ (pins; A returns to auto; while extruding: switch face)', group: 'plane' },
   { action: 'toggleAutoPlane', codes: ['KeyA'], label: 'A', help: 'Automatic / manual work plane', group: 'plane' },
   { action: 'toggleGrid', codes: ['KeyG'], label: 'G', help: 'Grid snap on / off', group: 'plane' },
   { action: 'undo', codes: ['KeyZ'], mods: { primary: true, shift: false }, label: 'Ctrl+Z', help: 'Undo', group: 'edit' },
   { action: 'redo', codes: ['KeyZ'], mods: { primary: true, shift: true }, label: 'Ctrl+Shift+Z', help: 'Redo', group: 'edit' },
   { action: 'redo', codes: ['KeyY'], mods: { ctrl: true }, label: 'Ctrl+Y', help: 'Redo', group: 'edit' },
-  { action: 'delete', codes: ['Delete', 'Backspace'], mods: { primary: false }, label: 'Delete', help: 'Delete the hovered (or last) entity', group: 'edit' },
+  { action: 'delete', codes: ['Delete', 'Backspace'], mods: { primary: false }, label: 'Delete', help: 'Delete the selected, hovered, or last entity', group: 'edit' },
   { action: 'clear', codes: ['Backspace'], mods: { primary: true }, label: 'Ctrl+Backspace', help: 'Clear the whole sketch', group: 'edit' },
-  { action: 'cancel', codes: ['Escape'], label: 'Esc', help: 'Cancel the stroke / close overlays', group: 'edit' },
-  { action: 'measure', codes: ['KeyL'], label: 'L', help: 'Type a length (4000) or size (4000x3000)', group: 'tools' },
+  { action: 'cancel', codes: ['Escape'], label: 'Esc', help: 'Cancel stroke or extrusion / deselect / close overlays', group: 'edit' },
+  { action: 'select', codes: ['KeyS'], mods: { primary: false, ctrl: false, alt: false }, label: 'S', help: 'Select the shape under the cursor (or pinch / click)', group: 'edit' },
+  { action: 'extrude', codes: ['KeyQ'], mods: { primary: false, ctrl: false, alt: false }, label: 'Q', help: 'Push/pull the selected rectangle, circle, or solid: pick a face, pinch and move', group: 'tools' },
+  { action: 'confirm', codes: ['Enter', 'NumpadEnter'], label: 'Enter', help: 'Apply the extrusion preview (Q also applies)', group: 'tools' },
+  { action: 'measure', codes: ['KeyL'], label: 'L', help: 'Type a length, circle diameter, rectangle size, or extrusion depth', group: 'tools' },
   { action: 'export', codes: ['KeyE'], label: 'E', help: 'Export to FreeCAD', group: 'tools' },
   { action: 'toggleNavAssist', codes: ['KeyN'], label: 'N', help: 'Off-hand palm navigation on / off', group: 'tools' },
   { action: 'togglePip', codes: ['KeyP'], label: 'P', help: 'Camera picture-in-picture', group: 'tools' },
@@ -164,6 +170,7 @@ export const GROUP_TITLES: Record<BindingGroup, string> = {
 export const MOUSE_HELP: readonly { label: string; help: string }[] = [
   { label: 'Move', help: 'Drives the cursor when no hand is tracked' },
   { label: 'Left drag', help: 'Draw (same as Space)' },
+  { label: 'Left click', help: 'Select a shape; Q then left drag up/down to extrude' },
   { label: 'Right drag', help: 'Orbit (same as Shift)' },
   { label: 'Middle drag', help: 'Pan (same as Ctrl)' },
   { label: 'Wheel', help: 'Zoom toward the cursor (faster spin zooms faster)' },

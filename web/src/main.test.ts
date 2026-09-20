@@ -145,6 +145,9 @@ vi.mock('./render/sketch-renderer', async (importOriginal) => {
     setGhost(points: Vec3[] | null, closed: boolean, label: { text: string; at: Vec3 } | null) {
       this.ghost = points ? { points, closed, label } : null;
     }
+    setSelected() {}
+    setExtrusion() {}
+    setActiveFace() {}
     fadeOut() {}
     tick() {}
   }
@@ -255,7 +258,7 @@ vi.mock('./ui/input-panel', () => {
 
 vi.mock('./scene/spatial-cursor-visual', () => {
   class SpatialCursorVisual {
-    readonly group = { name: 'spatial-cursor' };
+    readonly group = new THREE.Group();
     update() {}
   }
   return { SpatialCursorVisual };
@@ -743,8 +746,8 @@ describe('stroke guards', () => {
   it('refuses a free start on a nearly edge-on pinned plane', () => {
     api.press('viewTop');
     finishTransitions();
-    dispatchWindow('keydown', keyEvent('ShiftLeft'));
     api.setCursor(v2(400, 300));
+    dispatchWindow('keydown', keyEvent('ShiftLeft'));
     api.setCursor(v2(400, 541));
     dispatchWindow('keyup', keyEvent('ShiftLeft'));
     api.setCursor(v2(400, 300));
@@ -1276,7 +1279,7 @@ describe('depth planar snapping', () => {
     }
   });
 
-  it('snaps a 20° planar stroke to a world axis', () => {
+  it('snaps a 20â¬â planar stroke to a world axis', () => {
     enablePlanarDepth();
     const angle = (20 * Math.PI) / 180;
     strokeThroughSpatial([
@@ -1293,7 +1296,7 @@ describe('depth planar snapping', () => {
     }
   });
 
-  it('prompts for a 45° planar angle and applies the typed value', () => {
+  it('prompts for a 45â¬â planar angle and applies the typed value', () => {
     enablePlanarDepth();
     strokeThroughSpatial([v3(0, 0, 0), v3(400, 400, 10), v3(800, 800, 20)]);
     expect(api.lastRecognition()?.reason).toBe('plane-locked line');

@@ -1,6 +1,6 @@
 # AirCAD
 
-A spatial CAD sketching app: draw lines and rectangles in millimetres on a 3D work plane using a webcam-tracked fingertip (stand-in for a digital pen) or the mouse. The browser owns the CAD model; Python only tracks the hand and can export the sketch to FreeCAD.
+A spatial CAD sketching app: draw lines, rectangles, and circles in millimetres on a 3D work plane, then extrude rectangles into boxes and circles into cylinders using a webcam-tracked fingertip (stand-in for a digital pen) or the mouse. The browser owns the CAD model; Python tracks the hand and can export the model to FreeCAD.
 
 ## Requirements
 
@@ -83,9 +83,25 @@ If Windows or macOS asked for camera access on first launch, allow it and start 
 4. **Tab** until **YZ Right** and repeat the same border-start stroke on a side border; do the same on the remaining borders (Tab back to **XZ** or **YZ** so the plane stands on that border) to raise the other walls.
 5. Roof: hover a wall top corner, hold **Space** and draw a straight line to the opposite wall top. Vertex snaps connect the ends.
 6. **A** switches to optional **Auto** mode, where the work plane follows the view and what you hover — a face interior, an edge, or a vertex. Check the plane preview before drawing and press **Tab** or **1 / 2 / 3** to pick a plane when the choice is ambiguous. The plane locks while you draw and never moves mid-stroke.
-7. Press **L** to type an exact size (`4000` or `4000x3000`) for the hovered or last entity, **E** to export to FreeCAD.
+7. Press **L** to type an exact size (`4000` or `4000x3000`) for the selected, hovered, or last entity, **E** to export to FreeCAD.
 
 **H** opens the same walkthrough plus the full key list.
+
+## Draw a circle
+
+Hold **Space** or left-drag around most of a circle — roughly two-thirds of the way around or more. You can leave a sizable gap, wobble, or draw a circular squiggle; release to fit a clean circle automatically. The circle is stored as a true circle — center, radius, and plane — not a polygon, and works on the XY, XZ, and YZ work planes. Select it and press **L** to set its diameter. Press **Q**, pull the highlighted cap with a pinch or drag, then press **Enter** (or **Q**) to commit a cylinder. **L** during the preview sets an exact signed pull distance, such as `500` or `-250`.
+
+## Extrude with your hand
+
+1. Draw a closed rectangle or circle. New shapes are selected automatically. To select another shape, point inside it and pinch your thumb and index finger, click it, or press **S**. The selected outline stays highlighted.
+2. Press **Q** to start push/pull. The face most facing the camera is highlighted — hover another face of the same shape (while not pinching) or press **Tab** to switch which side you push/pull. **E** remains the FreeCAD export shortcut.
+3. Pinch thumb + index and move to pull the highlighted face **out**, or back to push it **in**. Pulling a box cap sets its depth; pulling a side face widens the box. Pulling a cylinder cap changes its signed depth. Grid snapping applies to the pull distance. If tracking is lost, the preview freezes; show your hand, release, then pinch again to resume.
+4. Release the pinch to pause. Reposition your hand and pinch again to continue. Hold **Shift** to orbit or **Ctrl** to pan even during a pull; the preview stays fixed while you move the view. Release the navigation key to continue pulling from the current position without a depth jump.
+5. Press **Enter** or **Q** to apply, or **Esc** to cancel. **L** types an exact pull distance for the active face (`500`, `-250`, or `2 m`); **0** shows the result in isometric view. A zero-depth preview cannot be applied.
+
+Without a webcam, use **Q**, then **left-drag** (or hold **Space** while moving) along the highlighted direction. Release to pause, then **Enter** to apply. Extrusion is one undoable edit; undo restores the original rectangle or circle. Select an existing box or cylinder and press **Q** to push/pull a face. **L** on a solid edits depth with one value or a box base size with `width x height`.
+
+Extrusion supports closed rectangular and circular profiles. Lines cannot be extruded, and hole cutting is outside the current scope. Cylinders have circular end caps and curved sides; cap pulls preserve the circle's radius and axis while the active cap moves along that axis.
 
 ## Controls
 
@@ -95,7 +111,7 @@ Keys stand in for pen buttons. Click the browser window first so it receives inp
 
 | Key | Action |
 | --- | --- |
-| **Space** | Pen button 1 — hold to draw a line or closed rectangle, release to commit |
+| **Space** | Pen button 1 — hold to draw a line, closed rectangle, or rough circle, release to commit |
 | **Shift** | Pen button 2 — hold and move to orbit |
 | **Ctrl** | Pen button 3 — hold and move to pan (Cmd is used for edit shortcuts on macOS) |
 | **X / Y / Z** | Hold while drawing to lock to that world axis |
@@ -117,7 +133,7 @@ Views glide smoothly into place, and releasing an orbit within about 6° of a vi
 | Key | Action |
 | --- | --- |
 | **A** | Automatic / manual work plane (auto picks XY / XZ / YZ from the view and what you hover) |
-| **Tab** | Cycle work plane XY → XZ → YZ and pin it (A returns to auto) |
+| **Tab** | Cycle work plane XY → XZ → YZ and pin it (A returns to auto; while extruding: switch the pushed face) |
 | **G** | Grid snap on / off |
 | **N** | Off-hand palm navigation on / off (one open palm orbits, two palms pan/zoom) |
 
@@ -131,10 +147,13 @@ Roughly matching adjacent rectangles align along the entire shared border, with 
 | --- | --- |
 | **Ctrl+Z** / **Cmd+Z** | Undo |
 | **Ctrl+Shift+Z** / **Ctrl+Y** | Redo |
-| **Delete** / **Backspace** | Delete the hovered (or last) entity |
+| **Delete** / **Backspace** | Delete the selected, hovered, or last entity |
 | **Ctrl+Backspace** / **Cmd+Backspace** | Clear the sketch |
-| **Esc** | Cancel the current stroke / close overlays |
-| **L** | Type a length (`4000`) or size (`4000x3000`) |
+| **Esc** | Cancel the current stroke / extrusion, deselect, or close overlays |
+| **S** | Select the shape under the cursor (also pinch or click) |
+| **Q** | Start push/pull on a selected rectangle, circle, or solid; press again to apply |
+| **Enter** | Apply the extrusion preview |
+| **L** | Type a line length, circle diameter, rectangle size (W x H), or extrusion depth; mm/cm/m accepted |
 | **E** | Export to FreeCAD |
 | **P** | Camera picture-in-picture |
 | **H** | Help overlay |
@@ -159,7 +178,7 @@ If you move or unplug the camera, press **Retry** and set the origin again. Cali
 
 ### Mouse (no webcam)
 
-Move the pointer to drive the cursor. Left drag draws, right drag orbits, middle drag pans, wheel zooms toward the cursor (faster spin zooms faster).
+Move the pointer to drive the cursor. Left click selects; left drag draws (or adjusts depth in extrusion mode), right drag orbits, middle drag pans, wheel zooms toward the cursor (faster spin zooms faster).
 
 ## Coordinate system
 
@@ -180,7 +199,7 @@ On Windows use `.venv\Scripts\python.exe -u server.py --no-camera --no-browser`.
 
 ## Send a sketch to FreeCAD
 
-Finish at least one line or rectangle, then press **E**. The bridge writes millimetre entities to `.runtime/freecad_drawing.json`, starts FreeCAD as a separate GUI process, and opens an isometric view. Rectangles become faces; lines become wires. Export is a one-time snapshot: drawing afterward does not change an already opened FreeCAD document.
+Finish at least one line, rectangle, or extrusion, then press **E**. The bridge writes millimetre entities to `.runtime/freecad_drawing.json`, starts FreeCAD as a separate GUI process, and opens an isometric view. Rectangles become faces; lines become wires; extrusions become closed solids. Apply or cancel an extrusion preview before exporting. Export is a one-time snapshot: drawing afterward does not change an already opened FreeCAD document.
 
 The bridge looks for `FreeCAD` on `PATH`, the standard macOS app executable, and typical Windows install folders under Program Files. If FreeCAD is installed elsewhere:
 
@@ -212,7 +231,7 @@ REM Windows
 cd web && npm test
 ```
 
-Python tests use synthetic observations and never require a webcam. The TypeScript tests cover recognition, snapping, work planes, sketch history, and measurements.
+Python tests use synthetic observations and never require a webcam. The TypeScript tests cover recognition, snapping, work planes, sketch history, measurements, face selection, and extrusion gestures including tracking loss. Python tests cover solid export validation and import as well.
 
 ## Troubleshooting
 
@@ -221,7 +240,7 @@ Python tests use synthetic observations and never require a webcam. The TypeScri
 - **Browser shows “web UI is not built yet”:** run **install.bat** / **install.command**, or `npm install && npm run build` inside `web/`.
 - **Keys do nothing:** click the 3D viewport so it has focus. If a measurement field is open, finish or cancel it first.
 - **Plane is edge-on:** press **A** for auto, **Tab** or **1 / 2 / 3**, or orbit with **Shift**.
-- **Palm navigation moves unexpectedly:** press **N** to turn it off. Drawing (**Space**) always wins over palm nav.
+- **Palm navigation moves unexpectedly:** press **N** to turn it off. Drawing (**Space**) always wins over palm nav; held **Shift** / **Ctrl** deliberately take priority to move the camera.
 - **FreeCAD not found:** set `FREECAD_EXECUTABLE` as above and confirm `freecad_import.py` is beside `server.py`.
 - **Depth camera will not start:** install `pip install -r requirements-depth.txt` (DepthAI 2.30.0.0), use USB3, and close `track-finger.py` if it still has the device.
 - **Origin needed:** press **O** and hold still for about half a second. Unplugging the OAK invalidates calibration.

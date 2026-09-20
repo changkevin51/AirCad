@@ -9,6 +9,7 @@ Snapshot format (version 2, produced by :mod:`freecad_bridge`)::
     {"version": 2, "units": "mm",
      "entities": [{"type": "line", "points": [[x, y, z], [x, y, z]]},
                   {"type": "rect", "points": [[x, y, z] * 4]},
+                  {"type": "extrusion", "points": [[x, y, z] * 4], "vector": [dx, dy, dz]},
                   {"type": "polyline", "points": [[x, y, z], ...]}]}
 """
 
@@ -25,7 +26,7 @@ from typing import Any, Iterable
 SCALE = 1.0
 SNAPSHOT_ENV = "AIRCAD_FREECAD_SNAPSHOT"
 DEFAULT_SNAPSHOT = Path(__file__).resolve().parent / ".runtime" / "freecad_drawing.json"
-SUPPORTED_TYPES = {"line", "rect", "polyline"}
+SUPPORTED_TYPES = {"line", "rect", "polyline", "extrusion"}
 LINE_COLOR = (1.0, 0.8, 0.1)
 FACE_COLOR = (0.55, 0.7, 0.95)
 
@@ -61,6 +62,34 @@ def converted_points(points: Iterable[Iterable[object]]) -> tuple[tuple[float, f
     return tuple(converted)
 
 
+def validated_extrusion_vector(points, vector) -> tuple[float, float, float]:
+    """Validate a rectangular solid before launching FreeCAD or creating a document."""
+
+    if not isinstance(vector, (list, tuple)) or len(vector) != 3:
+        raise ValueError("an extrusion needs a three-coordinate vector")
+    direction = _point(vector)
+    depth = math.hypot(*direction)
+    if depth < 1e-6:
+        raise ValueError("extrusion depth must be non-zero")
+    if len(points) != 4:
+        raise ValueError("an extrusion needs exactly four profile points")
+    a, b, c, d = points
+    u = tuple(b[i] - a[i] for i in range(3))
+    v = tuple(d[i] - a[i] for i in range(3))
+    width, height = math.hypot(*u), math.hypot(*v)
+    if width < 1e-6 or height < 1e-6:
+        raise ValueError("extrusion profile has a zero-length side")
+    if abs(sum(u[i] * v[i] for i in range(3)) / width / height) > 1e-6:
+        raise ValueError("extrusion profile must be rectangular")
+    if math.hypot(*(c[i] - b[i] - v[i] for i in range(3))) > max(width, height) * 1e-6:
+        raise ValueError("extrusion profile must be a planar rectangle")
+    # Both positive and negative directions are valid, but must be normal to the profile.
+    if any(abs(sum(edge[i] * direction[i] for i in range(3)) / size / depth) > 1e-6
+           for edge, size in ((u, width), (v, height))):
+        raise ValueError("extrusion vector must be perpendicular to its profile")
+    return direction
+
+
 def read_snapshot(path: Path) -> list[dict[str, Any]]:
     """Read and validate the bridge's JSON snapshot into entity dicts."""
 
@@ -85,19 +114,23 @@ def read_snapshot(path: Path) -> list[dict[str, Any]]:
         converted = converted_points(points)
         if kind == "line" and len(points) != 2:
             raise ValueError("a line needs exactly two points")
-        if kind == "rect" and len(points) != 4:
-            raise ValueError("a rect needs exactly four points")
+        if kind in {"rect", "extrusion"} and len(points) != 4:
+            raise ValueError(f"a {kind} needs exactly four points")
         if len(converted) < 2:
             raise ValueError("an entity needs at least two distinct points")
-        entities.append({"type": kind, "points": [list(point) for point in points]})
+        normalized = {"type": kind, "points": [list(point) for point in points]}
+        if kind == "extrusion":
+            normalized["vector"] = validated_extrusion_vector(converted, entity.get("vector"))
+        entities.append(normalized)
     return entities
 
 
-def _make_shape(part, app, kind: str, points):
+def _make_shape(part, app, kind: str, points, vector=None):
     vectors = [app.Vector(x, y, z) for x, y, z in points]
-    if kind == "rect" and len(vectors) == 4:
+    if kind in {"rect", "extrusion"} and len(vectors) == 4:
         wire = part.makePolygon(vectors + [vectors[0]])
-        return part.Face(wire)
+        face = part.Face(wire)
+        return face.extrude(app.Vector(*vector)) if kind == "extrusion" else face
     return part.makePolygon(vectors)
 
 
@@ -111,8 +144,8 @@ def import_drawing(snapshot_path: Path):
 
     entities = read_snapshot(snapshot_path)
     document = app.newDocument("AirCADSketch")
-    counters = {"line": 0, "rect": 0, "polyline": 0}
-    labels = {"line": "Line", "rect": "Rectangle", "polyline": "Polyline"}
+    counters = {"line": 0, "rect": 0, "polyline": 0, "extrusion": 0}
+    labels = {"line": "Line", "rect": "Rectangle", "polyline": "Polyline", "extrusion": "Extrusion"}
     for entity in entities:
         kind = entity["type"]
         points = converted_points(entity["points"])
@@ -121,7 +154,7 @@ def import_drawing(snapshot_path: Path):
         counters[kind] += 1
         feature = document.addObject("Part::Feature", f"{labels[kind]}{counters[kind]}")
         feature.Label = f"{labels[kind]} {counters[kind]}"
-        feature.Shape = _make_shape(part, app, kind, points)
+        feature.Shape = _make_shape(part, app, kind, points, entity.get("vector"))
         view_object = getattr(feature, "ViewObject", None)
         if view_object is not None:
             view_object.Visibility = True
@@ -129,11 +162,11 @@ def import_drawing(snapshot_path: Path):
                 view_object.LineColor = LINE_COLOR
             if hasattr(view_object, "LineWidth"):
                 view_object.LineWidth = 3.0
-            if kind == "rect":
+            if kind in {"rect", "extrusion"}:
                 if hasattr(view_object, "ShapeColor"):
                     view_object.ShapeColor = FACE_COLOR
                 if hasattr(view_object, "Transparency"):
-                    view_object.Transparency = 40
+                    view_object.Transparency = 15 if kind == "extrusion" else 40
 
     document.recompute()
     show_main_window = getattr(gui, "showMainWindow", None)

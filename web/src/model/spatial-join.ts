@@ -310,8 +310,11 @@ export function joinEndpoints(input: EntityInput, targets: JoinTargets, radius: 
     const line = length(dir) > 1e-12 ? { origin: input.a, dir } : undefined;
     return { type: 'line', a: joinPoint(input.a, targets, radius, line), b: joinPoint(input.b, targets, radius, line) };
   }
+  if (input.type !== 'rect' && input.type !== 'extrusion') return input;
   const corners = pullRectCornersWorld(input.corners, targets.vertices, radius, targets.segments);
-  return { type: 'rect', corners: corners as [Vec3, Vec3, Vec3, Vec3] };
+  return input.type === 'extrusion'
+    ? { type: 'extrusion', corners: corners as [Vec3, Vec3, Vec3, Vec3], depth: input.depth }
+    : { type: 'rect', corners: corners as [Vec3, Vec3, Vec3, Vec3] };
 }
 
 export function shouldCloseLoop(start: Vec3, end: Vec3, radius: number): boolean {

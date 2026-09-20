@@ -118,10 +118,12 @@ kbd {
 .chip.warn .chip__value {
   color: var(--warn);
 }
-.chip.mode-drawing {
+.chip.mode-drawing,
+.chip.mode-extruding {
   border-color: var(--ok);
 }
-.chip.mode-drawing .chip__value {
+.chip.mode-drawing .chip__value,
+.chip.mode-extruding .chip__value {
   color: var(--ok);
 }
 .chip.mode-orbit .chip__value,
@@ -158,6 +160,14 @@ kbd {
   color: var(--warn);
   font-size: 12px;
   pointer-events: none;
+  max-width: min(640px, calc(100vw - 24px));
+  line-height: 1.5;
+}
+
+.hint--extrusion {
+  color: var(--ok);
+  background: var(--panel);
+  border-color: var(--ok);
 }
 
 .keybar {
@@ -166,7 +176,12 @@ kbd {
   bottom: 14px;
   transform: translateX(-50%);
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 14px;
+  row-gap: 6px;
+  width: max-content;
+  max-width: calc(100vw - 24px);
   padding: 6px 14px;
   border-radius: 10px;
   background: var(--panel);
@@ -393,6 +408,9 @@ kbd {
   bottom: 60px;
   transform: translateX(-50%);
   display: flex;
+  flex-wrap: wrap;
+  width: max-content;
+  max-width: calc(100vw - 24px);
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
@@ -576,4 +594,33 @@ kbd {
 
 .input-panel--busy {
   opacity: 0.7;
+}
+
+@media (max-width: 640px) {
+  .hud {
+    max-width: calc(100vw - 24px);
+    gap: 4px;
+  }
+
+  .chip {
+    padding: 4px 8px;
+  }
+
+  .pip {
+    top: auto;
+    bottom: 110px;
+    width: 130px;
+  }
+
+  .measure {
+    bottom: 120px;
+  }
+
+  .measure label {
+    flex-basis: 100%;
+  }
+
+  .help__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

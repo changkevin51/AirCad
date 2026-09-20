@@ -101,6 +101,26 @@ class FreeCADBridgeTests(unittest.TestCase):
             {"type": "polyline", "points": [[1, 2, 0], [3.25, 4, 5]]},
         )
 
+    def test_extrusions_preserve_their_signed_vector(self) -> None:
+        solid = {"type": "extrusion", "points": RECT["points"], "vector": [0, -750, 0]}
+        self.assertEqual(freecad_bridge.normalize_entity(solid), solid)
+
+    def test_invalid_extrusions_fail_before_launch(self) -> None:
+        solid = {"type": "extrusion", "points": RECT["points"], "vector": [0, 750, 0]}
+        malformed = [
+            {**solid, "vector": vector}
+            for vector in (None, [0, 0], [0, 0, 0], [0, float("inf"), 0], [0, True, 0], [1, 0, 0], [0, "750", 0])
+        ]
+        malformed.extend([
+            {**solid, "points": [[0, 0, 0]] * 4},
+            {**solid, "points": [[0, 0, 0], [10, 0, 0], [10, 5, 10], [0, 0, 10]]},
+        ])
+        with mock.patch.object(freecad_bridge, "_launch_freecad") as launch:
+            for entity in malformed:
+                with self.subTest(entity=entity), self.assertRaises(ValueError):
+                    freecad_bridge.send_to_freecad([entity])
+        launch.assert_not_called()
+
     def test_windows_candidates_include_program_files_install(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
         try:
@@ -108,10 +128,12 @@ class FreeCADBridgeTests(unittest.TestCase):
             exe.parent.mkdir(parents=True)
             exe.write_bytes(b"")
             with (
-                mock.patch.object(freecad_bridge.os, "name", "nt"),
+                # Patch the bridge's view of os, not pathlib's global os.name.
+                mock.patch.object(freecad_bridge, "os", wraps=freecad_bridge.os) as bridge_os,
                 mock.patch.object(freecad_bridge, "sys_platform_is_macos", return_value=False),
                 mock.patch.object(freecad_bridge, "_windows_search_roots", return_value=(Path(temporary_directory.name),)),
             ):
+                bridge_os.name = "nt"
                 candidates = freecad_bridge._freecad_candidates()
             self.assertIn(exe, candidates)
             self.assertIn("FreeCAD.exe", candidates)
@@ -123,7 +145,8 @@ class FreeCADBridgeTests(unittest.TestCase):
         try:
             exe = Path(temporary_directory.name) / "FreeCAD.exe"
             exe.write_bytes(b"")
-            with mock.patch.object(freecad_bridge.os, "name", "nt"):
+            with mock.patch.object(freecad_bridge, "os", wraps=freecad_bridge.os) as bridge_os:
+                bridge_os.name = "nt"
                 resolved = freecad_bridge._resolve_executable(str(exe))
             self.assertEqual(resolved, exe)
         finally:
@@ -158,8 +181,8 @@ class FreeCADBridgeTests(unittest.TestCase):
             macro = Path(command[2])
             self.assertEqual(macro.suffix, ".FCMacro")
             macro_source = macro.read_text(encoding="utf-8")
-            self.assertIn(repr(str(importer)), macro_source)
-            self.assertIn(repr(str(snapshot)), macro_source)
+            self.assertIn(repr(str(importer.resolve())), macro_source)
+            self.assertIn(repr(str(snapshot.resolve())), macro_source)
             self.assertIn("_module.main(_snapshot)", macro_source)
             self.assertEqual(kwargs["env"][freecad_bridge.SNAPSHOT_ENV], str(snapshot))
             self.assertTrue(kwargs["start_new_session"])
