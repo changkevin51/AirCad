@@ -36,6 +36,18 @@ describe('keymap', () => {
     expect(resolvePress(key('KeyR'), 'other')).toBeNull();
   });
 
+  it('resolves M as move only without modifiers', () => {
+    expect(resolvePress(key('KeyM'), 'mac')).toBe('move');
+    expect(resolvePress(key('KeyM'), 'other')).toBe('move');
+    expect(resolvePress(key('KeyM', { metaKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyM', { ctrlKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyM', { ctrlKey: true }), 'other')).toBeNull();
+    expect(resolvePress(key('KeyM', { altKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyM', { altKey: true }), 'other')).toBeNull();
+    expect(resolveHold(key('KeyM'), 'mac')).toBeNull();
+    expect(resolveHold(key('KeyM'), 'other')).toBeNull();
+  });
+
   it('keeps plain Z as an axis lock but not with the primary modifier', () => {
     expect(resolveHold(key('KeyZ'), 'other')).toBe('lockZ');
     expect(resolveHold(key('KeyZ', { ctrlKey: true }), 'other')).toBeNull();

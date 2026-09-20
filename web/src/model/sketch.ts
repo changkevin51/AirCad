@@ -311,6 +311,12 @@ export function entityPoints(entity: Entity): Vec3[] {
   return [...entity.corners, ...entity.corners.map((corner) => add(corner, offset))];
 }
 
+export function translateEntity(entity: Entity, offset: Vec3): Entity {
+  if (entity.type === 'line') return { ...entity, a: add(entity.a, offset), b: add(entity.b, offset) };
+  if (entity.type === 'circle' || entity.type === 'cylinder') return { ...entity, center: add(entity.center, offset) };
+  return { ...entity, corners: entity.corners.map((corner) => add(corner, offset)) as RectEntity['corners'] };
+}
+
 export function entityTriangles(entity: Entity): [Vec3, Vec3, Vec3][] {
   if (entity.type === 'circle') {
     const points = circlePoints(entity);

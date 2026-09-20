@@ -1,18 +1,20 @@
 import {
   describeEntity,
   formatMm,
+  entityPoints,
   extrusionOffset,
   isExtrudableProfile,
   isValidCircle,
   lineLength,
   makeRect,
   rectFrame,
+  translateEntity,
   type Entity,
   type CircleGeometry,
   type Sketch,
   type SolidEntity,
 } from './sketch';
-import { add, distance, nearlyEqual, normalize, scale, sub, toArray, type Vec3 } from './vec';
+import { add, distance, isFinite3, nearlyEqual, normalize, scale, sub, toArray, v3, type Vec3 } from './vec';
 
 export interface DimensionSpec {
   /** New length for a line, in mm. */
@@ -119,6 +121,19 @@ export class Commands {
   deleteLast(): CommandResult {
     const entity = this.sketch.last;
     return entity ? this.deleteEntity(entity.id) : { ok: false, error: 'nothing to delete' };
+  }
+
+  move(id: string, offset: Vec3): CommandResult {
+    const entity = this.sketch.get(id);
+    if (!entity) return { ok: false, error: 'Select a shape to move' };
+    if (!isFinite3(offset)) return { ok: false, error: 'Move distances must be finite' };
+    if (nearlyEqual(offset, v3(0, 0, 0), 1e-6)) return { ok: true, entity, message: 'Position unchanged' };
+    const moved = translateEntity(entity, offset);
+    if (!entityPoints(moved).every(isFinite3) || (moved.type === 'extrusion' && !isExtrudableProfile(moved.corners))) {
+      return { ok: false, error: 'Move is outside the supported coordinate range' };
+    }
+    const next = this.sketch.replaceEntity(id, moved, `move ${entity.type}`);
+    return next ? { ok: true, entity: next, message: `Moved ${describeEntity(next)}` } : { ok: false, error: 'entity vanished' };
   }
 
   extrude(id: string, depth: number, geometry?: [Vec3, Vec3, Vec3, Vec3] | CircleGeometry): CommandResult {

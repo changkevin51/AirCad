@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Commands, parseDimensionSpec } from './commands';
-import { makeRect, Sketch, type CircleEntity, type LineEntity, type RectEntity, type SolidEntity } from './sketch';
+import { makeRect, Sketch, type CircleEntity, type EntityInput, type LineEntity, type RectEntity, type SolidEntity } from './sketch';
 import { v3 } from './vec';
 
 describe('parseDimensionSpec', () => {
@@ -220,5 +220,99 @@ describe('Commands.extrudeMany', () => {
     expect(sketch.serialize()).toBe(before);
     expect(reasons).toEqual([]);
     expect(commands.undo()).toBe('extrude 100 mm');
+  });
+});
+
+describe('Commands.move', () => {
+  const inputs: EntityInput[] = [
+    { type: 'line', a: v3(10, 20, 30), b: v3(110, 20, 30) },
+    { type: 'rect', corners: makeRect(v3(10, 20, 30), v3(1, 0, 0), v3(0, 1, 0), 100, 80) },
+    { type: 'circle', center: v3(10, 20, 30), normal: v3(0, 1, 0), radius: 25 },
+    { type: 'extrusion', corners: makeRect(v3(10, 20, 30), v3(1, 0, 0), v3(0, 1, 0), 100, 80), depth: -50 },
+    { type: 'cylinder', center: v3(10, 20, 30), normal: v3(0, 1, 0), radius: 25, depth: -50 },
+  ];
+
+  it.each(inputs.map((input) => [input.type, input] as const))('translates a %s as one undoable edit', (type, input) => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const entity = sketch.addEntity(input);
+    const bystander = sketch.addEntity({ type: 'line', a: v3(0, 0, 0), b: v3(1, 0, 0) });
+    const original = structuredClone(entity);
+    const serialized = sketch.serialize();
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+
+    const result = commands.move(entity.id, v3(25, -15, 40));
+    expect(result.ok).toBe(true);
+    const moved = sketch.get(entity.id)!;
+    expect(moved).not.toBe(entity);
+    expect(moved.id).toBe(entity.id);
+    expect(moved.type).toBe(type);
+    if (moved.type === 'line') {
+      expect(moved.a).toEqual(v3(35, 5, 70));
+      expect(moved.b).toEqual(v3(135, 5, 70));
+    } else if (moved.type === 'circle' || moved.type === 'cylinder') {
+      expect(moved.center).toEqual(v3(35, 5, 70));
+      expect(moved.normal).toEqual(v3(0, 1, 0));
+      expect(moved.radius).toBe(25);
+      if (moved.type === 'cylinder') expect(moved.depth).toBe(-50);
+    } else {
+      expect(moved.corners).toEqual([v3(35, 5, 70), v3(135, 5, 70), v3(135, 85, 70), v3(35, 85, 70)]);
+      if (moved.type === 'extrusion') expect(moved.depth).toBe(-50);
+    }
+    expect(entity).toEqual(original);
+    expect(sketch.get(bystander.id)).toBe(bystander);
+    expect(reasons).toEqual([`move ${type}`]);
+
+    const movedSerialized = sketch.serialize();
+    expect(commands.undo()).toBe(`move ${type}`);
+    expect(sketch.serialize()).toBe(serialized);
+    expect(commands.redo()).toBe(`move ${type}`);
+    expect(sketch.serialize()).toBe(movedSerialized);
+  });
+
+  it('rejects missing ids and non-finite offsets without touching history', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const entity = sketch.addEntity({ type: 'line', a: v3(0, 0, 0), b: v3(10, 0, 0) });
+    const serialized = sketch.serialize();
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+    expect(commands.move('missing', v3(1, 0, 0)).ok).toBe(false);
+    for (const bad of [v3(NaN, 0, 0), v3(0, Infinity, 0), v3(0, 0, -Infinity)]) {
+      expect(commands.move(entity.id, bad).ok).toBe(false);
+    }
+    expect(sketch.serialize()).toBe(serialized);
+    expect(reasons).toEqual([]);
+    expect(commands.undo()).toBe('add line');
+  });
+
+  it('treats a zero offset as a no-op that keeps the redo stack', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const entity = sketch.addEntity({ type: 'rect', corners: makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 10, 10) });
+    expect(commands.move(entity.id, v3(10, 0, 0)).ok).toBe(true);
+    commands.undo();
+    const before = sketch.get(entity.id);
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+    const result = commands.move(entity.id, v3(0, 0, 0));
+    expect(result).toMatchObject({ ok: true, message: 'Position unchanged' });
+    if (result.ok) expect(result.entity).toBe(before);
+    expect(reasons).toEqual([]);
+    expect(commands.redo()).toBe('move rect');
+  });
+
+  it('rejects a move that overflows coordinates without mutation or history', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const entity = sketch.addEntity({ type: 'line', a: v3(Number.MAX_VALUE, 0, 0), b: v3(0, 0, 0) });
+    const serialized = sketch.serialize();
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+    expect(commands.move(entity.id, v3(Number.MAX_VALUE, 0, 0)).ok).toBe(false);
+    expect(sketch.serialize()).toBe(serialized);
+    expect(sketch.get(entity.id)).toBe(entity);
+    expect(reasons).toEqual([]);
   });
 });
