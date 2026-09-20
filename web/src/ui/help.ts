@@ -72,7 +72,7 @@ export class HelpOverlay {
         return `<h3>Getting started</h3>
           ${paragraph('AirCAD is a sketch-first modeler: you draw on a work plane, then push or pull shapes into solids. Everything is in millimetres; typed values also accept cm and m.')}
           <ol>
-            <li>Left-drag on the canvas — or hold <kbd>Space</kbd> and move — to draw. A straight stroke becomes a line; a closed loop becomes a rectangle.</li>
+            <li>Left-drag on the canvas — or hold <kbd>Space</kbd> and move — to draw. A straight stroke becomes a line; a closed loop becomes a rectangle, polygon, or outline assembled from snapped lines.</li>
             <li>Click a shape (or press <kbd>S</kbd> under the cursor) to select it. The Model panel and the Properties inspector follow the same selection.</li>
             <li>Type exact dimensions with <kbd>L</kbd>, or edit Width/Height/Depth in the Properties inspector.</li>
             <li><kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> undo and redo; <kbd>Delete</kbd> removes the selected object.</li>
@@ -91,7 +91,7 @@ export class HelpOverlay {
       case 'push-pull':
         return `<h3>Push/Pull</h3>
           <ol>
-            <li>Select a rectangle or box and press <kbd>Q</kbd> (or the Push/Pull button). The face most facing you is highlighted — hover another face, press <kbd>Tab</kbd>, or use the Face select in the inspector.</li>
+            <li>Select a closed outline or solid and press <kbd>Q</kbd> (or the Push/Pull button). The face most facing you is highlighted — hover another face, press <kbd>Tab</kbd>, or use the Face select in the inspector.</li>
             <li>Left-drag or hold <kbd>Space</kbd> and move to pull the face out or push it in. Release pauses; grab again to keep adjusting.</li>
             <li>Type an exact pull distance with <kbd>L</kbd>, or use the Pull distance field in the inspector — Update preview adjusts the preview without committing.</li>
             <li><kbd>Shift</kbd>/<kbd>Ctrl</kbd> orbit and pan mid-operation; release to continue pulling without a depth jump.</li>

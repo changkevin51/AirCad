@@ -1,6 +1,6 @@
 import type { PressAction } from '../input/keymap';
 import type { PlaneKind } from '../model/plane';
-import { isExtrudableProfile, type Entity } from '../model/sketch';
+import { isExtrudableProfile, isRectangleProfile, type Entity } from '../model/sketch';
 import type { InspectorTab } from './workspace';
 
 /** Typed boundary between chrome components and the App dispatcher. */
@@ -66,12 +66,18 @@ export interface AvailabilityContext {
 
 export const STROKE_FIRST = 'Finish the current stroke first.';
 export const EXTRUSION_FIRST = 'Finish or cancel Push/Pull first.';
-export const SELECT_PROFILE = 'Select a rectangle or box.';
+export const SELECT_PROFILE = 'Select a closed outline or a solid.';
 export const SELECT_OBJECT = 'Select an object first.';
+export const CIRCLE_READONLY = 'Circle size is read-only; redraw it as a closed outline to edit.';
 
 /** Browser/inspector label: type word plus the entity's stable id. */
 export function entityLabel(entity: Entity): string {
-  const noun = entity.type === 'line' ? 'Line' : entity.type === 'rect' ? 'Rectangle' : 'Box';
+  const noun =
+    entity.type === 'line' ? 'Line'
+    : entity.type === 'rect' ? 'Rectangle'
+    : entity.type === 'polygon' ? 'Outline'
+    : entity.type === 'circle' ? 'Circle'
+    : isRectangleProfile(entity.corners) ? 'Box' : 'Solid';
   return `${noun} ${entity.id}`;
 }
 
@@ -84,9 +90,11 @@ const blocked = (ctx: AvailabilityContext): CommandAvailability | null => {
 export function pushPullAvailability(selected: Entity | null, ctx: AvailabilityContext): CommandAvailability {
   const guard = blocked(ctx);
   if (guard) return guard;
-  if (!selected || selected.type === 'line') return { enabled: false, reason: SELECT_PROFILE };
+  if (!selected || selected.type === 'line' || selected.type === 'circle') {
+    return { enabled: false, reason: selected?.type === 'circle' ? CIRCLE_READONLY : SELECT_PROFILE };
+  }
   if (!isExtrudableProfile(selected.corners)) {
-    return { enabled: false, reason: 'This shape is not a planar rectangle.' };
+    return { enabled: false, reason: 'This shape is not a simple planar outline.' };
   }
   return { enabled: true };
 }
@@ -95,6 +103,7 @@ export function dimensionsAvailability(selected: Entity | null, ctx: Availabilit
   const guard = blocked(ctx);
   if (guard) return guard;
   if (!selected) return { enabled: false, reason: SELECT_OBJECT };
+  if (selected.type === 'circle') return { enabled: false, reason: CIRCLE_READONLY };
   return { enabled: true };
 }
 

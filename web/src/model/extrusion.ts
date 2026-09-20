@@ -1,19 +1,29 @@
-import { profileFaces, pushPull, type ProfileFace } from './faces';
-import type { ExtrusionEntity, ProfileEntity } from './sketch';
-import { clone, dot2, nearlyEqual, roundTo, sub2, type Vec2 } from './vec';
+import { profileFaces, pushPull, sameProfileFace, type ProfileFace } from './faces';
+import { isExtrudableProfile, isRectangleProfile, type ExtrusionEntity, type ProfileEntity, type RectEntity } from './sketch';
+import { clone, dot2, nearlyEqual, roundTo, sub2, type Vec2, type Vec3 } from './vec';
+
+export interface FacePullMeasurement {
+  base: ProfileEntity;
+  axis: ProfileFace['axis'];
+  sign: ProfileFace['sign'];
+  edgeIndex?: number;
+  direction: 1 | -1;
+}
 
 /** A preview transaction: no model/history writes until the user confirms. */
 export class ExtrusionSession {
   /** Faces of the original profile, refreshed to track the preview geometry. */
   readonly faces: ProfileFace[];
   faceIndex: number;
-  corners: ExtrusionEntity['corners'];
+  corners: Vec3[];
   /** Signed depth along the extrusion normal of the original profile. */
   depth: number;
+  error: string | null = null;
   /** Geometry the active face's pull started from; re-snapshotted by setFace. */
   private base: ProfileEntity;
   private pull = 0;
-  private grab: { position: Vec2; pull: number } | null = null;
+  private grab: { position: Vec2; pull: number; base: ProfileEntity; axis: ProfileFace['axis']; sign: ProfileFace['sign']; edgeIndex?: number } | null = null;
+  private measurementState: FacePullMeasurement | null = null;
   private source: string | null = null;
   private needsRelease = false;
 
@@ -27,7 +37,7 @@ export class ExtrusionSession {
     this.faceIndex = Math.min(Math.max(0, faceIndex), this.faces.length - 1);
     this.base = profile;
     this.depth = profile.type === 'extrusion' ? profile.depth : 0;
-    this.corners = profile.corners.map(clone) as ExtrusionEntity['corners'];
+    this.corners = profile.corners.map(clone);
   }
 
   private get minSize(): number {
@@ -54,26 +64,48 @@ export class ExtrusionSession {
   /** Total outward distance the active face has been pulled so far (mm). */
   get pulled(): number { return this.pull; }
 
+  get measurement(): FacePullMeasurement | null {
+    return this.measurementState ? structuredClone(this.measurementState) : null;
+  }
+
   /** Faces of the current preview; the active face's quad lives here. */
   currentFaces(): ProfileFace[] {
     return profileFaces(this.preview);
   }
 
-  /** Keep this.faces' quads/centers glued to the preview by (axis, sign). */
+  /** Keep this.faces' quads/centers glued to the preview by (axis, sign, edgeIndex). */
   private refreshFaces(): void {
-    const current = this.currentFaces();
     const active = this.faces[this.faceIndex];
+    const current = this.currentFaces();
     this.faces.splice(0, this.faces.length, ...current);
-    const index = current.findIndex((face) => face.axis === active?.axis && face.sign === active?.sign);
-    this.faceIndex = index >= 0 ? index : 0;
+    const index = active ? current.findIndex((face) => sameProfileFace(face, active)) : -1;
+    this.faceIndex = index >= 0 ? index : Math.min(this.faceIndex, this.faces.length - 1);
   }
 
-  private applyPull(pull: number): void {
-    this.pull = pull;
-    const result = pushPull(this.base, this.face, pull, this.minSize);
-    this.depth = result.depth;
-    this.corners = result.corners;
-    this.refreshFaces();
+  private flatBase(): ProfileEntity {
+    const corners = structuredClone(this.corners);
+    if (corners.length === 4 && isRectangleProfile(corners)) {
+      return { id: this.profile.id, type: 'rect', corners: corners as RectEntity['corners'] };
+    }
+    return { id: this.profile.id, type: 'polygon', corners };
+  }
+
+  private applyPull(pull: number, minSize = this.minSize): boolean {
+    try {
+      const result = pushPull(this.base, this.face, pull, minSize);
+      if (!Number.isFinite(result.depth) || !isExtrudableProfile(result.corners)) {
+        throw new Error('That pull would create invalid geometry');
+      }
+      this.pull = pull;
+      this.corners = result.corners;
+      this.depth = result.depth;
+      this.error = null;
+      this.refreshFaces();
+      return true;
+    } catch (error) {
+      this.error = error instanceof Error ? error.message : 'That pull cannot be represented';
+      return false;
+    }
   }
 
   /** Switch face; only allowed when not dragging. Snapshots current geometry as the new base. */
@@ -81,8 +113,9 @@ export class ExtrusionSession {
     if (this.dragging || index < 0 || index >= this.faces.length) return false;
     if (index === this.faceIndex) return true;
     this.faceIndex = index;
-    this.base = this.preview;
+    this.base = Math.abs(this.depth) < 1e-9 ? this.flatBase() : this.preview;
     this.pull = 0;
+    this.measurementState = null;
     this.refreshFaces();
     return true;
   }
@@ -109,11 +142,21 @@ export class ExtrusionSession {
     }
     if (this.needsRelease) return;
     if (!this.grab) {
-      this.grab = { position: { ...position }, pull: this.pull };
+      const base: ProfileEntity = Math.abs(this.depth) < 1e-9 ? this.flatBase() : structuredClone(this.preview);
+      const face = this.face;
+      this.grab = { position: { ...position }, pull: this.pull, base, axis: face.axis, sign: face.sign, edgeIndex: face.edgeIndex };
+      this.measurementState = null;
       return;
     }
     // Round the delta, so starting a drag never changes an existing exact depth.
-    const delta = dot2(sub2(position, this.grab.position), along) * this.mmPerPixel;
+    const pixels = dot2(sub2(position, this.grab.position), along);
+    const delta = pixels * this.mmPerPixel;
+    if (!this.measurementState && Math.abs(pixels) >= 12 && Number.isFinite(delta) && delta !== 0) {
+      this.measurementState = {
+        base: structuredClone(this.grab.base), axis: this.grab.axis, sign: this.grab.sign, edgeIndex: this.grab.edgeIndex,
+        direction: delta > 0 ? 1 : -1,
+      };
+    }
     this.applyPull(this.grab.pull + roundTo(delta, this.step));
   }
 
@@ -124,18 +167,21 @@ export class ExtrusionSession {
   }
 
   /** Set the active face's total pull to an exact value (mm) relative to the base snapshot. */
-  setPull(distance: number): void {
-    if (!Number.isFinite(distance)) return;
-    this.applyPull(distance);
+  setPull(distance: number): boolean {
+    if (!Number.isFinite(distance)) return false;
+    this.measurementState = null;
+    const ok = this.applyPull(distance, 0);
     this.pause();
+    return ok;
   }
 
   /** Set the signed depth directly; the current geometry becomes the new base. */
   setDepth(depth: number): void {
     if (!Number.isFinite(depth)) return;
     this.depth = depth;
-    this.base = this.preview;
+    this.base = Math.abs(this.depth) < 1e-9 ? this.flatBase() : this.preview;
     this.pull = 0;
+    this.measurementState = null;
     this.refreshFaces();
     this.pause();
   }

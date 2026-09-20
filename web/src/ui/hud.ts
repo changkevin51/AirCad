@@ -34,6 +34,8 @@ export interface HudState {
   extrusion: { depth: number; dragging: boolean; face: string; pulled: number } | null;
   /** A blocking dialog (measure entry, help) owns input right now. */
   dialogOpen?: boolean;
+  /** Frozen voice draft, e.g. "Line · XY · 32.0°". */
+  voice?: string | null;
 }
 
 export interface KeyHint {
@@ -122,7 +124,7 @@ export class Hud {
     this.empty.setAttribute('data-cad-ui', '');
     const headline = document.createElement('div');
     headline.className = 'empty-state__headline';
-    headline.textContent = 'Draw a line or closed rectangle';
+    headline.textContent = 'Draw a line or closed outline';
     const sub = document.createElement('div');
     sub.className = 'empty-state__sub';
     sub.textContent = 'Left-drag or hold Space. Click to select.';
@@ -194,6 +196,9 @@ export class Hud {
 
   /** One notice slot: actionable warnings outrank normal instructions. */
   private noticeText(state: HudState): string {
+    if (state.voice) {
+      return `Voice draft frozen (${state.voice}) — you may release. Say a distance; V confirms or sends it · Esc cancels.`;
+    }
     if (state.extrusion) {
       if (state.tracking === 'lost') {
         return 'Tracking lost — show your hand to resume pulling.';

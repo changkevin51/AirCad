@@ -12,6 +12,8 @@ export const icons = {
   line: svg('<path d="M3.5 12.5 12.5 3.5"/><circle cx="3.5" cy="12.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="12.5" cy="3.5" r="1.4" fill="currentColor" stroke="none"/>'),
   rectangle: svg('<rect x="2.5" y="4" width="11" height="8"/><circle cx="2.5" cy="4" r="1.1" fill="currentColor" stroke="none"/><circle cx="13.5" cy="12" r="1.1" fill="currentColor" stroke="none"/>'),
   box: svg('<path d="M8 1.8 14 4.6v6.8L8 14.2 2 11.4V4.6Z"/><path d="M2 4.6 8 7.4l6-2.8M8 7.4v6.8"/>'),
+  polygon: svg('<path d="M8 2.2 13.6 6.1 11.8 12.8H4.2L2.4 6.1Z"/>'),
+  circle: svg('<circle cx="8" cy="8" r="5.2"/>'),
   plane: svg('<path d="M2 10.5 8 7l6 3.5-6 3.5Z"/><path d="M8 7V2.5"/><path d="M6 3.6 8 2.5l2 1.1"/>'),
   grid: svg('<path d="M2 5.5h12M2 10.5h12M5.5 2v12M10.5 2v12"/>'),
   camera: svg('<rect x="1.8" y="4.5" width="9" height="7.5" rx="1"/><path d="M10.8 7.5 14 5.5v5l-3.2-2"/>'),

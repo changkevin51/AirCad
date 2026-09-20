@@ -11,7 +11,9 @@ export interface ModelBrowserCallbacks {
 const ICONS: Record<Entity['type'], string> = {
   line: icons.line,
   rect: icons.rectangle,
+  polygon: icons.polygon,
   extrusion: icons.box,
+  circle: icons.circle,
 };
 
 /**

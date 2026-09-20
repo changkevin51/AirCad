@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { makeRect, type Entity, type ExtrusionEntity, type LineEntity, type RectEntity } from '../model/sketch';
+import { makeRect, type Entity, type ExtrusionEntity, type LineEntity, type PolygonEntity, type RectEntity } from '../model/sketch';
 import { v3 } from '../model/vec';
 import {
   clearAvailability,
+  CIRCLE_READONLY,
   deleteAvailability,
   dimensionsAvailability,
   entityLabel,
@@ -12,6 +13,7 @@ import {
   viewAvailability,
   workPlaneAvailability,
   EXTRUSION_FIRST,
+  SELECT_PROFILE,
   STROKE_FIRST,
 } from './workspace-state';
 
@@ -22,6 +24,8 @@ const rect: RectEntity = {
   corners: makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000),
 };
 const box: ExtrusionEntity = { id: 'e3', type: 'extrusion', corners: rect.corners, depth: 2500 };
+const outline: PolygonEntity = { id: 'e4', type: 'polygon', corners: [v3(0, 0, 0), v3(400, 0, 0), v3(100, 300, 0)] };
+const circle: Entity = { id: 'e5', type: 'circle', center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 50 };
 
 const idle = { drawing: false, extruding: false };
 const drawing = { drawing: true, extruding: false };
@@ -33,6 +37,8 @@ describe('entityLabel', () => {
     expect(entityLabel(line)).toBe('Line e1');
     expect(entityLabel(rect)).toBe('Rectangle e2');
     expect(entityLabel(box)).toBe('Box e3');
+    expect(entityLabel(outline)).toBe('Outline e4');
+    expect(entityLabel(circle)).toBe('Circle e5');
   });
 });
 
@@ -54,7 +60,18 @@ describe('command availability', () => {
     expect(deleteAvailability(line, idle).enabled).toBe(true);
     const pushPull = pushPullAvailability(line, idle);
     expect(pushPull.enabled).toBe(false);
-    expect(pushPull.reason).toBe('Select a rectangle or box.');
+    expect(pushPull.reason).toBe(SELECT_PROFILE);
+  });
+
+  it('offers Push/Pull for a polygon outline and refuses a saved circle', () => {
+    expect(pushPullAvailability(outline, idle).enabled).toBe(true);
+    expect(dimensionsAvailability(outline, idle).enabled).toBe(true);
+    const circlePush = pushPullAvailability(circle, idle);
+    expect(circlePush.enabled).toBe(false);
+    expect(circlePush.reason).toBe(CIRCLE_READONLY);
+    const circleSize = dimensionsAvailability(circle, idle);
+    expect(circleSize.enabled).toBe(false);
+    expect(circleSize.reason).toBe(CIRCLE_READONLY);
   });
 
   it('offers dimensions, delete and Push/Pull for a rectangle and a box', () => {

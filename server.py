@@ -25,6 +25,7 @@ from tracker.controller import (
     TrackerController,
     config_from_json,
 )
+from voice_api import handle_voice
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -296,6 +297,7 @@ def create_app(
     app.router.add_get("/api/tracker", handle_tracker_get)
     app.router.add_post("/api/tracker", handle_tracker_post)
     app.router.add_post("/api/export/freecad", handle_export)
+    app.router.add_post("/api/voice/command", handle_voice)
     if WEB_DIST.is_dir():
         app.router.add_static("/", WEB_DIST, show_index=False)
 

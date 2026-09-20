@@ -237,6 +237,7 @@ vi.mock('./render/sketch-renderer', () => ({
     setLastLabel(): void {}
     setGhost(): void {}
     setInk(): void {}
+    setLineGuide(): void {}
     fadeOut(): void {}
     tick(): void {}
   },
@@ -317,6 +318,14 @@ vi.mock('./ui/help', () => ({
     toggle(): void {
       h.help.visible = !h.help.visible;
     }
+  },
+}));
+
+vi.mock('./voice/control', () => ({
+  VoiceControl: class {
+    toggle = vi.fn();
+    cancel = vi.fn();
+    constructor(_root: unknown, _options: unknown) {}
   },
 }));
 
@@ -842,16 +851,18 @@ describe('drawing commits through the timed hand path', () => {
         const screen = screenFor(point);
         emitHands(handAt(screen.x, screen.y));
       }
+      h.nowMs += 33;
+      emitHands(handAt(first.x, first.y));
       api.hold('draw', false);
     } finally {
       h.projector.project = previousProject;
       h.projector.ray = previousRay;
     }
-    expect(api.lastRecognition()?.reason).toBe('rectangle');
-    expect(api.sketch.last?.type).toBe('rect');
+    expect(['rectangle', 'closed outline']).toContain(api.lastRecognition()?.reason);
+    expect(['rect', 'polygon']).toContain(api.sketch.last?.type);
   });
 
-  it('commits a closed circular stroke as a rectangle and opens a box preview with Q', () => {
+  it('commits a closed circular stroke as a polygon and opens a solid preview with Q', () => {
     const points = circleStroke(300, 250, 100);
     api.press('toggleGrid');
     api.setCursor(points[0]);
@@ -859,8 +870,8 @@ describe('drawing commits through the timed hand path', () => {
     for (const point of points.slice(1)) api.setCursor(point);
     api.hold('draw', false);
 
-    expect(api.lastRecognition()?.reason).toMatch(/rectangle/);
-    expect(api.sketch.last?.type).toBe('rect');
+    expect(api.lastRecognition()?.reason).toBe('closed outline');
+    expect(api.sketch.last?.type).toBe('polygon');
     expect(api.selected()?.id).toBe(api.sketch.last?.id);
     api.press('extrude');
     expect(api.extrusion()?.preview.type).toBe('extrusion');

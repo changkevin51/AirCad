@@ -2,6 +2,7 @@ import { parseDepth, parseDimensionSpec } from '../model/commands';
 import {
   formatMm,
   isExtrudableProfile,
+  isRectangleProfile,
   lineLength,
   rectFrame,
   type Entity,
@@ -23,7 +24,9 @@ export interface InspectorCallbacks {
 const ICONS: Record<Entity['type'], string> = {
   line: icons.line,
   rect: icons.rectangle,
+  polygon: icons.polygon,
   extrusion: icons.box,
+  circle: icons.circle,
 };
 
 let nextFieldId = 0;
@@ -383,11 +386,13 @@ export class Inspector {
     if (!entity) return;
     if (entity.type === 'line') {
       this.lengthInput.value = trimNumber(lineLength(entity));
-    } else {
+    } else if (entity.type !== 'circle' && isRectangleProfile(entity.corners)) {
       const { width, height } = rectFrame(entity);
       this.widthInput.value = trimNumber(width);
       this.heightInput.value = trimNumber(height);
       if (entity.type === 'extrusion') this.depthInput.value = trimNumber(entity.depth);
+    } else if (entity.type === 'extrusion') {
+      this.depthInput.value = trimNumber(entity.depth);
     }
   }
 
@@ -441,22 +446,32 @@ export class Inspector {
     const title = entityLabel(entity);
     if (this.entityTitle.textContent !== title) this.entityTitle.textContent = title;
 
+    const profile = entity.type === 'line' || entity.type === 'circle' ? null : entity;
+    const rectangular = !!profile && isRectangleProfile(profile.corners);
     this.lengthForm.classList.toggle('hidden', entity.type !== 'line');
-    this.sizeForm.classList.toggle('hidden', entity.type === 'line');
+    this.sizeForm.classList.toggle('hidden', !rectangular);
     this.depthForm.classList.toggle('hidden', entity.type !== 'extrusion');
-    this.pushPullButton.classList.toggle('hidden', entity.type === 'line' || !isExtrudableProfile(entity.corners));
+    this.pushPullButton.classList.toggle('hidden', !profile || !isExtrudableProfile(profile.corners));
 
     if (entity.type === 'line' && !this.dirty(this.lengthInput)) this.fill(this.lengthInput, trimNumber(lineLength(entity)));
-    if (entity.type !== 'line') {
-      const { width, height } = rectFrame(entity);
+    if (profile && rectangular) {
+      const { width, height } = rectFrame(profile);
       if (!this.dirty(this.widthInput)) this.fill(this.widthInput, trimNumber(width));
       if (!this.dirty(this.heightInput)) this.fill(this.heightInput, trimNumber(height));
-      if (entity.type === 'extrusion' && !this.dirty(this.depthInput)) this.fill(this.depthInput, trimNumber(entity.depth));
     }
+    if (entity.type === 'extrusion' && !this.dirty(this.depthInput)) this.fill(this.depthInput, trimNumber(entity.depth));
 
     if (entity.type === 'line') {
       const point = (p: { x: number; y: number; z: number }) => `(${trimNumber(p.x)}, ${trimNumber(p.y)}, ${trimNumber(p.z)}) mm`;
       this.detailsBody.textContent = `A ${point(entity.a)} → B ${point(entity.b)}`;
+      this.details.classList.remove('hidden');
+    } else if (entity.type === 'circle') {
+      this.detailsBody.textContent = `Diameter ${trimNumber(entity.radius * 2)} mm · read-only`;
+      this.details.classList.remove('hidden');
+    } else if (!rectangular) {
+      this.detailsBody.textContent = entity.type === 'extrusion'
+        ? `${entity.corners.length} edges · depth ${trimNumber(entity.depth)} mm`
+        : `${entity.corners.length} edges`;
       this.details.classList.remove('hidden');
     } else {
       this.details.classList.add('hidden');

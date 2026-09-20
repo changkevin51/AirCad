@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { Commands, parseDepth } from './commands';
 import { ExtrusionSession } from './extrusion';
-import { entityCenter, entityFaces, entityPoints, extrusionNormal, makeRect, Sketch, type RectEntity, type ExtrusionEntity } from './sketch';
-import { v2, v3 } from './vec';
+import { entityCenter, entityFaces, entityPoints, entityTriangles, extrusionNormal, makeRect, Sketch, type Entity, type RectEntity, type ExtrusionEntity } from './sketch';
+import { add, normalize, v2, v3 } from './vec';
 
 const profile = (u = v3(1, 0, 0), v = v3(0, 1, 0)): RectEntity => ({
   id: 'e1', type: 'rect', corners: makeRect(v3(100, 200, 300), u, v, 400, 250),
@@ -89,6 +89,41 @@ describe('extruded geometry and commands', () => {
     expect(parseDepth('-2.5 m')).toBe(-2500);
     expect(parseDepth('30cm')).toBe(300);
     for (const value of ['0', '1x2', 'Infinity', 'banana', '']) expect(parseDepth(value)).toBeNull();
+  });
+});
+
+describe('extrusion on generic outlines', () => {
+  it('extrudes a sloped triangle in either winding and sign', () => {
+    const u = normalize(v3(1, 0, 1));
+    const v = normalize(v3(-1, 2, 1));
+    const base = v3(1000, -500, 200);
+    const local = [v3(0, 0, 0), v3(400, 0, 0), v3(100, 300, 0)];
+    const corners = local.map((p) => add(add(base, { x: p.x * u.x, y: p.x * u.y, z: p.x * u.z }), { x: p.y * v.x, y: p.y * v.y, z: p.y * v.z }));
+    for (const ring of [corners, [...corners].reverse()]) {
+      for (const depth of [120, -120]) {
+        const sketch = new Sketch();
+        const solid = sketch.addEntity({ type: 'extrusion', corners: ring, depth }) as ExtrusionEntity;
+        const normal = extrusionNormal(solid);
+        const top = solid.corners.map((corner) => add(corner, { x: normal.x * depth, y: normal.y * depth, z: normal.z * depth }));
+        const topFace = entityFaces(solid).find((face) => face.every((p) => top.some((q) => Math.abs(q.x - p.x) < 1e-9 && Math.abs(q.y - p.y) < 1e-9 && Math.abs(q.z - p.z) < 1e-9)));
+        expect(topFace).toBeDefined();
+        for (const triangle of entityTriangles(solid)) {
+          for (const point of triangle) expect(Number.isFinite(point.x + point.y + point.z)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('keeps every original vertex fixed when a cap is pulled; only depth or position changes', () => {
+    const triangle: Entity = { id: 't', type: 'extrusion', corners: [v3(0, 0, 0), v3(400, 0, 0), v3(100, 300, 0)], depth: 200 };
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const stored = sketch.addEntity({ type: 'extrusion', corners: (triangle as ExtrusionEntity).corners, depth: 200 });
+    const result = commands.extrude(stored.id, 350);
+    expect(result.ok).toBe(true);
+    const next = sketch.get(stored.id) as ExtrusionEntity;
+    expect(next.corners).toEqual((triangle as ExtrusionEntity).corners);
+    expect(next.depth).toBe(350);
   });
 });
 
@@ -211,5 +246,102 @@ describe('extrusion gesture transaction', () => {
     box.setPull(50);
     expect(box.depth).toBe(300);
     expect(box.changed).toBe(true);
+  });
+});
+
+describe('face pull measurement', () => {
+  const UP = v2(0, -1);
+  const box = (depth = 80): ExtrusionEntity => ({ ...profile(), type: 'extrusion', depth });
+
+  it('latches the first clear outward direction once the grab moves 12 projected pixels', () => {
+    const session = new ExtrusionSession(box(), 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 295), true, 'mouse', UP);
+    expect(session.measurement).toBeNull();
+    session.update(v2(300, 288), true, 'mouse', UP);
+    const measurement = session.measurement!;
+    expect(measurement.axis).toBe('n');
+    expect(measurement.sign).toBe(1);
+    expect(measurement.direction).toBe(1);
+    expect(measurement.base).toEqual(box());
+    measurement.base.corners[0].x = -1;
+    measurement.direction = -1;
+    expect(session.measurement!.base.corners[0].x).toBe(100);
+    expect(session.measurement!.direction).toBe(1);
+  });
+
+  it('latches inward as -1', () => {
+    const session = new ExtrusionSession(box(), 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 337), true, 'mouse', UP);
+    expect(session.measurement!.direction).toBe(-1);
+  });
+
+  it('keeps the measurement across release and pause but clears it on a fresh grab', () => {
+    const session = new ExtrusionSession(box(), 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 263), true, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+    session.update(v2(300, 263), false, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+    session.pause();
+    expect(session.measurement).not.toBeNull();
+    session.update(v2(300, 263), true, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+    session.update(v2(300, 263), false, 'mouse', UP);
+    session.update(v2(500, 500), true, 'mouse', UP);
+    expect(session.measurement).toBeNull();
+    session.update(v2(500, 463), true, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+  });
+
+  it('clears the measurement when the face changes or an exact value is typed', () => {
+    const session = new ExtrusionSession(box(), 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 263), true, 'mouse', UP);
+    session.update(v2(300, 263), false, 'mouse', UP);
+    expect(session.setFace(2)).toBe(true);
+    expect(session.measurement).toBeNull();
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 263), true, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+    session.setPull(40);
+    expect(session.measurement).toBeNull();
+    session.update(v2(300, 300), false, 'mouse', UP);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 263), true, 'mouse', UP);
+    expect(session.measurement).not.toBeNull();
+    session.setDepth(-50);
+    expect(session.measurement).toBeNull();
+  });
+
+  it('snapshots the pending preview as a fresh grab baseline without touching the preview on read', () => {
+    const session = new ExtrusionSession(profile(), 1, 0, 0);
+    session.update(v2(300, 300), true, 'mouse', UP);
+    session.update(v2(300, 280), true, 'mouse', UP);
+    session.update(v2(300, 280), false, 'mouse', UP);
+    session.update(v2(500, 500), true, 'mouse', UP);
+    session.update(v2(500, 463), true, 'mouse', UP);
+    const measurement = session.measurement!;
+    expect(measurement.base.type).toBe('extrusion');
+    expect((measurement.base as ExtrusionEntity).depth).toBeCloseTo(20);
+    const before = { depth: session.depth, corners: session.corners, pull: session.pulled };
+    expect(session.measurement).toEqual(measurement);
+    expect({ depth: session.depth, corners: session.corners, pull: session.pulled }).toEqual(before);
+  });
+
+  it('rejects a pull when two finite operands overflow the depth', () => {
+    const solid: ExtrusionEntity = {
+      id: 't', type: 'extrusion',
+      corners: [v3(0, 0, 0), v3(400, 0, 0), v3(100, 300, 0)],
+      depth: 1e308,
+    };
+    const session = new ExtrusionSession(solid, 1, 0, 0);
+    const before = { depth: session.depth, corners: session.corners.map((corner) => ({ ...corner })), pull: session.pulled };
+    expect(session.setPull(1e308)).toBe(false);
+    expect(session.depth).toBe(before.depth);
+    expect(session.corners).toEqual(before.corners);
+    expect(session.pulled).toBe(before.pull);
+    expect(session.error).toBeTruthy();
   });
 });

@@ -1,6 +1,6 @@
 # AirCAD
 
-A spatial CAD sketching app: draw lines and rectangles in millimetres on a 3D work plane, then extrude rectangles into boxes using a webcam-tracked fingertip (stand-in for a digital pen) or the mouse. The browser owns the CAD model; Python tracks the hand and can export the model to FreeCAD.
+A spatial CAD sketching app: draw lines and closed outlines in millimetres on a 3D work plane, then extrude them into solids using a webcam-tracked fingertip (stand-in for a digital pen) or the mouse. The browser owns the CAD model; Python tracks the hand and can export the model to FreeCAD.
 
 ## Requirements
 
@@ -87,17 +87,21 @@ If Windows or macOS asked for camera access on first launch, allow it and start 
 
 **H** opens the same walkthrough plus the full key list.
 
+## Draw a closed outline
+
+Hold **Space** or left-drag around any simple closed shape — triangles, concave outlines, and even round loops are kept as drawn (a closed round stroke becomes a polygon outline; circles are no longer fitted). You can also draw the sides as separate lines whose endpoints snap together: the closed loop is then recognised and selectable as one outline. An outline must lie flat on one work plane and must not cross itself; holes are not supported.
+
 ## Extrude with your hand
 
-1. Draw a closed rectangle. New shapes are selected automatically. To select another shape, point inside it and pinch your thumb and index finger, click it, or press **S**. The selected outline stays highlighted.
+1. Draw a closed outline — one stroke, or separate endpoint-connected lines. New shapes are selected automatically. To select another shape, point inside it and pinch your thumb and index finger, click it, or press **S**. The selected outline stays highlighted.
 2. Press **Q** to start push/pull. The face most facing the camera is highlighted — hover another face of the same shape (while not pinching) or press **Tab** to switch which side you push/pull. **E** remains the FreeCAD export shortcut.
-3. Pinch thumb + index and move to pull the highlighted face **out**, or back to push it **in**. Pulling a box cap sets its depth; pulling a side face widens the box. Grid snapping applies to the pull distance. If tracking is lost, the preview freezes; show your hand, release, then pinch again to resume.
+3. Pinch thumb + index and move to pull the highlighted face **out**, or back to push it **in**. Pulling a cap face sets the depth; pulling a side face moves that boundary edge. Grid snapping applies to the pull distance. If tracking is lost, the preview freezes; show your hand, release, then pinch again to resume.
 4. Release the pinch to pause. Reposition your hand and pinch again to continue. Hold **Shift** to orbit or **Ctrl** to pan even during a pull; the preview stays fixed while you move the view. Release the navigation key to continue pulling from the current position without a depth jump.
 5. Press **Enter** or **Q** to apply, or **Esc** to cancel. **L** types an exact pull distance for the active face (`500`, `-250`, or `2 m`); **0** shows the result in isometric view. A zero-depth preview cannot be applied.
 
-Without a webcam, use **Q**, then **left-drag** (or hold **Space** while moving) along the highlighted direction. Release to pause, then **Enter** to apply. Extrusion is one undoable edit; undo restores the original rectangle. Select an existing box and press **Q** to push/pull a face. **L** on a solid edits depth with one value or a box base size with `width x height`.
+Without a webcam, use **Q**, then **left-drag** (or hold **Space** while moving) along the highlighted direction. Release to pause, then **Enter** to apply. Extrusion is one undoable edit; undo restores the outline. Select an existing solid and press **Q** to push/pull any of its faces. **L** on a solid edits depth with one value or, for rectangular bases, base size with `width x height`.
 
-Extrusion supports closed rectangular profiles. Lines cannot be extruded, and hole cutting is outside the current scope.
+Extrusion supports any simple closed planar outline: triangles, concave shapes, and loops of endpoint-connected lines. Open paths, single lines, and saved circles cannot be extruded; circles remain loadable and renderable but are read-only.
 
 ## Controls
 
@@ -107,7 +111,7 @@ Keys stand in for pen buttons. Click the browser window first so it receives inp
 
 | Key | Action |
 | --- | --- |
-| **Space** | Pen button 1 — hold to draw a line or closed rectangle, release to commit |
+| **Space** | Pen button 1 — hold to draw a line or any closed outline, release to commit |
 | **Shift** | Pen button 2 — hold and move to orbit |
 | **Ctrl** | Pen button 3 — hold and move to pan (Cmd is used for edit shortcuts on macOS) |
 | **X / Y / Z** | Hold while drawing to lock to that world axis |
@@ -147,9 +151,10 @@ Roughly matching adjacent rectangles align along the entire shared border, with 
 | **Ctrl+Backspace** / **Cmd+Backspace** | Clear the sketch |
 | **Esc** | Cancel the current stroke / extrusion, deselect, or close overlays |
 | **S** | Select the shape under the cursor (also pinch or click) |
-| **Q** | Start push/pull on a selected rectangle or solid; press again to apply |
+| **Q** | Start push/pull on a selected closed outline or solid; press again to apply |
 | **Enter** | Apply the extrusion preview |
 | **L** | Type a line length, rectangle size (W x H), or extrusion depth; mm/cm/m accepted |
+| **V** | Speak a distance for the active line or face pull (recognizer picked in the voice panel) |
 | **E** | Export to FreeCAD |
 | **P** | Camera picture-in-picture |
 | **H** | Help overlay |

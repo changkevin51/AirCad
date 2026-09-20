@@ -18,3 +18,7 @@ web/playwright-report/
 # OS / editor
 .DS_Store
 Thumbs.db
+/artifacts/
+.env
+.env.*
+!.env.example

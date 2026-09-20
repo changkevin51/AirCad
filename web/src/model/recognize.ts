@@ -1,3 +1,4 @@
+import { isSimplePolygon } from './polygon';
 import { cross2, distance2, dot2, length2, sub2, v2, type Vec2 } from './vec';
 
 export interface RecognizedLine {
@@ -20,7 +21,12 @@ export interface RecognizedRect {
   angle: number;
 }
 
-export type RecognizedShape = RecognizedLine | RecognizedRect;
+export interface RecognizedPolygon {
+  kind: 'polygon';
+  corners: Vec2[];
+}
+
+export type RecognizedShape = RecognizedLine | RecognizedRect | RecognizedPolygon;
 
 export interface RecognizeResult {
   shape: RecognizedShape | null;
@@ -37,37 +43,45 @@ export interface RecognizeOptions {
   lineDeviationFrac: number;
   /** Lines within this many degrees of a plane axis are aligned to it. */
   axisSnapDeg: number;
-  /** A stroke is closed when start/end are within this fraction of the bbox diagonal. */
+  /** A rectangle candidate is closed when start/end are within this fraction of the bbox diagonal. */
   closureFrac: number;
   /** RDP tolerance as a fraction of the bbox diagonal. */
   rdpFrac: number;
   /** Corners below this turn (degrees) are treated as points along an edge. */
   collinearDeg: number;
-  minCorners: number;
-  maxCorners: number;
+  /** Allowed deviation of total turning from 2π, as a fraction of 2π. */
+  turningTolerance: number;
   /** Minimum polygon area / oriented-bounding-box area. */
   areaRatioMin: number;
   /** Rectangles rotated more than this (degrees) keep their orientation. */
   orientedDeg: number;
   /** Strokes whose bbox diagonal is smaller than this are ignored. */
   minSize: number;
+  rectangleTurnDeg: number;
+  rectangleEdgeFrac: number;
+  outlineRdpFrac: number;
+  outlineClosureFrac: number;
 }
 
 export const DEFAULT_RECOGNIZE_OPTIONS: RecognizeOptions = {
   lineRatioMax: 1.15,
   smoothFrac: 0.02,
   lineDeviationFrac: 0.1,
-  axisSnapDeg: 16,
-  closureFrac: 0.28,
-  rdpFrac: 0.1,
-  collinearDeg: 32,
-  minCorners: 4,
-  maxCorners: 8,
-  areaRatioMin: 0.52,
-  orientedDeg: 20,
+  axisSnapDeg: 8,
+  closureFrac: 0.15,
+  rdpFrac: 0.06,
+  collinearDeg: 22,
+  turningTolerance: 0.3,
+  areaRatioMin: 0.75,
+  orientedDeg: 12,
   minSize: 1e-6,
+  rectangleTurnDeg: 12,
+  rectangleEdgeFrac: 0.025,
+  outlineRdpFrac: 0.0025,
+  outlineClosureFrac: 0.03,
 };
 
+const TWO_PI = Math.PI * 2;
 const DEG = Math.PI / 180;
 
 export function dedupePoints(points: readonly Vec2[], eps = 1e-9): Vec2[] {
@@ -260,12 +274,33 @@ function normalizeAngle90(angle: number): number {
   return a;
 }
 
-function rectangleFromObb(points: readonly Vec2[], first: Vec2, opts: RecognizeOptions): RecognizeResult {
-  const signedArea = polygonArea(points);
-  const area = Math.abs(signedArea);
+function recognizeRectangle(points: readonly Vec2[], diagonal: number, opts: RecognizeOptions, first: Vec2): RecognizeResult | null {
+  const simplified = simplifyRdp(points, opts.rdpFrac * diagonal);
+  let ring = simplified;
+  if (ring.length > 1 && distance2(ring[0], ring[ring.length - 1]) <= opts.closureFrac * diagonal) {
+    ring = ring.slice(0, -1);
+  }
+  ring = removeShallowCorners(ring, opts.collinearDeg * DEG);
+  if (ring.length !== 4) return null;
+
+  const turns = turningAngles(ring);
+  if (turns.some((turn) => Math.abs(Math.abs(turn) - Math.PI / 2) > opts.rectangleTurnDeg * DEG)) return null;
+  const turning = turns.reduce((sum, t) => sum + t, 0);
+  if (Math.abs(Math.abs(turning) - TWO_PI) > opts.turningTolerance * TWO_PI) return null;
+
+  const area = Math.abs(polygonArea(points));
   const obb = minAreaRect(convexHull(points));
-  if (!obb || obb.area < 1e-12) return { shape: null, reason: 'degenerate' };
-  if (area / obb.area < opts.areaRatioMin) return { shape: null, reason: 'not rectangular' };
+  if (!obb || obb.area < 1e-12) return null;
+  if (area / obb.area < opts.areaRatioMin) return null;
+
+  const obbAligned = points.map((p) => rotate(p, -obb.angle));
+  const [suLo, suHi] = robustExtent(obbAligned.map((p) => p.x));
+  const [svLo, svHi] = robustExtent(obbAligned.map((p) => p.y));
+  const edgeErrors = obbAligned.map((p) => Math.min(
+    Math.abs(p.x - suLo), Math.abs(p.x - suHi),
+    Math.abs(p.y - svLo), Math.abs(p.y - svHi),
+  ));
+  if (percentile(edgeErrors, 0.85) > opts.rectangleEdgeFrac * diagonal) return null;
 
   const tilt = normalizeAngle90(obb.angle);
   const oriented = Math.abs(tilt) > opts.orientedDeg * DEG;
@@ -276,10 +311,10 @@ function rectangleFromObb(points: readonly Vec2[], first: Vec2, opts: RecognizeO
   const [vLo, vHi] = robustExtent(local.map((p) => p.y));
   const width = uHi - uLo;
   const height = vHi - vLo;
-  if (width < opts.minSize || height < opts.minSize) return { shape: null, reason: 'degenerate' };
+  if (width < opts.minSize || height < opts.minSize) return null;
 
   let corners = [v2(uLo, vLo), v2(uHi, vLo), v2(uHi, vHi), v2(uLo, vHi)].map((c) => rotate(c, angle));
-  if (signedArea < 0) corners = [corners[0], corners[3], corners[2], corners[1]];
+  if (turning < 0) corners = [corners[0], corners[3], corners[2], corners[1]];
   let startIndex = 0;
   let startDistance = Infinity;
   corners.forEach((c, i) => {
@@ -307,8 +342,9 @@ function rectangleFromObb(points: readonly Vec2[], first: Vec2, opts: RecognizeO
 }
 
 /**
- * Recognise a pen stroke (2D plane coordinates, mm) as a straight line or a
- * rectangle.  Anything else returns `shape: null` with a reason.
+ * Recognise a pen stroke (2D plane coordinates, mm) as a straight line, a
+ * rectangle, or any other simple closed outline (a polygon whose corners are
+ * stroke samples).  Open strokes return `shape: null` with a reason.
  */
 export function recognizeStroke(input: readonly Vec2[], options: Partial<RecognizeOptions> = {}): RecognizeResult {
   const opts = { ...DEFAULT_RECOGNIZE_OPTIONS, ...options };
@@ -333,19 +369,20 @@ export function recognizeStroke(input: readonly Vec2[], options: Partial<Recogni
     }
   }
 
-  if (chord > opts.closureFrac * box.diagonal) return { shape: null, reason: 'open stroke' };
+  if (chord <= opts.closureFrac * box.diagonal) {
+    const rect = recognizeRectangle(points, box.diagonal, opts, first);
+    if (rect) return rect;
+  }
 
-  const simplified = simplifyRdp(points, opts.rdpFrac * box.diagonal);
-  let ring = simplified;
-  if (ring.length > 1 && distance2(ring[0], ring[ring.length - 1]) <= opts.closureFrac * box.diagonal) {
+  if (chord > opts.outlineClosureFrac * box.diagonal) return { shape: null, reason: 'open stroke' };
+
+  const closed = points.map((p) => v2(p.x, p.y));
+  closed[closed.length - 1] = v2(first.x, first.y);
+  let ring = simplifyRdp(closed, opts.outlineRdpFrac * box.diagonal);
+  if (ring.length > 1 && distance2(ring[0], ring[ring.length - 1]) <= Math.max(1e-9, opts.outlineClosureFrac * box.diagonal)) {
     ring = ring.slice(0, -1);
   }
-  ring = removeShallowCorners(ring, opts.collinearDeg * DEG);
-
-  const fitted = rectangleFromObb(points, first, opts);
-  if (fitted.shape) return fitted;
-  if (ring.length < opts.minCorners || ring.length > opts.maxCorners) {
-    return { shape: null, reason: `${ring.length} corners` };
-  }
-  return { shape: null, reason: fitted.reason === 'not rectangular' ? fitted.reason : 'not a simple loop' };
+  if (ring.length < 3) return { shape: null, reason: 'too few corners' };
+  if (!isSimplePolygon(ring)) return { shape: null, reason: 'not a simple loop' };
+  return { shape: { kind: 'polygon', corners: ring }, reason: 'closed outline' };
 }

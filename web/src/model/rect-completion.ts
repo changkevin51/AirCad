@@ -255,30 +255,37 @@ export function completeSharedBorder(
   if (Math.min(vMax, -vMin) > Math.max(eps, 0.15 * extent)) return null;
   if (pathLength(local) < chordLength + extent) return null;
 
-  const recognized = recognizeStroke([...local, local[0]]);
-  if (recognized.shape?.kind !== 'rect') return null;
-
-  const corners2 = recognized.shape.corners;
   const edgeTol = Math.max(eps, 0.15 * extent);
   const uTol = Math.max(0.1 * chordLength, edgeTol);
-  let baseline: [Vec2, Vec2] | null = null;
+  if (local.some((p) => p.x < -edgeTol || p.x > chordLength + edgeTol)) return null;
+
+  const recognized = recognizeStroke([...local, local[0]]);
   let h = 0;
-  for (let i = 0; i < 4; i++) {
-    const a = corners2[i];
-    const b = corners2[(i + 1) % 4];
-    if (Math.abs(a.y) <= edgeTol && Math.abs(b.y) <= edgeTol) {
-      if (baseline) return null;
-      baseline = [a, b];
-      const lo = Math.min(a.x, b.x);
-      const hi = Math.max(a.x, b.x);
-      if (Math.abs(lo) > uTol || Math.abs(hi - chordLength) > uTol) return null;
-      const far = corners2.filter((_, k) => k !== i && k !== (i + 1) % 4);
-      if (Math.sign(far[0].y) !== Math.sign(far[1].y)) return null;
-      if (Math.abs(far[0].y - far[1].y) > edgeTol) return null;
-      h = (far[0].y + far[1].y) / 2;
+  if (recognized.shape?.kind === 'rect') {
+    const corners2 = recognized.shape.corners;
+    let baseline: [Vec2, Vec2] | null = null;
+    for (let i = 0; i < 4; i++) {
+      const a = corners2[i];
+      const b = corners2[(i + 1) % 4];
+      if (Math.abs(a.y) <= edgeTol && Math.abs(b.y) <= edgeTol) {
+        if (baseline) return null;
+        baseline = [a, b];
+        const lo = Math.min(a.x, b.x);
+        const hi = Math.max(a.x, b.x);
+        if (Math.abs(lo) > uTol || Math.abs(hi - chordLength) > uTol) return null;
+        const far = corners2.filter((_, k) => k !== i && k !== (i + 1) % 4);
+        if (Math.sign(far[0].y) !== Math.sign(far[1].y)) return null;
+        if (Math.abs(far[0].y - far[1].y) > edgeTol) return null;
+        h = (far[0].y + far[1].y) / 2;
+      }
     }
+    if (!baseline || Math.abs(h) <= eps) return null;
+  } else if (recognized.shape?.kind === 'polygon' || recognized.shape === null) {
+    h = Math.abs(vMax) >= Math.abs(vMin) ? vMax : vMin;
+    if (Math.abs(h) <= eps) return null;
+  } else {
+    return null;
   }
-  if (!baseline || Math.abs(h) <= eps) return null;
 
   const fitTol = Math.max(1e-3, 0.28 * Math.min(chordLength, Math.abs(h)));
   const far0 = v2(0, h);
