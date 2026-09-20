@@ -523,6 +523,79 @@ kbd {
   line-height: 1.55;
 }
 
+/* ---------------------------------------------------------------- input panel */
+
+.input-panel {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 240px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  font-size: 12px;
+  backdrop-filter: blur(6px);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.input-panel__title {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.input-panel label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.input-panel select,
+.input-panel input[type='range'],
+.input-panel button {
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+
+.input-panel select {
+  padding: 2px 6px;
+  max-width: 150px;
+}
+
+.input-panel button {
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.input-panel__row {
+  display: flex;
+  gap: 6px;
+}
+
+.input-panel__row button {
+  flex: 1;
+}
+
+.input-panel__status,
+.input-panel__hint {
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.input-panel--busy {
+  opacity: 0.7;
+}
+
 @media (max-width: 640px) {
   .hud {
     max-width: calc(100vw - 24px);

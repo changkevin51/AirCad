@@ -47,13 +47,14 @@ export class MeasureInput {
     return !this.form.classList.contains('hidden');
   }
 
-  open(label: string, onSubmit: (text: string) => void, onClose?: () => void): void {
+  open(label: string, onSubmit: (text: string) => void, onClose?: () => void, initialValue?: string): void {
     this.label.textContent = label;
     this.onSubmit = onSubmit;
     this.onClose = onClose ?? null;
-    this.input.value = '';
+    this.input.value = initialValue ?? '';
     this.form.classList.remove('hidden');
     this.input.focus();
+    if (initialValue) this.input.select();
   }
 
   close(): void {

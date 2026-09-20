@@ -85,8 +85,20 @@ export class Viewport {
     return v3(direction.x, direction.y, direction.z);
   }
 
+  /** World millimetres represented by one screen pixel at `world`. */
+  worldPerPixel(world: Vec3): number {
+    const camera = this.syncCamera();
+    if (this.ortho) {
+      return (this.orthographic.top - this.orthographic.bottom) / Math.max(1, this.height);
+    }
+    const pos = camera.position;
+    const dist = Math.hypot(world.x - pos.x, world.y - pos.y, world.z - pos.z);
+    const fov = (CAMERA_FOV_DEG * Math.PI) / 180;
+    return (2 * Math.max(1, dist) * Math.tan(fov / 2)) / Math.max(1, this.height);
+  }
+
   project(world: Vec3): Vec2 | null {
-    const camera = this.camera;
+    const camera = this.syncCamera();
     const point = this.scratch.set(world.x, world.y, world.z);
     point.applyMatrix4(camera.matrixWorldInverse);
     if (!this.ortho && point.z > -1e-6) return null;
@@ -95,8 +107,9 @@ export class Viewport {
   }
 
   ray(screen: Vec2): { origin: Vec3; dir: Vec3 } {
+    const camera = this.syncCamera();
     const ndc = new THREE.Vector2((screen.x / this.width) * 2 - 1, -(screen.y / this.height) * 2 + 1);
-    this.raycaster.setFromCamera(ndc, this.camera);
+    this.raycaster.setFromCamera(ndc, camera);
     const { origin, direction } = this.raycaster.ray;
     return { origin: v3(origin.x, origin.y, origin.z), dir: v3(direction.x, direction.y, direction.z) };
   }
@@ -104,9 +117,18 @@ export class Viewport {
   projector(): Projector {
     // The camera may have moved since the last render; refresh both matrices
     // so projections in this frame match what will be drawn.
+    this.syncCamera();
+    return {
+      project: (world) => this.project(world),
+      ray: (screen) => this.ray(screen),
+      worldPerPixel: (world) => this.worldPerPixel(world),
+    };
+  }
+
+  private syncCamera(): THREE.PerspectiveCamera | THREE.OrthographicCamera {
     const camera = this.camera;
     camera.updateMatrixWorld();
     camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
-    return { project: (world) => this.project(world), ray: (screen) => this.ray(screen) };
+    return camera;
   }
 }

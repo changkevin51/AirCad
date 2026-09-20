@@ -3,7 +3,15 @@ import { v2 } from '../model/vec';
 import { CursorSource, mapFrameToViewport, pickCursorHand, regionRect } from './cursor';
 import { holdActionForCode, keyLabel, PRESS_BINDINGS, resolveHold, resolvePress, type KeyLike } from './keymap';
 import { OneEuroFilter } from './one-euro';
-import { parseTrackerMessage, type HandsMessage, type TrackedHandMessage } from './tracker-client';
+import {
+  ClockSync,
+  parseSpatialMessage,
+  parseTrackerMessage,
+  type HandsMessage,
+  type SpatialMessage,
+  type SpatialParseState,
+  type TrackedHandMessage,
+} from './tracker-client';
 
 const key = (code: string, mods: Partial<KeyLike> = {}): KeyLike => ({
   code,
@@ -34,6 +42,7 @@ describe('keymap', () => {
     expect(resolvePress(key('NumpadEnter'), 'other')).toBe('confirm');
     expect(resolvePress(key('KeyE'), 'other')).toBe('export');
     expect(resolvePress(key('KeyR'), 'other')).toBe('scale');
+    expect(resolvePress(key('KeyO'), 'other')).toBe('setOrigin');
   });
 
   it('resolves R as scale only without modifiers', () => {
@@ -47,6 +56,13 @@ describe('keymap', () => {
     expect(resolveHold(key('KeyR'), 'mac')).toBeNull();
     expect(resolveHold(key('KeyR'), 'other')).toBeNull();
     expect(resolvePress(key('KeyS'), 'other')).toBe('select');
+  });
+
+  it('resolves Shift+R as depth recenter without shadowing scale', () => {
+    for (const platform of ['mac', 'other'] as const) {
+      expect(resolvePress(key('KeyR', { shiftKey: true }), platform)).toBe('recenter');
+      expect(resolvePress(key('KeyR', { shiftKey: true, altKey: true }), platform)).toBeNull();
+    }
   });
 
   it('resolves M as move only without modifiers', () => {
@@ -67,6 +83,17 @@ describe('keymap', () => {
     expect(resolveHold(key('Space'), 'other')).toBe('draw');
     expect(resolveHold(key('ShiftRight'), 'other')).toBe('orbit');
     expect(holdActionForCode('ControlLeft')).toBe('pan');
+  });
+
+  it('binds A to the plane mode toggle and keeps Y locking off Ctrl/Cmd+Y', () => {
+    expect(resolvePress(key('KeyA'), 'other')).toBe('toggleAutoPlane');
+    expect(resolveHold(key('KeyY'), 'other')).toBe('lockY');
+    expect(resolveHold(key('KeyY', { ctrlKey: true }), 'other')).toBeNull();
+    expect(resolvePress(key('KeyY', { ctrlKey: true }), 'other')).toBe('redo');
+    expect(resolveHold(key('KeyY', { ctrlKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyY', { ctrlKey: true }), 'mac')).toBe('redo');
+    expect(resolveHold(key('KeyY', { metaKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyY', { metaKey: true }), 'mac')).toBeNull();
   });
 
   it('labels primary-modifier bindings per platform', () => {
@@ -149,5 +176,80 @@ describe('tracker protocol parsing', () => {
     expect(parseTrackerMessage('{"type":"status","camera":"ready","message":"ok"}')?.type).toBe('status');
     expect(parseTrackerMessage('{"type":"bogus"}')).toBeNull();
     expect(parseTrackerMessage('not json')).toBeNull();
+  });
+});
+
+const spatial = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  type: 'spatial',
+  v: 2,
+  streamId: 's1',
+  sourceRunId: 'r1',
+  seq: 1,
+  t: 1000,
+  sampleTimeMs: 990,
+  ageMs: 10,
+  target: 'finger',
+  trackingEpoch: 0,
+  frame: { w: 1280, h: 720, mirrored: true },
+  pixel: [640, 360],
+  cameraMm: [10, 20, 500],
+  state: 'tracked',
+  fresh: true,
+  reason: null,
+  quality: { validPixels: 40, roiCount: 2, spreadMm: 12, pairSkewMs: 3 },
+  ...overrides,
+});
+
+describe('spatial protocol parsing', () => {
+  it('accepts a valid tracked payload', () => {
+    const message = parseSpatialMessage(spatial()) as SpatialMessage;
+    expect(message.v).toBe(2);
+    expect(message.cameraMm).toEqual([10, 20, 500]);
+    expect(message.frame.mirrored).toBe(true);
+    expect(message.fresh).toBe(true);
+  });
+
+  it('rejects malformed, non-finite, wrong-version and inconsistent payloads', () => {
+    expect(parseSpatialMessage(spatial({ v: 1 }))).toBeNull();
+    expect(parseSpatialMessage(spatial({ cameraMm: [Number.NaN, 0, 1] }))).toBeNull();
+    expect(parseSpatialMessage(spatial({ t: Number.POSITIVE_INFINITY }))).toBeNull();
+    expect(parseSpatialMessage(spatial({ state: 'held', fresh: true }))).toBeNull();
+    expect(parseSpatialMessage(spatial({ state: 'tracked', cameraMm: null }))).toBeNull();
+    expect(parseSpatialMessage(spatial({ state: 'lost', fresh: false, cameraMm: null, sampleTimeMs: null, ageMs: 1 }))).toBeNull();
+    expect(parseSpatialMessage(spatial({ target: 'bogus' }))).toBeNull();
+    expect(parseSpatialMessage(spatial({ pixel: [2000, 10] }))).toBeNull();
+  });
+
+  it('rejects duplicate and out-of-order samples on the same stream', () => {
+    const state: SpatialParseState = { streamId: null, lastSeq: null, lastT: null };
+    expect(parseSpatialMessage(spatial({ seq: 1, t: 1000 }), state)).not.toBeNull();
+    expect(parseSpatialMessage(spatial({ seq: 1, t: 1010 }), state)).toBeNull();
+    expect(parseSpatialMessage(spatial({ seq: 2, t: 990 }), state)).toBeNull();
+    expect(parseSpatialMessage(spatial({ seq: 2, t: 1010 }), state)).not.toBeNull();
+    expect(parseSpatialMessage(spatial({ streamId: 's2', seq: 1, t: 50, sampleTimeMs: 50, ageMs: 0 }), state)).not.toBeNull();
+  });
+
+  it('keeps a held XYZ without freshness', () => {
+    const message = parseSpatialMessage(spatial({ state: 'held', fresh: false, reason: 'no_depth' }));
+    expect(message?.fresh).toBe(false);
+    expect(message?.cameraMm).toEqual([10, 20, 500]);
+  });
+});
+
+describe('clock synchronization', () => {
+  it('uses the lowest-RTT lower bound and fails closed when unsynced', () => {
+    const clock = new ClockSync();
+    expect(clock.ageUpperBoundMs(1000, 1100)).toBeNull();
+    clock.observe(2000, 2040, 1000);
+    expect(clock.offsetLower).toBe(1000);
+    clock.observe(2100, 2180, 1100);
+    expect(clock.rttMs).toBe(40);
+    expect(clock.offsetLower).toBe(1000);
+    clock.observe(3000, 3010, 1990);
+    expect(clock.rttMs).toBe(10);
+    expect(clock.offsetLower).toBe(1010);
+    const age = clock.ageUpperBoundMs(1990, 3050, 5, 3010);
+    expect(age).toBeGreaterThanOrEqual(50);
+    expect(age).toBe(Math.max(3050 - 1990 - 1010, 5 + 40));
   });
 });

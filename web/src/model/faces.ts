@@ -1,8 +1,6 @@
 import { pickFace, triangleHit } from './pick';
 import type { Projector } from './snap';
 import {
-  circlePoints,
-  cylinderTopCenter,
   entityCenter,
   entityFaces,
   extrusionNormal,
@@ -10,9 +8,6 @@ import {
   isTriangleProfile,
   makeRect,
   rectFrame,
-  type CircleGeometry,
-  type CircleEntity,
-  type CylinderEntity,
   type Entity,
   type ExtrusionEntity,
   type ProfileEntity,
@@ -23,12 +18,10 @@ import {
 import { add, cross, dot, normalize, scale, sub, v3, type Vec2, type Vec3 } from './vec';
 
 export interface ProfileFace {
-  /** Polygon outline in world space. Circular cap outlines contain the analytic ring tessellation. */
+  /** Polygon outline in world space. */
   outline: Vec3[];
-  /** Quad corners in world space for rectangular faces; absent for circular caps. */
+  /** Quad corners in world space. */
   quad?: [Vec3, Vec3, Vec3, Vec3];
-  /** Exact circle geometry for analytic cap picking. */
-  circle?: CircleGeometry;
   /** Unit outward normal. */
   normal: Vec3;
   center: Vec3;
@@ -67,8 +60,6 @@ const FACE_ORDER: Record<string, number> = { 'n1': 0, 'n-1': 1, 'u1': 2, 'u-1': 
 
 /** All extrudable faces of a profile: 2 for a rect (its two sides, +n and -n, same quad), 6 for a solid. */
 export function profileFaces(profile: ProfileEntity): ProfileFace[] {
-  if (profile.type === 'circle') return circularCapFaces(profile, 0);
-  if (profile.type === 'cylinder') return circularCapFaces(profile, profile.depth);
   if (profile.type === 'triangle' || profile.type === 'prism') return triangleProfileFaces(profile);
   const n = extrusionNormal(profile);
   const depth = profile.type === 'extrusion' ? profile.depth : 0;
@@ -135,42 +126,6 @@ function triangleProfileFaces(profile: TriangleProfileEntity): ProfileFace[] {
   return faces;
 }
 
-function circularCapFaces(profile: CircleGeometry | CylinderEntity, depth: number): ProfileFace[] {
-  const normal = normalize(profile.normal);
-  const base = { center: profile.center, normal, radius: profile.radius } satisfies CircleGeometry;
-  const baseOutline = circlePoints(base);
-  const farCenter = depth === 0 ? profile.center : cylinderTopCenter({ ...profile, depth });
-  const farOutline = depth === 0
-    ? baseOutline
-    : circlePoints({ center: farCenter, normal, radius: profile.radius });
-  const farSign = (depth === 0 ? 1 : Math.sign(depth)) as 1 | -1;
-  const nearSign = (farSign * -1) as 1 | -1;
-  const nearNormal = scale(normal, nearSign);
-  const farNormal = scale(normal, farSign);
-  const faces: ProfileFace[] = [
-    {
-      outline: baseOutline,
-      normal: nearNormal,
-      center: { ...profile.center },
-      axis: 'n',
-      sign: nearSign,
-      label: labelForNormal(nearNormal),
-      circle: base,
-    },
-    {
-      outline: farOutline,
-      normal: farNormal,
-      center: { ...farCenter },
-      axis: 'n',
-      sign: farSign,
-      label: labelForNormal(farNormal),
-      circle: { center: { ...farCenter }, normal, radius: profile.radius },
-    },
-  ];
-  faces.sort((a, b) => FACE_ORDER[`${a.axis}${a.sign}`] - FACE_ORDER[`${b.axis}${b.sign}`]);
-  return faces;
-}
-
 /** Index of the face whose outward normal points most toward the camera. Ties: lowest index. */
 export function defaultFaceIndex(faces: readonly ProfileFace[], viewDirection: Vec3): number {
   let best = 0;
@@ -196,26 +151,6 @@ export function pickProfileFace(faces: readonly ProfileFace[], cursor: Vec2, pro
   let nearest = Infinity;
   let bestFacing = Infinity;
   for (const [index, face] of faces.entries()) {
-    if (face.circle) {
-      const denominator = dot(ray.dir, face.circle.normal);
-      if (Math.abs(denominator) < 1e-9) continue;
-      const t = dot(sub(face.circle.center, ray.origin), face.circle.normal) / denominator;
-      if (t < 0 || t > nearest + 1e-6) continue;
-      const hit = add(ray.origin, scale(ray.dir, t));
-      if (Math.hypot(
-        hit.x - face.circle.center.x,
-        hit.y - face.circle.center.y,
-        hit.z - face.circle.center.z,
-      ) > face.circle.radius + 1e-8) continue;
-      if (!projector.project(hit)) continue;
-      const facing = dot(face.normal, ray.dir);
-      if (t < nearest - 1e-6 || (t <= nearest + 1e-6 && facing < bestFacing)) {
-        nearest = t;
-        bestFacing = facing;
-        best = index;
-      }
-      continue;
-    }
     const [origin, ...rest] = face.outline;
     for (const triangle of rest.slice(1).map((point, triangleIndex) => [origin, rest[triangleIndex], point] as const)) {
       const t = triangleHit(ray.origin, ray.dir, triangle[0], triangle[1], triangle[2]);
@@ -243,7 +178,6 @@ export function pickExtrusionTarget(
   const faces = profileFaces(entity);
   const faceIndex = pickProfileFace(faces, cursor, projector);
   if (faceIndex === null) return null;
-  if (entity.type === 'cylinder' && dot(faces[faceIndex].normal, projector.ray(cursor).dir) > 1e-9) return null;
   return { entity, faceIndex };
 }
 
@@ -252,9 +186,7 @@ export function pickExtrusionTarget(
  * Returns the resulting box; the corners change for side and base faces while
  * pulling the far cap only changes depth.
  */
-type PushPullResult =
-  | { corners: ExtrusionEntity['corners'] | TriangleEntity['corners']; depth: number }
-  | { center: Vec3; normal: Vec3; radius: number; depth: number };
+type PushPullResult = { corners: ExtrusionEntity['corners'] | TriangleEntity['corners']; depth: number };
 
 export function pushPull(
   profile: RectEntity | ExtrusionEntity,
@@ -262,12 +194,6 @@ export function pushPull(
   distance: number,
   minSize: number,
 ): { corners: ExtrusionEntity['corners']; depth: number };
-export function pushPull(
-  profile: CircleEntity | CylinderEntity,
-  face: ProfileFace,
-  distance: number,
-  minSize: number,
-): { center: Vec3; normal: Vec3; radius: number; depth: number };
 export function pushPull(
   profile: TriangleProfileEntity,
   face: ProfileFace,
@@ -286,37 +212,6 @@ export function pushPull(
   distance: number,
   minSize: number,
 ): PushPullResult {
-  if (profile.type === 'circle' || profile.type === 'cylinder') {
-    const normal = normalize(profile.normal);
-    const depth0 = profile.type === 'cylinder' ? profile.depth : 0;
-    const solid = profile.type === 'cylinder' && Math.abs(depth0) > 1e-9;
-    let center = { ...profile.center };
-    let depth = depth0;
-    const s = face.sign;
-    // On a flat circle either cap grows a cylinder. On an existing cylinder,
-    // the cap in the stored normal direction is far only when depth is +;
-    // a negative depth swaps which cap is near/far.
-    const far = !solid || Math.sign(depth0) === s;
-    if (far) {
-      depth = depth0 + s * distance;
-      if (solid && minSize > 0) {
-        depth = Math.sign(depth0) > 0 ? Math.max(depth, minSize) : Math.min(depth, -minSize);
-      }
-    } else {
-      let applied = distance;
-      const next = () => depth0 - s * applied;
-      let nextDepth = next();
-      if (solid && minSize > 0) {
-        const clamped = Math.sign(depth0) > 0 ? Math.max(nextDepth, minSize) : Math.min(nextDepth, -minSize);
-        applied = (depth0 - clamped) / s;
-        nextDepth = clamped;
-      }
-      depth = nextDepth;
-      center = add(center, scale(normal, s * applied));
-    }
-    return { center, normal, radius: profile.radius, depth };
-  }
-
   if (profile.type === 'triangle' || profile.type === 'prism') {
     let corners = profile.corners.map((point) => ({ ...point })) as TriangleEntity['corners'];
     const n = extrusionNormal(profile);

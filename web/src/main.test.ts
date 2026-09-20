@@ -1,2309 +1,1588 @@
-import { OrthographicCamera, PerspectiveCamera, Raycaster, Vector2, Vector3 } from 'three';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { HandsMessage, NavMessage, TrackedHandMessage } from './input/tracker-client';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as THREE from 'three';
 import type { AirCadApi } from './main';
-import { makeRect, type Entity } from './model/sketch';
-import { circleStroke, rectStroke, triangleStroke } from './model/test-helpers';
+import type { EdgeGuide } from './model/edge-inference';
+import { adaptiveGridStep } from './model/snap';
+import { makeRect } from './model/sketch';
 import { v2, v3, type Vec2, type Vec3 } from './model/vec';
+import type { HandsMessage, SpatialMessage, TrackedHandMessage } from './input/tracker-client';
 
-const h = vi.hoisted(() => ({
-  projector: {
-    project: (point: Vec3): Vec2 => ({ x: point.x, y: point.y - point.z }),
-    ray: (point: Vec2): { origin: Vec3; dir: Vec3 } => ({
-      origin: { x: point.x, y: point.y, z: 1000 },
-      dir: { x: 0, y: 0, z: -1 },
-    }),
-  },
-  orbit: {
-    orbit: vi.fn(),
-    pan: vi.fn(),
-    zoom: vi.fn(),
-    fit: vi.fn(),
-    setView: vi.fn(),
-    toggleProjection: vi.fn(() => true),
-    worldPerPixel: vi.fn(() => 1),
-  },
-  tracker: {} as {
-    onHands?: (message: HandsMessage) => void;
-    onThumb?: (message: unknown) => void;
-    onStatus?: (message: unknown) => void;
-    onConnection?: (state: string) => void;
-  },
-  mouse: {} as {
-    onMove?: (point: Vec2) => void;
-    onHold?: (action: 'draw' | 'orbit' | 'pan', down: boolean) => void;
-    onWheel?: (deltaY: number, point: Vec2) => void;
-  },
-  listeners: new Map<string, ((event: unknown) => void)[]>(),
-  hudStates: [] as { mode: string }[],
-  hudKeys: [] as { key: string; label: string }[][],
-  renderer: {
-    extrusions: [] as unknown[],
-    activeFaces: [] as unknown[],
-    sketches: [] as (readonly Entity[])[],
-    ghosts: [] as { points: readonly Vec3[] | null; label: { text: string; at: Vec3 } | null }[],
-    ghostClosed: [] as boolean[],
-  },
-  viewDirection: { x: 0, y: 0, z: -1 } as Vec3,
-  help: { visible: false },
-  measure: { isOpen: false, submit: null as null | ((text: string) => void) },
-  raf: null as null | ((time: number) => void),
-  nowMs: 10_000,
-  resizeCallbacks: [] as (() => void)[],
+const state = vi.hoisted(() => ({
+  renderer: null as any,
+  hud: null as any,
+  help: null as any,
+  measure: null as any,
+  mouse: null as any,
+  tracker: null as any,
+  viewport: null as any,
+  planeVisual: null as any,
+  toasts: [] as string[],
+  resolveCalls: 0,
+  rafCb: null as ((time: number) => void) | null,
+  windowListeners: {} as Record<string, ((event: Record<string, unknown>) => void)[]>,
 }));
 
-vi.mock('./scene/viewport', () => ({
-  Viewport: class {
-    readonly width = 1000;
-    readonly height = 800;
+vi.mock('./scene/viewport', async () => {
+  const { v2, v3 } = await import('./model/vec');
+  const raycaster = new THREE.Raycaster();
+  const scratch = new THREE.Vector3();
+  class MockViewport {
+    readonly scene = new THREE.Scene();
+    readonly perspective = new THREE.PerspectiveCamera(45, 800 / 600, 10, 1e6);
+    readonly orthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, -1e6, 1e6);
     ortho = false;
-    readonly scene = { add: (_object: unknown) => {} };
-    constructor(readonly container: unknown) {}
-    onResize(cb: () => void): () => void {
-      h.resizeCallbacks.push(cb);
-      return () => {};
+    width = 800;
+    height = 600;
+    private readonly resizeListeners = new Set<() => void>();
+    constructor(readonly container: unknown) {
+      state.viewport = this;
+      this.perspective.up.set(0, 0, 1);
+      this.orthographic.up.set(0, 0, 1);
     }
-    render(): void {}
-    viewDirection(): Vec3 {
-      return h.viewDirection;
+    get camera() {
+      return this.ortho ? this.orthographic : this.perspective;
+    }
+    get aspect() {
+      return this.width / Math.max(1, this.height);
+    }
+    onResize(listener: () => void) {
+      this.resizeListeners.add(listener);
+      return () => this.resizeListeners.delete(listener);
+    }
+    resize() {}
+    render() {}
+    viewDirection() {
+      const d = this.camera.getWorldDirection(new THREE.Vector3());
+      return v3(d.x, d.y, d.z);
+    }
+    project(world: Vec3): Vec2 | null {
+      const camera = this.syncCamera();
+      const point = scratch.set(world.x, world.y, world.z);
+      point.applyMatrix4(camera.matrixWorldInverse);
+      if (!this.ortho && point.z > -1e-6) return null;
+      point.applyMatrix4(camera.projectionMatrix);
+      return v2(((point.x + 1) / 2) * this.width, ((1 - point.y) / 2) * this.height);
+    }
+    ray(screen: Vec2) {
+      const camera = this.syncCamera();
+      const ndc = new THREE.Vector2((screen.x / this.width) * 2 - 1, -(screen.y / this.height) * 2 + 1);
+      raycaster.setFromCamera(ndc, camera);
+      const { origin, direction } = raycaster.ray;
+      return { origin: v3(origin.x, origin.y, origin.z), dir: v3(direction.x, direction.y, direction.z) };
+    }
+    worldPerPixel(world: Vec3): number {
+      const camera = this.syncCamera();
+      if (this.ortho) {
+        return (this.orthographic.top - this.orthographic.bottom) / Math.max(1, this.height);
+      }
+      const pos = camera.position;
+      const dist = Math.hypot(world.x - pos.x, world.y - pos.y, world.z - pos.z);
+      const fov = (45 * Math.PI) / 180;
+      return (2 * Math.max(1, dist) * Math.tan(fov / 2)) / Math.max(1, this.height);
     }
     projector() {
-      return h.projector;
+      this.syncCamera();
+      return {
+        project: (world: Vec3) => this.project(world),
+        ray: (screen: Vec2) => this.ray(screen),
+        worldPerPixel: (world: Vec3) => this.worldPerPixel(world),
+      };
     }
-  },
-}));
-
-vi.mock('./scene/orbit', () => ({
-  OrbitController: class {
-    readonly orbit = h.orbit.orbit;
-    readonly pan = h.orbit.pan;
-    readonly zoom = h.orbit.zoom;
-    readonly fit = h.orbit.fit;
-    readonly setView = h.orbit.setView;
-    readonly toggleProjection = h.orbit.toggleProjection;
-    readonly worldPerPixel = h.orbit.worldPerPixel;
-    constructor(_viewport: unknown) {}
-    onChange(): () => void {
-      return () => {};
+    private syncCamera() {
+      const camera = this.camera;
+      camera.updateMatrixWorld();
+      camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+      return camera;
     }
-  },
-}));
+  }
+  return { Viewport: MockViewport, CAMERA_FOV_DEG: 45 };
+});
 
-vi.mock('./scene/grid', () => ({
-  AxisTriad: class {
-    render(): void {}
-  },
-  createGroundGrid: () => ({}),
-}));
+vi.mock('./scene/grid', () => {
+  class AxisTriad {
+    render() {}
+  }
+  return { AxisTriad, createGroundGrid: () => new THREE.Group() };
+});
 
-vi.mock('./scene/workplane-visual', () => ({
-  WorkPlaneVisual: class {
-    readonly group = {};
-    update(): void {}
-  },
-}));
-
-vi.mock('./render/sketch-renderer', () => ({
-  SketchRenderer: class {
-    constructor(_viewport: unknown) {}
-    setSketch(entities: readonly Entity[]): void {
-      h.renderer.sketches.push([...entities]);
+vi.mock('./scene/workplane-visual', () => {
+  class WorkPlaneVisual {
+    readonly group = new THREE.Group();
+    last: { plane: { kind: string; offset: number }; step: number } | null = null;
+    constructor() {
+      state.planeVisual = this;
     }
-    setSelected(): void {}
-    setHover(): void {}
-    setExtrusion(entity: unknown): void {
-      if (entity) h.renderer.extrusions.push(entity);
+    update(plane: { kind: string; offset: number }, step: number) {
+      this.last = { plane, step };
     }
-    setActiveFace(face: unknown): void {
-      if (face) h.renderer.activeFaces.push(face);
-    }
-    setLastLabel(): void {}
-    setGhost(points: readonly Vec3[] | null, closed: boolean, label: { text: string; at: Vec3 } | null): void {
-      h.renderer.ghosts.push({ points, label });
-      h.renderer.ghostClosed.push(closed);
-    }
-    setInk(): void {}
-    fadeOut(): void {}
-    tick(): void {}
-  },
-}));
+    setVisible() {}
+  }
+  return { WorkPlaneVisual };
+});
 
-vi.mock('./ui/hud', () => ({
-  Hud: class {
-    constructor(_root: unknown) {}
-    update(state: { mode: string }): void {
-      h.hudStates.push(state);
+vi.mock('./render/sketch-renderer', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./render/sketch-renderer')>();
+  class MockRenderer {
+    sketch: unknown = null;
+    hovered: unknown = null;
+    lastLabel: unknown = null;
+    ink: unknown = null;
+    ghost: { points: Vec3[]; closed: boolean; label: { text: string; at: Vec3 } | null } | null = null;
+    guide: EdgeGuide | null = null;
+    constructor() {
+      state.renderer = this;
     }
-    setKeys(keys: { key: string; label: string }[]): void {
-      h.hudKeys.push(keys);
+    setSketch(entities: unknown) {
+      this.sketch = entities;
     }
-  },
-}));
+    setHover(entity: unknown) {
+      this.hovered = entity;
+    }
+    setLastLabel(entity: unknown) {
+      this.lastLabel = entity;
+    }
+    setInk(points: unknown) {
+      this.ink = points;
+    }
+    setEdgeGuide(guide: EdgeGuide | null) {
+      this.guide = guide;
+    }
+    setGhost(points: Vec3[] | null, closed: boolean, label: { text: string; at: Vec3 } | null) {
+      this.ghost = points ? { points, closed, label } : null;
+    }
+    setSelected() {}
+    setExtrusion() {}
+    setActiveFace() {}
+    fadeOut() {}
+    tick() {}
+  }
+  return { ...actual, SketchRenderer: MockRenderer };
+});
 
-vi.mock('./ui/cursor-glyph', () => ({
-  CursorGlyph: class {
-    constructor(_root: unknown) {}
-    update(): void {}
-  },
-}));
+vi.mock('./ui/hud', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./ui/hud')>();
+  class MockHud {
+    last: Record<string, unknown> | null = null;
+    keys: unknown = null;
+    constructor() {
+      state.hud = this;
+    }
+    update(next: Record<string, unknown>) {
+      this.last = next;
+    }
+    setKeys(keys: unknown) {
+      this.keys = keys;
+    }
+  }
+  return { ...actual, Hud: MockHud };
+});
 
-vi.mock('./ui/toast', () => ({
-  Toasts: class {
-    constructor(_root: unknown) {}
-    show(): void {}
-  },
-}));
+vi.mock('./ui/toast', () => {
+  class Toasts {
+    show(message: string) {
+      state.toasts.push(message);
+    }
+  }
+  return { Toasts };
+});
 
-vi.mock('./ui/pip', () => ({
-  CameraPip: class {
-    constructor(_root: unknown) {}
-    setThumb(): void {}
-    setHands(): void {}
-    setCameraState(): void {}
-    toggle(): boolean {
+vi.mock('./ui/help', () => {
+  class HelpOverlay {
+    visible = false;
+    constructor() {
+      state.help = this;
+    }
+    show() {
+      this.visible = true;
+    }
+    hide() {
+      this.visible = false;
+    }
+    toggle() {
+      this.visible = !this.visible;
+    }
+  }
+  return { HelpOverlay };
+});
+
+vi.mock('./ui/measure-input', () => {
+  class MeasureInput {
+    isOpen = false;
+    lastLabel = '';
+    lastInitial = '';
+    onSubmit: ((text: string) => void) | null = null;
+    constructor() {
+      state.measure = this;
+    }
+    open(label: string, onSubmit: (text: string) => void, _onClose?: () => void, initialValue?: string) {
+      this.isOpen = true;
+      this.lastLabel = label;
+      this.lastInitial = initialValue ?? '';
+      this.onSubmit = onSubmit;
+    }
+    close() {
+      this.isOpen = false;
+      this.onSubmit = null;
+    }
+    submit(text: string) {
+      const submit = this.onSubmit;
+      this.close();
+      if (text && submit) submit(text);
+    }
+  }
+  return { MeasureInput };
+});
+
+vi.mock('./ui/pip', () => {
+  class CameraPip {
+    setThumb() {}
+    setCameraState() {}
+    setHands() {}
+    setSpatial() {}
+    setStream() {}
+    toggle() {
       return false;
     }
-  },
-}));
+  }
+  return { CameraPip };
+});
 
-vi.mock('./ui/measure-input', () => ({
-  MeasureInput: class {
-    constructor(_root: unknown) {}
-    get isOpen(): boolean {
-      return h.measure.isOpen;
-    }
-    open(_label: string, onSubmit: (text: string) => void): void {
-      h.measure.isOpen = true;
-      h.measure.submit = onSubmit;
-    }
-    close(): void {
-      h.measure.isOpen = false;
-      h.measure.submit = null;
-    }
-  },
-}));
+vi.mock('./ui/cursor-glyph', () => {
+  class CursorGlyph {
+    update() {}
+  }
+  return { CursorGlyph };
+});
 
-vi.mock('./ui/help', () => ({
-  HelpOverlay: class {
-    constructor(_root: unknown, _platform: unknown) {}
-    get visible(): boolean {
-      return h.help.visible;
-    }
-    show(): void {
-      h.help.visible = true;
-    }
-    hide(): void {
-      h.help.visible = false;
-    }
-    toggle(): void {
-      h.help.visible = !h.help.visible;
-    }
-  },
-}));
+vi.mock('./ui/input-panel', () => {
+  class InputPanel {
+    update() {}
+  }
+  return { InputPanel };
+});
 
-vi.mock('./input/tracker-client', () => ({
-  defaultTrackerUrl: () => 'ws://mock/ws',
-  TrackerClient: class {
-    state = 'closed';
+vi.mock('./scene/spatial-cursor-visual', () => {
+  class SpatialCursorVisual {
+    readonly group = new THREE.Group();
+    update() {}
+  }
+  return { SpatialCursorVisual };
+});
+
+vi.mock('./input/tracker-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./input/tracker-client')>();
+  class MockTracker {
+    clock = { synced: true, offsetLower: 0, rttMs: 1 };
+    lastSnapshot = null;
     lastStatus = null;
-    constructor(
-      readonly url: string,
-      handlers: typeof h.tracker,
-    ) {
-      h.tracker = handlers;
+    constructor(_url: string, handlers: unknown) {
+      state.tracker = handlers;
     }
-    connect(): void {}
-    close(): void {}
-  },
-}));
+    connect() {}
+    close() {}
+  }
+  return { ...actual, TrackerClient: MockTracker, defaultTrackerUrl: () => 'ws://test' };
+});
 
-vi.mock('./input/mouse-source', () => ({
-  MouseSource: class {
-    constructor(_element: unknown, handlers: typeof h.mouse) {
-      h.mouse = handlers;
+vi.mock('./input/mouse-source', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./input/mouse-source')>();
+  class MockMouse {
+    constructor(_element: unknown, handlers: unknown) {
+      state.mouse = handlers;
     }
-    releaseAll(): void {}
-    dispose(): void {}
-  },
-}));
+    releaseAll() {}
+    dispose() {}
+  }
+  return { ...actual, MouseSource: MockMouse };
+});
 
-let api: AirCadApi;
+vi.mock('./model/stroke', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./model/stroke')>();
+  const counted = (...args: Parameters<typeof actual.resolveStroke>) => {
+    state.resolveCalls++;
+    return actual.resolveStroke(...args);
+  };
+  return { ...actual, resolveStroke: counted };
+});
 
-const fire = (type: string, event?: unknown): void => {
-  for (const listener of h.listeners.get(type) ?? []) listener(event);
-};
-
-const runFrame = (): void => {
-  const cb = h.raf;
-  h.raf = null;
-  cb?.(h.nowMs);
-};
-
-const FRAME = { w: 640, h: 480 };
-
-function tipFor(px: number, py: number): [number, number] {
-  return [FRAME.w * 0.12 + (px / 1000) * FRAME.w * 0.76, FRAME.h * 0.12 + (py / 800) * FRAME.h * 0.76];
+class FakeElement {
+  className = '';
+  tabIndex = 0;
+  readonly children: unknown[] = [];
+  clientWidth = 800;
+  clientHeight = 600;
+  appendChild<T>(child: T): T {
+    this.children.push(child);
+    return child;
+  }
+  append(...children: unknown[]): void {
+    this.children.push(...children);
+  }
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  focus(): void {}
+  setPointerCapture(): void {}
+  releasePointerCapture(): void {}
+  getBoundingClientRect() {
+    return { left: 0, top: 0, width: 800, height: 600 };
+  }
 }
 
-function handAt(px: number, py: number, overrides: Partial<TrackedHandMessage> = {}, nav: NavMessage | null = null): HandsMessage {
+let api: AirCadApi;
+let frameTime = 0;
+let gridOn = true;
+
+function tick(dt = 16): void {
+  frameTime += dt;
+  state.rafCb?.(frameTime);
+}
+
+function finishTransitions(): void {
+  tick(200);
+}
+
+function dispatchWindow(type: string, event: Record<string, unknown>): void {
+  for (const listener of state.windowListeners[type] ?? []) listener(event);
+}
+
+const keyEvent = (code: string, over: Record<string, unknown> = {}) => ({
+  code,
+  ctrlKey: false,
+  shiftKey: false,
+  altKey: false,
+  metaKey: false,
+  repeat: false,
+  target: {},
+  preventDefault() {},
+  ...over,
+});
+
+function cameraDir(): Vec3 {
+  const d = state.viewport.perspective.getWorldDirection(new THREE.Vector3());
+  return v3(d.x, d.y, d.z);
+}
+
+function setCursorWorld(world: Vec3): void {
+  const px = api.project(world);
+  if (!px) throw new Error(`cannot project ${JSON.stringify(world)}`);
+  api.setCursor(px);
+}
+
+function strokeThrough(worldPoints: Vec3[]): void {
+  setCursorWorld(worldPoints[0]);
+  api.hold('draw', true);
+  for (const point of worldPoints.slice(1)) setCursorWorld(point);
+  api.hold('draw', false);
+}
+
+function setGrid(on: boolean): void {
+  if (gridOn !== on) {
+    api.press('toggleGrid');
+    gridOn = on;
+  }
+}
+
+const handMessage = (nav: HandsMessage['nav'], over: Partial<TrackedHandMessage> = {}): HandsMessage => {
   const hand: TrackedHandMessage = {
     id: 1,
     handedness: 'right',
-    tip: tipFor(px, py),
-    thumb: [0, 0],
-    palm: [0, 0],
+    tip: [320, 240],
+    thumb: [300, 250],
+    palm: [330, 300],
     palmSize: 80,
     pinching: false,
     open: false,
     openArmed: false,
     landmarks: [],
-    ...overrides,
+    ...over,
   };
-  return { type: 'hands', t: h.nowMs / 1000, frame: { ...FRAME }, hands: [hand], nav };
-}
+  return { type: 'hands', t: 0, frame: { w: 640, h: 480 }, hands: [hand], nav };
+};
 
-const emitHands = (message: HandsMessage): void => h.tracker.onHands?.(message);
-const emitEmptyHands = (): void => h.tracker.onHands?.({ type: 'hands', t: 0, frame: { ...FRAME }, hands: [], nav: null });
-const setHand = (p: Vec2): void => emitHands(handAt(p.x, p.y));
+const emptyHands = (): HandsMessage => ({ type: 'hands', t: 0, frame: { w: 640, h: 480 }, hands: [], nav: null });
 
-function startExtrusion(setCursor: (p: Vec2) => void = (p) => api.setCursor(p)): string {
-  api.commands.addRect([v3(100, 100, 0), v3(500, 100, 0), v3(500, 400, 0), v3(100, 400, 0)]);
-  const serialized = api.sketch.serialize();
-  setCursor(v2(250, 250));
-  api.press('select');
-  api.press('toggleGrid');
-  api.press('extrude');
-  return serialized;
-}
-
-beforeEach(async () => {
-  vi.resetModules();
-  h.tracker = {};
-  h.mouse = {};
-  h.listeners = new Map();
-  h.hudStates = [];
-  h.hudKeys = [];
-  h.renderer.extrusions = [];
-  h.renderer.activeFaces = [];
-  h.renderer.sketches = [];
-  h.renderer.ghosts = [];
-  h.renderer.ghostClosed = [];
-  h.viewDirection = { x: 0, y: 0, z: -1 };
-  h.help.visible = false;
-  h.measure.isOpen = false;
-  h.measure.submit = null;
-  h.raf = null;
-  h.nowMs = 10_000;
-  h.resizeCallbacks = [];
-  vi.clearAllMocks();
-  const windowStub = {
-    addEventListener: (type: string, listener: (event: unknown) => void) => {
-      const list = h.listeners.get(type) ?? [];
-      list.push(listener);
-      h.listeners.set(type, list);
+beforeAll(async () => {
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => new FakeElement(),
+    getElementById: () => new FakeElement(),
+  };
+  (globalThis as Record<string, unknown>).window = {
+    addEventListener: (type: string, listener: (event: Record<string, unknown>) => void) => {
+      (state.windowListeners[type] ??= []).push(listener);
     },
-    location: { protocol: 'http:', host: 'aircad.test' },
+    removeEventListener: () => {},
+    matchMedia: () => ({ matches: false }),
+    location: { protocol: 'http:', host: 'localhost' },
   };
-  vi.stubGlobal('window', windowStub);
-  vi.stubGlobal('document', {
-    getElementById: (id: string) => (id === 'app' ? { appendChild: () => {}, append: () => {} } : null),
-    createElement: () => ({ className: '', tabIndex: 0, style: {}, focus: () => {} }),
-  });
-  vi.stubGlobal('requestAnimationFrame', (cb: (time: number) => void) => {
-    h.raf = cb;
+  (globalThis as Record<string, unknown>).requestAnimationFrame = (cb: (time: number) => void) => {
+    state.rafCb = cb;
     return 1;
-  });
-  vi.stubGlobal('performance', { now: () => h.nowMs });
+  };
   await import('./main');
-  api = (windowStub as { aircad?: AirCadApi }).aircad!;
+  api = (globalThis as { window: { aircad: AirCadApi } }).window.aircad;
 });
 
-afterEach(() => {
-  vi.unstubAllGlobals();
+beforeEach(() => {
+  if (state.help) state.help.visible = false;
+  if (state.measure) state.measure.isOpen = false;
+  dispatchWindow('blur', {});
+  api.setTrackerSource('webcam');
+  state.tracker?.onConnection('closed');
+  api.sketch.load({ version: 1, units: 'mm', entities: [] });
+  api.press('clear');
+  api.press('viewTop');
+  finishTransitions();
+  if (api.planeMode() === 'manual') api.press('toggleAutoPlane');
+  setGrid(true);
+  state.toasts.length = 0;
+  state.resolveCalls = 0;
 });
 
-describe('camera navigation during push/pull', () => {
-  it.each(['orbit', 'pan'] as const)('%s overrides an active mouse/Space pull and resumes without a depth jump', (nav) => {
-    const serialized = startExtrusion();
-    api.hold('draw', true);
-    api.setCursor(v2(250, 200));
-    expect(api.extrusion()).toMatchObject({ depth: 50, dragging: true });
-    const preview = structuredClone(api.extrusion()!);
-    const spy = nav === 'orbit' ? h.orbit.orbit : h.orbit.pan;
-    const other = nav === 'orbit' ? h.orbit.pan : h.orbit.orbit;
-
-    api.hold(nav, true);
-    api.setCursor(v2(300, 150));
-    if (nav === 'orbit') expect(spy).toHaveBeenCalledWith(50, -50, v3(300, 250, 0));
-    else expect(spy).toHaveBeenCalledWith(50, -50);
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(other).not.toHaveBeenCalled();
-    const frozen = api.extrusion()!;
-    expect(frozen.depth).toBe(preview.depth);
-    expect(frozen.corners).toEqual(preview.corners);
-    expect(frozen.face).toBe(preview.face);
-    expect(frozen.dragging).toBe(false);
-    expect(api.sketch.serialize()).toBe(serialized);
-
-    api.hold(nav, false);
-    expect(api.extrusion()!.depth).toBe(50);
-    expect(api.extrusion()!.dragging).toBe(true);
-    api.setCursor(v2(300, 140));
-    expect(api.extrusion()!.depth).toBe(60);
-
-    api.press('confirm');
-    expect(api.sketch.serialize()).not.toBe(serialized);
-    api.press('undo');
-    expect(api.sketch.serialize()).toBe(serialized);
-    expect(api.commands.undo()).toBe('add rect');
-    expect(api.sketch.size).toBe(0);
-  });
-
-  it.each(['orbit', 'pan'] as const)('%s overrides an active hand pinch and resumes without a depth jump', (nav) => {
-    const serialized = startExtrusion(setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(250, 200, { pinching: true }));
-    expect(api.extrusion()!.depth).toBeCloseTo(50);
-    expect(api.extrusion()!.dragging).toBe(true);
-    const preview = structuredClone(api.extrusion()!);
-    const spy = nav === 'orbit' ? h.orbit.orbit : h.orbit.pan;
-    const other = nav === 'orbit' ? h.orbit.pan : h.orbit.orbit;
-
-    api.hold(nav, true);
-    emitHands(handAt(300, 150, { pinching: true }));
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0][0]).toBeCloseTo(50);
-    expect(spy.mock.calls[0][1]).toBeCloseTo(-50);
-    if (nav === 'orbit') expect(spy.mock.calls[0][2]).toEqual(v3(300, 250, 0));
-    expect(other).not.toHaveBeenCalled();
-    const frozen = api.extrusion()!;
-    expect(frozen.depth).toBe(preview.depth);
-    expect(frozen.corners).toEqual(preview.corners);
-    expect(frozen.dragging).toBe(false);
-    expect(api.sketch.serialize()).toBe(serialized);
-
-    api.hold(nav, false);
-    emitHands(handAt(300, 140, { pinching: true }));
-    expect(api.extrusion()!.depth).toBeCloseTo(60);
-    api.press('confirm');
-    api.press('undo');
-    expect(api.sketch.serialize()).toBe(serialized);
-  });
-
-  it('orbit wins when Shift and Ctrl are both held, and releasing it re-baselines pan', () => {
-    api.commands.addRect([v3(100, 100, 0), v3(500, 100, 0), v3(500, 400, 0), v3(100, 400, 0)]);
-    api.setCursor(v2(250, 250));
-    api.hold('pan', true);
-    api.hold('orbit', true);
-    api.setCursor(v2(300, 300));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    expect(h.orbit.orbit).toHaveBeenCalledWith(50, 50, v3(300, 250, 0));
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    api.hold('orbit', false);
-    api.setCursor(v2(320, 310));
-    expect(h.orbit.pan).toHaveBeenCalledTimes(1);
-    expect(h.orbit.pan).toHaveBeenCalledWith(20, 10);
-  });
-
-  it('does not begin geometry when draw is pressed while navigating', () => {
-    api.commands.addRect([v3(100, 100, 0), v3(500, 100, 0), v3(500, 400, 0), v3(100, 400, 0)]);
-    const serialized = api.sketch.serialize();
-    api.setCursor(v2(250, 250));
-    api.hold('orbit', true);
-    api.hold('draw', true);
-    api.setCursor(v2(600, 500));
-    api.hold('draw', false);
-    api.hold('orbit', false);
-    expect(api.sketch.serialize()).toBe(serialized);
-    expect(api.lastRecognition()).toBeNull();
-  });
-
-  it('commits only the pre-navigation stroke when draw releases during orbit', () => {
-    api.press('toggleGrid');
-    api.setCursor(v2(100, 100));
-    api.hold('draw', true);
-    api.setCursor(v2(150, 100));
-    api.hold('orbit', true);
-    api.setCursor(v2(500, 400));
-    api.hold('draw', false);
-    api.hold('orbit', false);
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    expect(api.extrusion()).toBeNull();
-    const entity = api.sketch.last;
-    expect(entity?.type).toBe('line');
-    if (entity?.type === 'line') {
-      expect(entity.a).toEqual(v3(100, 100, 0));
-      expect(entity.b).toEqual(v3(150, 100, 0));
-    }
-  });
-
-  it.each([true, false])('applies the camera once per hand frame while navigating (navAssist=%s)', (assist) => {
-    if (assist) api.press('toggleNavAssist');
-    api.hold('orbit', true);
-    emitHands(handAt(300, 300));
-    h.orbit.orbit.mockClear();
-    emitHands(handAt(340, 320, {}, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    expect(h.orbit.orbit).toHaveBeenCalledWith(40, 20, v3(0, 0, 0));
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-  });
-
-  it('applies the camera once while pinching mid-extrusion and keeps preview + selection', () => {
-    api.press('toggleNavAssist');
-    startExtrusion(setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(250, 200, { pinching: true }));
-    const preview = structuredClone(api.extrusion()!);
-    const selectedId = api.selected()?.id;
-    api.hold('orbit', true);
-    h.orbit.orbit.mockClear();
-    emitHands(handAt(350, 120, { pinching: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    expect(h.orbit.orbit.mock.calls[0][0]).toBeCloseTo(100);
-    expect(h.orbit.orbit.mock.calls[0][1]).toBeCloseTo(-80);
-    expect(h.orbit.orbit.mock.calls[0][2]).toEqual(v3(300, 250, 0));
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-    const frozen = api.extrusion()!;
-    expect(frozen.depth).toBe(preview.depth);
-    expect(frozen.corners).toEqual(preview.corners);
-    expect(api.selected()?.id).toBe(selectedId);
-  });
-
-  it('applies the camera once with an open palm while an extrusion idles', () => {
-    api.press('toggleNavAssist');
-    startExtrusion(setHand);
-    api.hold('orbit', true);
-    emitHands(handAt(300, 250));
-    h.orbit.orbit.mockClear();
-    emitHands(handAt(360, 300, { open: true, openArmed: true }, { mode: 'two', pan: [10, 10], zoom: 1.2, rotation: 0 }));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    expect(h.orbit.orbit.mock.calls[0][0]).toBeCloseTo(60);
-    expect(h.orbit.orbit.mock.calls[0][1]).toBeCloseTo(50);
-    expect(h.orbit.orbit.mock.calls[0][2]).toEqual(v3(300, 250, 0));
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-  });
-
-  it('unmodified palm navigation still drives the camera when idle', () => {
-    api.press('toggleNavAssist');
-    emitHands(handAt(400, 300, { open: true, openArmed: true }));
-    emitHands(handAt(420, 310, { open: true, openArmed: true }, { mode: 'one', pan: [10, 20], zoom: 1, rotation: 0 }));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    expect(h.orbit.orbit).toHaveBeenCalledWith(15.625, 31.25, v3(0, 0, 0));
-    h.orbit.orbit.mockClear();
-    emitHands(handAt(430, 320, { open: true, openArmed: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
-    expect(h.orbit.pan).toHaveBeenCalledWith(62.5, 46.875);
-    expect(h.orbit.zoom).toHaveBeenCalledWith(1.3);
-  });
-
-  it('disabled palm assist makes no camera calls', () => {
-    emitHands(handAt(400, 300, { open: true, openArmed: true }));
-    emitHands(handAt(420, 310, { open: true, openArmed: true }, { mode: 'one', pan: [10, 20], zoom: 1, rotation: 0 }));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-  });
-
-  it('automatic palm navigation stays blocked during an extrusion without modifiers', () => {
-    api.press('toggleNavAssist');
-    startExtrusion(setHand);
-    emitHands(handAt(400, 300, { open: true, openArmed: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-  });
-
-  it('keeps the mouse fallback: right-drag orbits, middle-drag pans, wheel zooms', () => {
-    api.setCursor(v2(300, 300));
-    h.mouse.onHold?.('orbit', true);
-    h.mouse.onMove?.(v2(350, 320));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    expect(h.orbit.orbit).toHaveBeenCalledWith(50, 20, v3(0, 0, 0));
-    h.mouse.onHold?.('orbit', false);
-    h.mouse.onHold?.('pan', true);
-    h.mouse.onMove?.(v2(360, 330));
-    expect(h.orbit.pan).toHaveBeenCalledTimes(1);
-    expect(h.orbit.pan).toHaveBeenCalledWith(10, 10);
-    h.mouse.onHold?.('pan', false);
-    h.mouse.onWheel?.(-100, v2(360, 330));
-    expect(h.orbit.zoom).toHaveBeenCalledWith(1.15, v2(360, 330));
-  });
-});
-
-describe('navigation rebases when the cursor source changes', () => {
-  beforeEach(() => {
-    api.hold('orbit', true);
-  });
-
-  it('a lost hand returning far away seeds a new baseline', () => {
-    emitHands(handAt(300, 300));
-    emitHands(handAt(320, 300));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    h.orbit.orbit.mockClear();
-    emitEmptyHands();
-    emitHands(handAt(700, 600));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    emitHands(handAt(710, 600));
-    expect(h.orbit.orbit).toHaveBeenCalledWith(10, 0, v3(0, 0, 0));
-  });
-
-  it('a different hand id rebases instead of jumping', () => {
-    emitHands(handAt(300, 300));
-    h.orbit.orbit.mockClear();
-    emitHands(handAt(700, 600, { id: 2 }));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    emitHands(handAt(710, 600, { id: 2 }));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-  });
-
-  it('the mouse taking over from a lost hand rebases', () => {
-    emitHands(handAt(300, 300));
-    emitEmptyHands();
-    h.orbit.orbit.mockClear();
-    h.mouse.onMove?.(v2(200, 200));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    h.mouse.onMove?.(v2(210, 200));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-  });
-
-  it('a hand timeout in the frame loop rebases', () => {
-    emitHands(handAt(300, 300));
-    h.orbit.orbit.mockClear();
-    h.nowMs += 1000;
-    runFrame();
-    emitHands(handAt(700, 600));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    emitHands(handAt(710, 600));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-  });
-
-  it('tracker disconnection rebases even when the same hand id returns', () => {
-    emitHands(handAt(300, 300));
-    h.orbit.orbit.mockClear();
-    h.tracker.onConnection?.('closed');
-    h.tracker.onConnection?.('open');
-    emitHands(handAt(700, 600));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    emitHands(handAt(710, 600));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('navigation safety pauses', () => {
-  it('a tracking-loss hard pause survives camera navigation until a real release and regrip', () => {
-    startExtrusion(setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(250, 200, { pinching: true }));
-    expect(api.extrusion()!.depth).toBeCloseTo(50);
-    emitEmptyHands();
-    emitHands(handAt(600, 500, { pinching: true }));
-    expect(api.extrusion()!.depth).toBeCloseTo(50);
-    expect(api.extrusion()!.dragging).toBe(false);
-    api.hold('orbit', true);
-    emitHands(handAt(650, 450, { pinching: true }));
-    expect(api.extrusion()!.depth).toBeCloseTo(50);
-    api.hold('orbit', false);
-    emitHands(handAt(660, 450, { pinching: true }));
-    expect(api.extrusion()!.depth).toBeCloseTo(50);
-    expect(api.extrusion()!.dragging).toBe(false);
-    emitHands(handAt(660, 450));
-    emitHands(handAt(660, 450, { pinching: true }));
-    emitHands(handAt(660, 440, { pinching: true }));
-    expect(api.extrusion()!.depth).toBeCloseTo(60);
-  });
-
-  it('the help overlay suppresses navigation and re-baselines on close', () => {
-    startExtrusion();
-    api.hold('draw', true);
-    api.setCursor(v2(250, 200));
-    api.hold('orbit', true);
-    api.setCursor(v2(300, 150));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    h.orbit.orbit.mockClear();
-    api.press('help');
-    api.setCursor(v2(500, 400));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    api.press('help');
-    api.setCursor(v2(550, 400));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    api.setCursor(v2(560, 400));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    expect(h.orbit.orbit).toHaveBeenCalledWith(10, 0, v3(300, 250, 0));
-    api.hold('orbit', false);
-    api.setCursor(v2(560, 300));
-    expect(api.extrusion()!.depth).toBe(50);
-    expect(api.extrusion()!.dragging).toBe(false);
-    api.hold('draw', false);
-    api.hold('draw', true);
-    api.setCursor(v2(560, 290));
-    expect(api.extrusion()!.depth).toBe(60);
-  });
-
-  it('the measure input suppresses navigation and freezes the preview', () => {
-    startExtrusion();
-    api.hold('draw', true);
-    api.setCursor(v2(250, 200));
-    api.hold('orbit', true);
-    api.press('measure');
-    api.setCursor(v2(400, 300));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(api.extrusion()!.depth).toBe(50);
-    h.measure.isOpen = false;
-    api.setCursor(v2(450, 300));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    api.setCursor(v2(460, 300));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-  });
-
-  it('window blur releases all holds and keeps the preview frozen', () => {
-    startExtrusion();
-    api.hold('draw', true);
-    api.setCursor(v2(250, 200));
-    api.hold('orbit', true);
-    fire('blur');
-    api.setCursor(v2(500, 400));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(api.extrusion()!.depth).toBe(50);
-    fire('focus');
-    api.setCursor(v2(550, 400));
-    api.setCursor(v2(560, 400));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(api.extrusion()!.depth).toBe(50);
-    expect(api.extrusion()!.dragging).toBe(false);
-  });
-});
-
-describe('navigation HUD', () => {
-  it('reports ORBIT and PAN as the mode while navigating mid-extrusion', () => {
-    startExtrusion();
-    api.hold('draw', true);
-    api.hold('orbit', true);
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('ORBIT');
-    api.hold('orbit', false);
-    api.hold('pan', true);
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('PAN');
-  });
-
-  it('lists orbit and pan hints while extruding', () => {
-    startExtrusion();
-    runFrame();
-    const keys = h.hudKeys.at(-1) ?? [];
-    expect(keys).toContainEqual({ key: 'Shift', label: 'orbit' });
-    expect(keys).toContainEqual({ key: 'Ctrl', label: 'pan' });
-  });
-});
-
-describe('drawing commits through the timed hand path', () => {
-  it('commits a rough square as a rectangle after One-Euro-smoothed hand samples', () => {
-    const points = rectStroke(0, 0, 1000, 1000, { pointsPerSide: 12, jitter: 150 });
-    const scale = 0.6;
-    const ox = 80;
-    const oy = 80;
-    const previousProject = h.projector.project;
-    const previousRay = h.projector.ray;
-    h.projector.project = (point: Vec3): Vec2 => v2(ox + point.x * scale, oy + (point.y - point.z) * scale);
-    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({
-      origin: { x: (point.x - ox) / scale, y: (point.y - oy) / scale, z: 1000 },
-      dir: { x: 0, y: 0, z: -1 },
-    });
-    try {
-      runFrame();
-      const screenFor = (point: Vec2): Vec2 => v2(ox + point.x * scale, oy + point.y * scale);
-      const first = screenFor(points[0]);
-      emitHands(handAt(first.x, first.y));
-      api.hold('draw', true);
-      for (const point of points.slice(1)) {
-        h.nowMs += 33;
-        const screen = screenFor(point);
-        emitHands(handAt(screen.x, screen.y));
+describe('app stroke flows', () => {
+  it('completes a wall against a shared floor border in one undoable commit', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    api.press('viewRight');
+    finishTransitions();
+    setGrid(false);
+    strokeThrough([
+      v3(4000, 1500, 0),
+      v3(4000, 1500, 1200),
+      v3(4000, 1500, 2500),
+      v3(4000, 2000, 2500),
+      v3(4000, 2500, 2500),
+      v3(4000, 2500, 1200),
+      v3(4000, 2500, 0),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('shared-border rectangle');
+    expect(api.sketch.size).toBe(2);
+    const wall = api.sketch.all[1];
+    expect(wall.type).toBe('rect');
+    if (wall.type === 'rect') {
+      const expected = [v3(4000, 1500, 0), v3(4000, 1500, 2500), v3(4000, 2500, 2500), v3(4000, 2500, 0)];
+      for (const corner of wall.corners) {
+        expect(expected.some((point) => Math.hypot(point.x - corner.x, point.y - corner.y, point.z - corner.z) < 1e-3)).toBe(true);
       }
-      api.hold('draw', false);
-    } finally {
-      h.projector.project = previousProject;
-      h.projector.ray = previousRay;
     }
+    api.commands.undo();
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.all[0].type).toBe('rect');
+  });
+
+  it('assembles separately drawn lines into a rectangle atomically', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    api.commands.addLine(v3(4000, 0, 0), v3(4000, 0, 2500));
+    api.commands.addLine(v3(4000, 0, 2500), v3(4000, 3000, 2500));
+    api.press('viewRight');
+    finishTransitions();
+    setGrid(false);
+    strokeThrough([v3(4000, 3000, 2500), v3(4000, 3000, 1200), v3(4000, 3000, 0)]);
+    expect(api.lastRecognition()?.reason).toBe('assembled rectangle');
+    expect(api.sketch.size).toBe(2);
+    expect(api.sketch.all.every((entity) => entity.type === 'rect')).toBe(true);
+    api.commands.undo();
+    expect(api.sketch.size).toBe(3);
+    expect(api.sketch.all.filter((entity) => entity.type === 'line')).toHaveLength(2);
+  });
+
+  it('previews the eventual shared-border rectangle while drawing', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    api.press('viewRight');
+    finishTransitions();
+    setGrid(false);
+    setCursorWorld(v3(4000, 1500, 0));
+    api.hold('draw', true);
+    for (const point of [v3(4000, 1500, 2500), v3(4000, 2000, 2500), v3(4000, 2500, 2500), v3(4000, 2500, 0)]) {
+      setCursorWorld(point);
+    }
+    tick();
+    const ghost = state.renderer.ghost;
+    expect(ghost).not.toBeNull();
+    expect(ghost.closed).toBe(true);
+    expect(ghost.label?.text).toContain('shared border');
+    api.hold('draw', false);
+    const wall = api.sketch.all[1];
+    expect(wall.type).toBe('rect');
+    if (wall.type === 'rect') {
+      for (const corner of wall.corners) {
+        expect(ghost.points.some((point: Vec3) => Math.hypot(point.x - corner.x, point.y - corner.y, point.z - corner.z) < 1e-3)).toBe(true);
+      }
+    }
+  });
+
+  it('builds a wall from three separately drawn strokes and restores them on undo', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    api.press('viewRight');
+    finishTransitions();
+    setGrid(false);
+    strokeThrough([v3(4000, 0, 0), v3(4000, 0, 1200), v3(4000, 0, 2500)]);
+    expect(api.sketch.size).toBe(2);
+    strokeThrough([v3(4000, 0, 2500), v3(4000, 1500, 2500), v3(4000, 3000, 2500)]);
+    expect(api.sketch.size).toBe(3);
+    strokeThrough([v3(4000, 3000, 2500), v3(4000, 3000, 1200), v3(4000, 3000, 0)]);
+    expect(api.lastRecognition()?.reason).toBe('assembled rectangle');
+    expect(api.sketch.size).toBe(2);
+    expect(api.sketch.all.every((entity) => entity.type === 'rect')).toBe(true);
+    api.commands.undo();
+    expect(api.sketch.size).toBe(3);
+    expect(api.sketch.all.filter((entity) => entity.type === 'line')).toHaveLength(2);
+  });
+
+  it('treats a repeated rectangle as a duplicate without history', () => {
+    setGrid(false);
+    const loop = [
+      v3(0, 0, 0),
+      v3(2000, 0, 0),
+      v3(4000, 0, 0),
+      v3(4000, 1500, 0),
+      v3(4000, 3000, 0),
+      v3(2000, 3000, 0),
+      v3(0, 3000, 0),
+      v3(0, 1500, 0),
+      v3(0, 0, 0),
+    ];
+    strokeThrough(loop);
+    expect(api.sketch.size).toBe(1);
+    strokeThrough(loop);
+    expect(api.sketch.size).toBe(1);
+    expect(state.toasts.some((message) => message.includes('already exists'))).toBe(true);
+    api.commands.undo();
+    expect(api.sketch.size).toBe(0);
+    expect(api.commands.undo()).toBeNull();
+  });
+
+  it('aligns a rough adjacent rectangle to the whole shared border in preview and commit', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    api.press('viewTop');
+    finishTransitions();
+    setGrid(false);
+    setCursorWorld(v3(4000, 500, 0));
+    api.hold('draw', true);
+    for (const point of [v3(7700, 500, 0), v3(7700, 1500, 0), v3(7700, 2500, 0), v3(4000, 2500, 0)]) setCursorWorld(point);
+    tick();
+    const ghost = state.renderer.ghost;
+    expect(ghost).not.toBeNull();
+    const expected = [v3(4000, 0, 0), v3(8000, 0, 0), v3(8000, 3000, 0), v3(4000, 3000, 0)];
+    for (const corner of expected) {
+      expect(ghost!.points.some((point: Vec3) => Math.hypot(point.x - corner.x, point.y - corner.y, point.z - corner.z) < 1e-3)).toBe(true);
+    }
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(2);
+    const floor = api.sketch.all[0];
+    if (floor.type === 'rect') {
+      expect(floor.corners).toEqual(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    }
+    const committed = api.sketch.all[1];
+    expect(committed.type).toBe('rect');
+    if (committed.type !== 'rect') throw new Error('expected a committed rectangle');
+    expect(committed.corners).toEqual(expected);
+    api.commands.undo();
+    expect(api.sketch.size).toBe(1);
+    api.commands.redo();
+    expect(api.sketch.size).toBe(2);
+    const restored = api.sketch.all[1];
+    expect(restored.id).toBe(committed.id);
+    if (restored.type === 'rect') expect(restored.corners).toEqual(committed.corners);
+
+    const secondLoop = [v3(11800, 500, 0), v3(11800, 2500, 0), v3(8100, 2500, 0), v3(8100, 500, 0), v3(11800, 500, 0)];
+    strokeThrough(secondLoop);
     expect(api.lastRecognition()?.reason).toBe('rectangle');
-    expect(api.sketch.last?.type).toBe('rect');
-  });
-
-  it('commits a real circle stroke, selects it, and opens a cylinder preview with Q', () => {
-    const points = circleStroke(300, 250, 100);
-    api.press('toggleGrid');
-    api.setCursor(points[0]);
-    api.hold('draw', true);
-    for (const point of points.slice(1)) api.setCursor(point);
-    api.hold('draw', false);
-
-    expect(api.lastRecognition()?.reason).toBe('circle');
-    expect(api.sketch.last?.type).toBe('circle');
-    expect(api.selected()?.id).toBe(api.sketch.last?.id);
-    api.press('extrude');
-    expect(api.extrusion()?.preview.type).toBe('cylinder');
+    expect(api.sketch.size).toBe(3);
+    const second = api.sketch.all[2];
+    if (second.type !== 'rect') throw new Error('expected the aligned outline to commit');
+    expect(second.corners).toHaveLength(4);
+    for (const corner of [v3(8000, 0, 0), v3(12000, 0, 0), v3(12000, 3000, 0), v3(8000, 3000, 0)]) {
+      expect(second.corners.some((point) => Math.hypot(point.x - corner.x, point.y - corner.y, point.z - corner.z) < 1e-3)).toBe(true);
+    }
+    strokeThrough(secondLoop);
+    expect(api.lastRecognition()?.reason).toBe('rectangle already exists');
+    expect(api.sketch.size).toBe(3);
+    api.commands.undo();
+    expect(api.sketch.size).toBe(2);
   });
 });
 
-describe('preview rendering invalidation', () => {
-  it('repaints a rectangular side pull even when depth is unchanged', () => {
-    api.commands.addRect([v3(100, 100, 0), v3(500, 100, 0), v3(500, 400, 0), v3(100, 400, 0)]);
-    api.setCursor(v2(300, 250));
-    api.press('select');
-    api.press('toggleGrid');
-    api.press('extrude');
-    api.hold('draw', true);
-    api.setCursor(v2(300, 150));
-    api.hold('draw', false);
-    api.press('confirm');
-
-    api.setCursor(v2(300, 250));
-    api.press('select');
-    api.press('extrude');
+describe('work plane modes', () => {
+  it('defaults to auto, toggles with A, and pins with Tab or view keys', () => {
+    expect(api.planeMode()).toBe('auto');
+    api.press('toggleAutoPlane');
+    expect(api.planeMode()).toBe('manual');
+    api.press('toggleAutoPlane');
+    expect(api.planeMode()).toBe('auto');
     api.press('cyclePlane');
+    expect(api.planeMode()).toBe('manual');
+    expect(api.plane().kind).toBe('XZ');
+    api.press('viewTop');
+    expect(api.plane().kind).toBe('XY');
+    api.press('viewIso');
+    finishTransitions();
+    expect(api.planeMode()).toBe('manual');
+    expect(api.plane().kind).toBe('XY');
+  });
+
+  it('lifts the plane onto a hovered face interior in auto mode', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 2500), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    setCursorWorld(v3(2000, 1500, 2500));
+    tick();
+    expect(api.plane().offset).toBeCloseTo(2500, 5);
+    expect(api.plane().kind).toBe('XY');
+    expect(state.hud.last?.planeMode).toBe('Auto');
+    expect(state.hud.last?.planeReason).toBe('hovered face');
+  });
+
+  it('slides the highlighted plane through an off-plane vertex without waiting for dwell', () => {
+    const point = v3(2000, 1500, 2500);
+    api.commands.addLine(point, v3(3000, 1500, 2500));
+    expect(api.plane().contains(point)).toBe(false);
+    setCursorWorld(point);
+    tick();
+    expect(api.plane().contains(point)).toBe(true);
+    expect(state.planeVisual.last?.plane.offset).toBeCloseTo(api.plane().offset, 5);
+    expect(state.hud.last?.planeReason).toBe('snapped vertex');
+  });
+
+  it('keeps a Tab-cycled plane through the hovered corner', () => {
+    const corner = v3(4000, 3000, 0);
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    setCursorWorld(corner);
     api.press('cyclePlane');
-    expect(api.extrusion()?.face).toBe('right');
-    const before = api.extrusion();
-    h.renderer.extrusions = [];
-    api.hold('draw', true);
-    api.setCursor(v2(350, 250));
-    api.hold('draw', false);
+    expect(api.plane().kind).toBe('XZ');
+    expect(api.plane().contains(corner)).toBe(true);
+    expect(api.plane().offset).toBeCloseTo(3000, 5);
+  });
 
-    const after = api.extrusion();
-    expect(after?.depth).toBe(before?.depth);
-    expect(after?.preview.type).toBe('extrusion');
-    if (after?.preview.type === 'extrusion' && before?.preview.type === 'extrusion') {
-      expect(after.preview.corners[1].x).toBeGreaterThan(before.preview.corners[1].x);
-      expect(h.renderer.extrusions.at(-1)).toMatchObject({ type: 'extrusion', corners: expect.any(Array) });
-    }
+  it('uses the inferred plane for visuals in the same frame it switches', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 2500), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    const px = api.project(v3(2000, 1500, 2500))!;
+    setCursorWorld(v3(2000, 1500, 2500));
+    tick();
+    expect(api.plane().offset).toBeCloseTo(2500, 5);
+    expect(state.planeVisual.last?.plane.offset).toBeCloseTo(2500, 5);
+    expect((state.hud.last?.plane as { kind: string } | undefined)?.kind).toBe('XY');
+    expect(state.hud.last?.gridStep).toBe(state.planeVisual.last?.step);
+    const ray = api.ray(px);
+    const hit = api.plane().intersectRay(ray.origin, ray.dir)!;
+    const readyStep = adaptiveGridStep(state.viewport.projector(), api.plane(), hit, 8);
+    expect(state.hud.last?.gridStep).toBe(readyStep);
+    api.hold('draw', true);
+    tick();
+    expect(state.hud.last?.gridStep).toBe(readyStep);
+    api.hold('draw', false);
+  });
+
+  it('shows the pinned reason while in manual mode', () => {
+    api.press('toggleAutoPlane');
+    tick();
+    expect(state.hud.last?.planeMode).toBe('Manual');
+    expect(state.hud.last?.planeReason).toBe('pinned');
   });
 });
 
-describe('circle push/pull controls', () => {
-  function addCircleAndStart(): string {
-    const added = api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
-    if (!added.ok) throw new Error(added.error);
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    api.press('toggleGrid');
-    api.press('extrude');
-    return added.entity.id;
-  }
-
-  it('pulls a selected circle into a native cylinder, then undo restores the circle', () => {
-    const id = addCircleAndStart();
-    expect(api.extrusion()).toMatchObject({ depth: 0, dragging: false, face: 'top', preview: { type: 'cylinder', center: v3(250, 250, 0), radius: 100 } });
-
+describe('stroke guards', () => {
+  it('freezes view, projection, zoom and plane inputs while drawing', () => {
+    api.press('viewRight');
+    finishTransitions();
+    const before = state.viewport.perspective.quaternion.clone();
+    setCursorWorld(v3(4000, 1000, 500));
     api.hold('draw', true);
-    api.setCursor(v2(250, 200));
-    expect(api.extrusion()).toMatchObject({ depth: 50, dragging: true, preview: { type: 'cylinder', depth: 50 } });
-    api.hold('draw', false);
-    api.press('confirm');
-
-    expect(api.sketch.get(id)?.type).toBe('cylinder');
-    expect(api.sketch.get(id)).toMatchObject({ type: 'cylinder', center: v3(250, 250, 0), radius: 100, depth: 50 });
-    expect(api.extrusion()).toBeNull();
-    api.press('undo');
-    expect(api.sketch.get(id)).toMatchObject({ type: 'circle', center: v3(250, 250, 0), radius: 100 });
-    api.press('redo');
-    expect(api.sketch.get(id)?.type).toBe('cylinder');
-  });
-
-  it('shows a cylinder shortcut in the HUD for a selected circle', () => {
-    api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    runFrame();
-    expect(h.hudKeys.at(-1)).toContainEqual({ key: 'Q', label: 'extrude cylinder' });
-    expect(h.hudKeys.at(-1)).toContainEqual({ key: 'L', label: 'diameter' });
-  });
-
-  it('accepts an exact signed pull, cancels without changing the circle, and exposes a circular preview', () => {
-    const id = addCircleAndStart();
-    api.press('measure');
-    h.measure.submit?.('-250');
-    h.measure.isOpen = false;
-    expect(api.extrusion()).toMatchObject({ depth: -250, dragging: false, preview: { type: 'cylinder', depth: -250 } });
-    api.press('cancel');
-    expect(api.extrusion()).toBeNull();
-    expect(api.sketch.get(id)?.type).toBe('circle');
-    expect(api.sketch.get(id)).toMatchObject({ radius: 100, center: v3(250, 250, 0) });
-  });
-
-  it('re-edits an existing cylinder and can pull its opposite cap', () => {
-    const added = api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
-    if (!added.ok) throw new Error(added.error);
-    expect(api.commands.extrude(added.entity.id, 400).ok).toBe(true);
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    api.press('extrude');
-    expect(api.extrusion()).toMatchObject({ depth: 400, preview: { type: 'cylinder', depth: 400 } });
-    api.press('cyclePlane');
-    api.press('measure');
-    h.measure.submit?.('100');
-    h.measure.isOpen = false;
-    const preview = api.extrusion();
-    expect(preview?.depth).toBe(500);
-    expect(preview?.preview.type).toBe('cylinder');
-    if (preview?.preview.type === 'cylinder') expect(preview.preview.center).toEqual(v3(250, 250, -100));
-    api.press('confirm');
-    expect(api.sketch.last).toMatchObject({ type: 'cylinder', depth: 500, center: v3(250, 250, -100), radius: 100 });
-  });
-});
-
-describe('face switching during the first extrusion', () => {
-  it.each([
-    ['hand', 'confirm'],
-    ['mouse', 'confirm'],
-    ['hand', 'cancel'],
-  ] as const)('%s input can release and pull a new side without restarting Q (%s)', (input, finish) => {
-    const previousProject = h.projector.project;
-    const previousRay = h.projector.ray;
-    h.projector.project = (point: Vec3): Vec2 => v2(point.x - point.z, point.y);
-    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({
-      origin: v3(point.x + 1000, point.y, 1000),
-      dir: v3(-Math.SQRT1_2, 0, -Math.SQRT1_2),
-    });
-    const move = (point: Vec2, gripping: boolean): void => {
-      if (input === 'hand') {
-        emitHands(handAt(point.x, point.y, { pinching: gripping, open: !gripping, openArmed: !gripping }));
-      } else {
-        api.hold('draw', gripping);
-        api.setCursor(point);
-      }
-    };
-    try {
-      if (input === 'hand') api.press('toggleNavAssist');
-      const serialized = startExtrusion((point) => move(point, false));
-      const id = api.selected()!.id;
-      move(v2(250, 250), true);
-      move(v2(150, 250), true);
-      expect(api.extrusion()!.depth).toBeCloseTo(100);
-      expect(api.extrusion()!.dragging).toBe(true);
-      move(v2(150, 250), false);
-      const firstPreview = structuredClone(api.extrusion()!.preview);
-      expect(api.extrusion()!.dragging).toBe(false);
-      move(v2(450, 250), false);
-      expect(api.extrusion()!.face).toBe('right');
-      expect(api.extrusion()!.preview).toEqual(firstPreview);
-      expect(h.renderer.activeFaces.at(-1)).toMatchObject({ axis: 'u', sign: 1 });
-      expect(api.sketch.serialize()).toBe(serialized);
-      expect(api.selected()!.id).toBe(id);
-      h.renderer.extrusions = [];
-      move(v2(450, 250), true);
-      expect(api.extrusion()!.preview).toEqual(firstPreview);
-      move(v2(500, 250), true);
-      move(v2(500, 250), false);
-      const after = api.extrusion()!;
-      expect(after.depth).toBeCloseTo(100);
-      expect(after.preview.type).toBe('extrusion');
-      if (after.preview.type !== 'extrusion') throw new Error('expected a box preview');
-      expect(after.preview.corners[0]).toEqual(v3(100, 100, 0));
-      expect(after.preview.corners[1].x).toBeCloseTo(550);
-      expect(after.preview.corners[2].x).toBeCloseTo(550);
-      expect(h.renderer.extrusions.at(-1)).toEqual(after.preview);
-      expect(api.sketch.serialize()).toBe(serialized);
-      expect(h.orbit.orbit).not.toHaveBeenCalled();
-      expect(h.orbit.pan).not.toHaveBeenCalled();
-      expect(h.orbit.zoom).not.toHaveBeenCalled();
-      api.press(finish);
-      expect(api.extrusion()).toBeNull();
-      if (finish === 'cancel') {
-        expect(api.sketch.serialize()).toBe(serialized);
-        expect(api.commands.undo()).toBe('add rect');
-      } else {
-        expect(api.sketch.get(id)).toEqual(after.preview);
-        const committed = api.sketch.serialize();
-        api.press('undo');
-        expect(api.sketch.serialize()).toBe(serialized);
-        api.press('redo');
-        expect(api.sketch.serialize()).toBe(committed);
-      }
-    } finally {
-      h.projector.project = previousProject;
-      h.projector.ray = previousRay;
-    }
-  });
-});
-
-describe('shape movement', () => {
-  function startMove(grid = false, setCursor: (p: Vec2) => void = (p) => api.setCursor(p)): Entity {
-    const result = api.commands.addRect(makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
-    if (!result.ok) throw new Error(result.error);
-    setCursor(v2(250, 250));
-    api.press('select');
-    if (!grid) api.press('toggleGrid');
-    api.press('move');
-    return result.entity;
-  }
-  const preview = (id: string): Entity | undefined => h.renderer.sketches.at(-1)?.find((entity) => entity.id === id);
-  const previewOrigin = (id: string): Vec3 => {
-    const entity = preview(id);
-    if (entity?.type !== 'rect') throw new Error('expected a rect preview');
-    return entity.corners[0];
-  };
-  function keyDown(code: string, overrides: Record<string, unknown> = {}) {
-    const event = { code, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, repeat: false, target: null, preventDefault: vi.fn(), ...overrides };
-    fire('keydown', event);
-    return event;
-  }
-
-  it('M moves a hovered rectangle with a left-drag and Enter commits one undoable edit', () => {
-    const added = api.commands.addRect(makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
-    if (!added.ok) throw new Error(added.error);
-    const id = added.entity.id;
-    api.setCursor(v2(250, 250));
-    api.press('toggleGrid');
-    const serialized = api.sketch.serialize();
-
-    runFrame();
-    expect(h.hudKeys.at(-1)).toContainEqual({ key: 'M', label: 'move' });
-
-    const accepted = keyDown('KeyM');
-    expect(accepted.preventDefault).toHaveBeenCalled();
-    const rejected = keyDown('KeyM', { ctrlKey: true });
-    expect(rejected.preventDefault).not.toHaveBeenCalled();
-    keyDown('KeyM', { repeat: true });
-    expect(api.sketch.serialize()).toBe(serialized);
-
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('MOVING');
-    const keys = h.hudKeys.at(-1) ?? [];
-    expect(keys).toContainEqual({ key: 'Enter / M', label: 'apply' });
-    expect(keys).toContainEqual({ key: 'Esc', label: 'cancel' });
-
-    h.mouse.onHold?.('draw', true);
-    h.mouse.onMove?.(v2(290, 275));
-    expect(previewOrigin(id)).toEqual(v3(140, 125, 0));
-    expect(api.sketch.serialize()).toBe(serialized);
-    expect(api.selected()?.id).toBe(id);
-    expect(api.sketch.size).toBe(1);
-    expect(api.lastRecognition()).toBeNull();
-
-    h.mouse.onHold?.('draw', false);
-    h.mouse.onMove?.(v2(600, 500));
-    expect(previewOrigin(id)).toEqual(v3(140, 125, 0));
-    expect(api.sketch.serialize()).toBe(serialized);
-
-    keyDown('Enter');
-    const committed = api.sketch.get(id);
-    if (committed?.type !== 'rect') throw new Error('expected a rect');
-    expect(committed.corners[0]).toEqual(v3(140, 125, 0));
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-    api.press('undo');
-    expect(api.sketch.serialize()).toBe(serialized);
-    api.press('redo');
-    expect(api.sketch.get(id)).toEqual(committed);
-  });
-
-  it('accumulates multiple Space drags without a regrip jump and applies on a second M', () => {
-    const entity = startMove();
-    const serialized = api.sketch.serialize();
-    api.hold('draw', true);
-    api.setCursor(v2(290, 275));
-    api.hold('draw', false);
-    api.setCursor(v2(600, 500));
-    api.hold('draw', true);
-    api.setCursor(v2(610, 515));
-    api.hold('draw', false);
-    expect(previewOrigin(entity.id)).toEqual(v3(150, 140, 0));
-    expect(api.sketch.serialize()).toBe(serialized);
-
-    keyDown('KeyM');
-    const committed = api.sketch.get(entity.id);
-    if (committed?.type !== 'rect') throw new Error('expected a rect');
-    expect(committed.corners[0]).toEqual(v3(150, 140, 0));
-    api.press('undo');
-    expect(api.sketch.serialize()).toBe(serialized);
-  });
-
-  it('Esc cancels the move without an undo entry', () => {
-    const entity = startMove();
-    const serialized = api.sketch.serialize();
-    api.hold('draw', true);
-    api.setCursor(v2(290, 275));
-    api.hold('draw', false);
-    expect(previewOrigin(entity.id)).toEqual(v3(140, 125, 0));
-    keyDown('Escape');
-    expect(api.sketch.serialize()).toBe(serialized);
-    expect(preview(entity.id)).toEqual(entity);
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-    expect(api.commands.undo()).toBe('add rect');
-  });
-
-  it('confirming a zero-length move adds no history and keeps the redo stack', () => {
-    const entity = startMove();
-    api.hold('draw', true);
-    api.setCursor(v2(290, 275));
-    api.hold('draw', false);
-    keyDown('KeyM');
-    const movedSerialized = api.sketch.serialize();
-    api.press('undo');
-    api.press('move');
-    keyDown('Enter');
-    expect(api.sketch.get(entity.id)).toEqual(entity);
-    api.press('redo');
-    expect(api.sketch.serialize()).toBe(movedSerialized);
-  });
-
-  it('snaps the move delta to the grid without snapping the shape, and re-baselines on G', () => {
-    const added = api.commands.addRect(makeRect(v3(100.25, 100.75, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
-    if (!added.ok) throw new Error(added.error);
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    api.press('move');
-    api.hold('draw', true);
-    api.setCursor(v2(376, 224));
-    expect(previewOrigin(added.entity.id)).toEqual(v3(200.25, 100.75, 0));
-    api.press('toggleGrid');
-    api.setCursor(v2(386, 224));
-    expect(previewOrigin(added.entity.id)).toEqual(v3(210.25, 100.75, 0));
-    api.hold('draw', false);
-  });
-
-  it.each([
-    ['viewTop', (p: Vec2) => ({ origin: v3(p.x, p.y, 1000), dir: v3(0, 0, -1) }), v3(0, 0, -1), v3(140, 125, 0)],
-    ['viewFront', (p: Vec2) => ({ origin: v3(p.x, 1000, p.y), dir: v3(0, -1, 0) }), v3(0, -1, 0), v3(140, 100, 25)],
-    ['viewRight', (p: Vec2) => ({ origin: v3(1000, p.x, p.y), dir: v3(-1, 0, 0) }), v3(-1, 0, 0), v3(100, 140, 25)],
-  ] as const)('moves within the work plane after %s', (view, ray, viewDirection, expected) => {
-    const added = api.commands.addRect(makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
-    if (!added.ok) throw new Error(added.error);
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    api.press('toggleGrid');
-    const previousRay = h.projector.ray;
-    const previousDirection = h.viewDirection;
-    h.projector.ray = ray;
-    h.viewDirection = viewDirection;
-    try {
-      api.press('move');
-      api.press(view);
-      api.hold('draw', true);
-      api.setCursor(v2(290, 275));
-      api.hold('draw', false);
-      const moved = preview(added.entity.id);
-      if (moved?.type !== 'rect') throw new Error('expected a rect preview');
-      expect(moved.corners[0]).toEqual(expected);
-      expect(moved.corners[2]).toEqual(v3(expected.x + 400, expected.y + 300, expected.z));
-    } finally {
-      h.projector.ray = previousRay;
-      h.viewDirection = previousDirection;
-    }
-  });
-
-  it.each([
-    ['a parallel ray', (p: Vec2) => ({ origin: v3(p.x, p.y, 0), dir: v3(1, 0, 0) }), v3(0, 0, -1)],
-    ['an edge-on view', undefined, v3(1, 0, 0)],
-  ] as const)('freezes a finite preview on %s and commits nothing', (_label, ray, viewDirection) => {
-    const added = api.commands.addRect(makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
-    if (!added.ok) throw new Error(added.error);
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    api.press('toggleGrid');
-    const serialized = api.sketch.serialize();
-    const previousRay = h.projector.ray;
-    const previousDirection = h.viewDirection;
-    if (ray) h.projector.ray = ray;
-    h.viewDirection = viewDirection;
-    try {
-      api.press('move');
-      api.hold('draw', true);
-      api.setCursor(v2(290, 275));
-      api.hold('draw', false);
-      expect(preview(added.entity.id)).toEqual(added.entity);
-      keyDown('Enter');
-      expect(api.sketch.serialize()).toBe(serialized);
-      expect(api.commands.undo()).toBe('add rect');
-    } finally {
-      h.projector.ray = previousRay;
-      h.viewDirection = previousDirection;
-    }
-  });
-
-  it.each(['orbit', 'pan'] as const)('%s pauses the move and re-baselines the grip without a jump', (nav) => {
-    const entity = startMove();
-    api.hold('draw', true);
-    api.setCursor(v2(290, 275));
-    const frozen = previewOrigin(entity.id);
-    api.hold(nav, true);
-    api.setCursor(v2(600, 500));
-    const spy = nav === 'orbit' ? h.orbit.orbit : h.orbit.pan;
-    const other = nav === 'orbit' ? h.orbit.pan : h.orbit.orbit;
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(other).not.toHaveBeenCalled();
-    expect(previewOrigin(entity.id)).toEqual(frozen);
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe(nav === 'orbit' ? 'ORBIT' : 'PAN');
-    api.hold(nav, false);
-    api.setCursor(v2(610, 515));
-    api.hold('draw', false);
-    expect(previewOrigin(entity.id)).toEqual(v3(150, 140, 0));
-  });
-
-  it('ignores the wheel while gripping and re-baselines after a zoom', () => {
-    const entity = startMove();
-    api.hold('draw', true);
-    api.setCursor(v2(290, 275));
-    h.mouse.onWheel?.(-100, v2(290, 275));
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-    api.hold('draw', false);
-    h.mouse.onWheel?.(-100, v2(290, 275));
-    expect(h.orbit.zoom).toHaveBeenCalledTimes(1);
+    const planeKind = api.plane().kind;
+    api.press('viewTop');
+    api.press('toggleProjection');
     api.press('zoomIn');
-    api.hold('draw', true);
-    api.setCursor(v2(300, 275));
+    api.press('cyclePlane');
+    api.press('toggleAutoPlane');
+    state.mouse.onWheel(1.4, v2(400, 300));
+    tick();
+    expect(state.viewport.perspective.quaternion.equals(before)).toBe(true);
+    expect(state.viewport.ortho).toBe(false);
+    expect(api.plane().kind).toBe(planeKind);
+    expect(api.planeMode()).toBe('manual');
     api.hold('draw', false);
-    expect(previewOrigin(entity.id)).toEqual(v3(150, 125, 0));
   });
 
-  it('moves with pinch grabs and resumes cleanly after a release', () => {
-    const entity = startMove(false, setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(290, 275, { pinching: true }));
-    expect(previewOrigin(entity.id).x).toBeCloseTo(140, 0);
-    expect(previewOrigin(entity.id).y).toBeCloseTo(125, 0);
-    emitHands(handAt(290, 275));
-    emitHands(handAt(600, 500));
-    emitHands(handAt(600, 500, { pinching: true }));
-    emitHands(handAt(610, 515, { pinching: true }));
-    expect(previewOrigin(entity.id).x).toBeCloseTo(150, 0);
-    expect(previewOrigin(entity.id).y).toBeCloseTo(140, 0);
-  });
-
-  it.each([
-    ['an empty hands frame', () => emitEmptyHands()],
-    ['tracker disconnection', () => h.tracker.onConnection?.('closed')],
-    ['a hand timeout', () => { h.nowMs += 700; runFrame(); }],
-    ['a different hand id', () => emitHands(handAt(700, 600, { id: 2, pinching: true }))],
-    ['focus loss', () => { fire('blur'); fire('focus'); }],
-    ['the help overlay', () => { api.press('help'); api.press('help'); }],
-  ])('a pinch interrupted by %s stays frozen until a real release and regrip', (_label, interrupt) => {
-    const entity = startMove(false, setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(290, 275, { pinching: true }));
-    const frozen = previewOrigin(entity.id);
-    interrupt();
-    emitHands(handAt(700, 600, { pinching: true }));
-    expect(previewOrigin(entity.id)).toEqual(frozen);
-    emitHands(handAt(700, 600));
-    emitHands(handAt(700, 600, { pinching: true }));
-    emitHands(handAt(710, 615, { pinching: true }));
-    const moved = previewOrigin(entity.id);
-    expect(moved.x - frozen.x).toBeCloseTo(10, 0);
-    expect(moved.y - frozen.y).toBeCloseTo(15, 0);
-    expect(moved.z).toBeCloseTo(frozen.z, 6);
-  });
-
-  it('keeps a hard release requirement through a soft navigation pause', () => {
-    const entity = startMove(false, setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(290, 275, { pinching: true }));
-    const frozen = previewOrigin(entity.id);
-    emitEmptyHands();
-    api.hold('orbit', true);
-    emitHands(handAt(700, 600, { pinching: true }));
-    api.hold('orbit', false);
-    emitHands(handAt(710, 600, { pinching: true }));
-    expect(previewOrigin(entity.id)).toEqual(frozen);
-    emitHands(handAt(710, 600));
-    emitHands(handAt(710, 600, { pinching: true }));
-    emitHands(handAt(720, 615, { pinching: true }));
-    const moved = previewOrigin(entity.id);
-    expect(moved.x - frozen.x).toBeCloseTo(10, 0);
-    expect(moved.y - frozen.y).toBeCloseTo(15, 0);
-  });
-
-  it('keeps automatic palm navigation disabled while moving', () => {
-    api.press('toggleNavAssist');
-    startMove(false, setHand);
-    emitHands(handAt(400, 300, { open: true, openArmed: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-  });
-
-  it('cancels the move when the target is edited or deleted programmatically', () => {
-    const entity = startMove();
+  it('finishes a running preset transition when the pen goes down', () => {
+    api.press('viewFront');
+    tick(60);
+    setCursorWorld(v3(1000, 0, 500));
     api.hold('draw', true);
-    api.setCursor(v2(290, 275));
+    const d = cameraDir();
+    expect(d.x).toBeCloseTo(0, 5);
+    expect(d.y).toBeCloseTo(1, 5);
+    expect(d.z).toBeCloseTo(0, 5);
     api.hold('draw', false);
-    api.commands.setDimension(entity.id, { width: 200, height: 150 });
-    const edited = preview(entity.id);
-    if (edited?.type !== 'rect') throw new Error('expected a rect');
-    expect(edited.corners[0]).toEqual(v3(100, 100, 0));
-    expect(edited.corners[1]).toEqual(v3(300, 100, 0));
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
+  });
 
-    startMove();
-    const target = api.selected()!.id;
+  it('adds no history when blur, pointer cancel, or help aborts a stroke', () => {
+    setCursorWorld(v3(0, 0, 0));
     api.hold('draw', true);
-    api.setCursor(v2(290, 275));
-    api.hold('draw', false);
-    api.commands.deleteEntity(target);
-    expect(api.sketch.get(target)).toBeUndefined();
-    expect(preview(target)).toBeUndefined();
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-  });
+    setCursorWorld(v3(2000, 0, 0));
+    dispatchWindow('blur', {});
+    expect(api.sketch.size).toBe(0);
+    expect(state.renderer.ghost).toBeNull();
 
-  it('keeps the preview when an unrelated entity changes and preserves that edit on cancel', () => {
-    const entity = startMove();
     api.hold('draw', true);
-    api.setCursor(v2(290, 275));
-    api.hold('draw', false);
-    const other = api.commands.addRect(makeRect(v3(600, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 100, 100));
-    if (!other.ok) throw new Error(other.error);
-    api.commands.setDimension(other.entity.id, { width: 50, height: 50 });
-    expect(previewOrigin(entity.id)).toEqual(v3(140, 125, 0));
-    api.press('cancel');
-    expect(api.sketch.get(entity.id)).toEqual(entity);
-    const edited = api.sketch.get(other.entity.id);
-    if (edited?.type !== 'rect') throw new Error('expected a rect');
-    expect(edited.corners[1]).toEqual(v3(650, 100, 0));
-    expect(edited.corners[2]).toEqual(v3(650, 150, 0));
-  });
+    setCursorWorld(v3(3000, 0, 0));
+    state.mouse.onCancel();
+    expect(api.sketch.size).toBe(0);
 
-  it.each(['delete', 'undo', 'extrude', 'measure'] as const)('blocks %s during a move but not after', (action) => {
-    const entity = startMove();
-    const serialized = api.sketch.serialize();
-    api.press(action);
-    expect(api.sketch.serialize()).toBe(serialized);
-    expect(api.extrusion()).toBeNull();
-    expect(h.measure.isOpen).toBe(false);
-    api.press('cancel');
-    api.press(action);
-    if (action === 'delete') expect(api.sketch.get(entity.id)).toBeUndefined();
-    if (action === 'undo') expect(api.sketch.size).toBe(0);
-    if (action === 'extrude') expect(api.extrusion()).not.toBeNull();
-    if (action === 'measure') {
-      expect(h.measure.isOpen).toBe(true);
-      h.measure.isOpen = false;
-      h.measure.submit = null;
-    }
-  });
-
-  it('does not start a move while a stroke or extrusion is active', () => {
-    api.press('toggleGrid');
-    api.setCursor(v2(50, 50));
     api.hold('draw', true);
-    api.setCursor(v2(80, 80));
-    api.press('move');
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('DRAWING');
-    api.hold('draw', false);
-    api.press('cancel');
-
-    startExtrusion();
-    api.press('move');
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('EXTRUDING');
-    api.press('cancel');
-  });
-
-  it.each([
-    ['an input', { tagName: 'INPUT' }],
-    ['a textarea', { tagName: 'TEXTAREA' }],
-    ['a contenteditable element', { tagName: 'DIV', isContentEditable: true }],
-  ])('ignores M inside %s', (_label, target) => {
-    api.commands.addRect(makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    const event = keyDown('KeyM', { target });
-    expect(event.preventDefault).not.toHaveBeenCalled();
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-  });
-
-  it('ignores M while the measurement input is open', () => {
-    api.commands.addRect(makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    api.press('measure');
-    const event = keyDown('KeyM');
-    expect(event.preventDefault).not.toHaveBeenCalled();
-    h.measure.isOpen = false;
-    h.measure.submit = null;
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-  });
-
-  it('leaves an empty sketch in READY when M is pressed', () => {
-    api.setCursor(v2(250, 250));
-    const event = keyDown('KeyM');
-    expect(event.preventDefault).toHaveBeenCalled();
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
+    setCursorWorld(v3(3000, 1000, 0));
+    api.press('help');
+    expect(state.help.visible).toBe(true);
     expect(api.sketch.size).toBe(0);
   });
-});
 
-describe('corner scaling', () => {
-  const preview = (id: string): Entity | undefined => h.renderer.sketches.at(-1)?.find((entity) => entity.id === id);
-  const previewCorner = (id: string, index: number): Vec3 => {
-    const entity = preview(id);
-    if (entity?.type !== 'rect' && entity?.type !== 'extrusion') throw new Error('expected a rectangular preview');
-    return entity.corners[index];
-  };
-  const expectVec3 = (point: Vec3, x: number, y: number, z: number): void => {
-    expect(point.x).toBeCloseTo(x, 6);
-    expect(point.y).toBeCloseTo(y, 6);
-    expect(point.z).toBeCloseTo(z, 6);
-  };
-  function keyDown(code: string, overrides: Record<string, unknown> = {}) {
-    const event = { code, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, repeat: false, target: null, preventDefault: vi.fn(), ...overrides };
-    fire('keydown', event);
-    return event;
-  }
-  function addBox(): Entity {
-    const added = api.commands.addRect(makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
-    if (!added.ok) throw new Error(added.error);
-    return added.entity;
-  }
-  function startScale(point: Vec2 = v2(500, 400), grid = false): Entity {
-    const entity = addBox();
-    api.setCursor(point);
-    if (!grid) api.press('toggleGrid');
-    api.press('scale');
-    return entity;
-  }
-
-  it('drags a locked corner to scale a rect, applies with Enter, and undoes cleanly', () => {
-    const added = api.commands.addRect(makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300));
-    if (!added.ok) throw new Error(added.error);
-    const id = added.entity.id;
-    const before = api.sketch.serialize();
-    api.press('toggleGrid');
-    api.setCursor(v2(500, 400));
-    runFrame();
-    expect(h.hudKeys.at(-1)).toContainEqual({ key: 'R', label: 'scale' });
-    keyDown('KeyR');
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('SCALING');
-    const keys = h.hudKeys.at(-1) ?? [];
-    expect(keys).toContainEqual({ key: 'Enter / R', label: 'apply' });
-    expect(keys).toContainEqual({ key: 'Esc', label: 'cancel' });
-
-    h.mouse.onHold?.('draw', true);
-    h.mouse.onMove?.(v2(700, 550));
-    const scaled = preview(id);
-    if (scaled?.type !== 'rect') throw new Error('expected a rect preview');
-    [v3(100, 100, 0), v3(700, 100, 0), v3(700, 550, 0), v3(100, 550, 0)].forEach((expected, index) => {
-      expectVec3(scaled.corners[index], expected.x, expected.y, expected.z);
-    });
-    expect(api.sketch.serialize()).toBe(before);
-    expect(api.lastRecognition()).toBeNull();
-    const ghost = h.renderer.ghosts.at(-1);
-    expect(ghost?.label?.text).toContain('150%');
-    expect(ghost?.label?.text).toContain('fixed corner');
-    expectVec3(ghost!.label!.at, 100, 100, 0);
-    expectVec3(ghost!.points![0], 100, 100, 0);
-    expectVec3(ghost!.points![1], 700, 550, 0);
-
-    h.mouse.onHold?.('draw', false);
-    api.press('confirm');
-    expect(h.renderer.ghosts.at(-1)).toEqual({ points: null, label: null });
-    expect(api.sketch.get(id)).toEqual(scaled);
-    expect(api.selected()?.id).toBe(id);
-    expect(api.commands.undo()).toBe('scale rect');
-    expect(api.sketch.serialize()).toBe(before);
-    expect(api.commands.redo()).toBe('scale rect');
-    expect(api.sketch.get(id)).toEqual(scaled);
-  });
-
-  it.each([0, 1, 2, 3])('locks rect corner %i and keeps the opposite corner fixed', (index) => {
-    const entity = addBox();
-    if (entity.type !== 'rect') throw new Error('expected a rect');
-    const before = api.sketch.serialize();
-    api.press('toggleGrid');
-    const corner = entity.corners[index];
-    const anchor = entity.corners[(index + 2) % 4];
-    api.setCursor(v2(corner.x, corner.y));
-    api.press('scale');
+  it('refuses a free start on an edge-on pinned plane but still allows object starts', () => {
+    api.press('viewFront');
+    finishTransitions();
+    api.press('cyclePlane');
+    expect(api.plane().kind).toBe('YZ');
+    setCursorWorld(v3(0, 0, 1200));
     api.hold('draw', true);
-    api.setCursor(v2(anchor.x + 1.5 * (corner.x - anchor.x), anchor.y + 1.5 * (corner.y - anchor.y)));
     api.hold('draw', false);
-    const scaled = preview(entity.id);
-    if (scaled?.type !== 'rect') throw new Error('expected a rect preview');
-    scaled.corners.forEach((point, j) => {
-      const origin = entity.corners[j];
-      expectVec3(point, anchor.x + 1.5 * (origin.x - anchor.x), anchor.y + 1.5 * (origin.y - anchor.y), 0);
-    });
-    expect(api.sketch.serialize()).toBe(before);
-    api.press('cancel');
-  });
-
-  it('scales a line from an endpoint with the other endpoint fixed', () => {
-    const added = api.commands.addLine(v3(100, 100, 0), v3(500, 400, 0));
-    if (!added.ok) throw new Error(added.error);
-    api.press('toggleGrid');
-    api.setCursor(v2(500, 400));
-    api.press('scale');
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    api.hold('draw', false);
-    const scaled = preview(added.entity.id);
-    expect(scaled).toMatchObject({ type: 'line', a: v3(100, 100, 0), b: v3(700, 550, 0) });
-    api.press('cancel');
-  });
-
-  it('scales a circle from a rim point but not from its centre', () => {
-    const added = api.commands.addCircle(v3(250, 250, 0), v3(0, 0, 1), 100);
-    if (!added.ok) throw new Error(added.error);
-    const id = added.entity.id;
-    api.press('toggleGrid');
-    api.setCursor(v2(250, 250));
-    api.press('scale');
-    api.hold('draw', true);
-    api.setCursor(v2(280, 250));
-    expect(preview(id)).toBe(added.entity);
-    api.setCursor(v2(350, 250));
-    api.setCursor(v2(450, 250));
-    const scaled = preview(id);
-    if (scaled?.type !== 'circle') throw new Error('expected a circle preview');
-    expectVec3(scaled.center, 300, 250, 0);
-    expect(scaled.radius).toBeCloseTo(150, 6);
-    api.hold('draw', false);
-    api.press('cancel');
-    expect(api.sketch.get(id)).toEqual(added.entity);
-  });
-
-  it.each([200, -200])('scales a box from a base corner with the opposite cap corner fixed (depth %i)', (depth) => {
-    const previousProject = h.projector.project;
-    const previousRay = h.projector.ray;
-    h.projector.project = (point: Vec3): Vec2 => v2(point.x, point.y);
-    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({ origin: v3(point.x, point.y, 1000), dir: v3(0, 0, -1) });
-    try {
-      const entity = api.sketch.addEntity({
-        type: 'extrusion',
-        corners: makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300),
-        depth,
-      });
-      if (entity.type !== 'extrusion') throw new Error('unreachable');
-      const before = api.sketch.serialize();
-      api.press('toggleGrid');
-      api.setCursor(v2(500, 400));
-      api.press('scale');
-      api.hold('draw', true);
-      api.setCursor(v2(700, 550));
-      api.hold('draw', false);
-      const scaled = preview(entity.id);
-      if (scaled?.type !== 'extrusion') throw new Error('expected an extrusion preview');
-      const anchor = v3(100, 100, depth);
-      scaled.corners.forEach((point, j) => {
-        const origin = entity.corners[j];
-        expectVec3(point, anchor.x + 1.5 * (origin.x - anchor.x), anchor.y + 1.5 * (origin.y - anchor.y), anchor.z + 1.5 * (origin.z - anchor.z));
-      });
-      expect(scaled.depth).toBeCloseTo(depth * 1.5, 6);
-      expect(api.sketch.serialize()).toBe(before);
-      api.press('cancel');
-      expect(api.sketch.get(entity.id)).toEqual(entity);
-    } finally {
-      h.projector.project = previousProject;
-      h.projector.ray = previousRay;
-    }
-  });
-
-  it.each([100, -100])('scales a cylinder from a rim point with the opposite cap rim fixed (depth %i)', (depth) => {
-    const previousProject = h.projector.project;
-    const previousRay = h.projector.ray;
-    h.projector.project = (point: Vec3): Vec2 => v2(point.x, point.y);
-    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({ origin: v3(point.x, point.y, 1000), dir: v3(0, 0, -1) });
-    try {
-      const entity = api.sketch.addEntity({ type: 'cylinder', center: v3(300, 300, 0), normal: v3(0, 0, 1), radius: 50, depth });
-      api.press('toggleGrid');
-      api.setCursor(v2(350, 300));
-      api.press('scale');
-      api.hold('draw', true);
-      api.setCursor(v2(400, 300));
-      api.hold('draw', false);
-      const scaled = preview(entity.id);
-      if (scaled?.type !== 'cylinder') throw new Error('expected a cylinder preview');
-      expectVec3(scaled.center, 325, 300, -depth / 2);
-      expect(scaled.radius).toBeCloseTo(75, 6);
-      expect(scaled.depth).toBeCloseTo(depth * 1.5, 6);
-      api.press('cancel');
-      expect(api.sketch.get(entity.id)).toEqual(entity);
-    } finally {
-      h.projector.project = previousProject;
-      h.projector.ray = previousRay;
-    }
-  });
-
-  it.each([['triangle', 0], ['prism', 200], ['prism', -200]] as const)('scales a %s from a corner at depth %i', (type, depth) => {
-    const previousProject = h.projector.project;
-    const previousRay = h.projector.ray;
-    h.projector.project = (point: Vec3): Vec2 => v2(point.x, point.y);
-    h.projector.ray = (point: Vec2) => ({ origin: v3(point.x, point.y, 1000), dir: v3(0, 0, -1) });
-    try {
-      const corners: [Vec3, Vec3, Vec3] = [v3(100, 100, 0), v3(500, 100, 0), v3(200, 400, 0)];
-      const entity = api.sketch.addEntity(type === 'triangle' ? { type, corners } : { type, corners, depth });
-      const before = api.sketch.serialize();
-      api.press('toggleGrid');
-      api.setCursor(v2(200, 400));
-      api.press('scale');
-      api.hold('draw', true);
-      api.setCursor(v2(50, 550));
-      api.hold('draw', false);
-      const scaled = preview(entity.id);
-      if (scaled?.type !== 'triangle' && scaled?.type !== 'prism') throw new Error('expected a triangular preview');
-      expectVec3(scaled.corners[0], -100, 100, -depth / 2);
-      expectVec3(scaled.corners[1], 500, 100, -depth / 2);
-      expectVec3(scaled.corners[2], 50, 550, -depth / 2);
-      if (scaled.type === 'prism') expect(scaled.depth).toBeCloseTo(depth * 1.5, 6);
-      expect(api.sketch.serialize()).toBe(before);
-      api.press('confirm');
-      expect(api.sketch.get(entity.id)).toEqual(scaled);
-      expect(api.commands.undo()).toBe(`scale ${type}`);
-      expect(api.sketch.serialize()).toBe(before);
-    } finally {
-      h.projector.project = previousProject;
-      h.projector.ray = previousRay;
-    }
-  });
-
-  it.each([
-    ['perspective', () => new PerspectiveCamera(45, 1.25, 1, 100000)],
-    ['orthographic', () => new OrthographicCamera(-1000, 1000, 800, -800, 1, 100000)],
-  ] as const)('scales a box uniformly in 3D through a real %s camera regardless of the work plane', (_label, makeCamera) => {
-    const camera = makeCamera();
-    camera.position.set(1600, -1800, 1400);
-    camera.up.set(0, 0, 1);
-    camera.lookAt(200, 150, 50);
-    camera.updateProjectionMatrix();
-    camera.updateMatrixWorld();
-    const raycaster = new Raycaster();
-    const previousProject = h.projector.project;
-    const previousRay = h.projector.ray;
-    h.projector.project = (point: Vec3): Vec2 => {
-      const ndc = new Vector3(point.x, point.y, point.z).project(camera);
-      return v2((ndc.x + 1) * 500, (1 - ndc.y) * 400);
-    };
-    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => {
-      raycaster.setFromCamera(new Vector2(point.x / 500 - 1, 1 - point.y / 400), camera);
-      return {
-        origin: v3(raycaster.ray.origin.x, raycaster.ray.origin.y, raycaster.ray.origin.z),
-        dir: v3(raycaster.ray.direction.x, raycaster.ray.direction.y, raycaster.ray.direction.z),
-      };
-    };
-    try {
-      const entity = api.sketch.addEntity({
-        type: 'extrusion',
-        corners: makeRect(v3(100, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300),
-        depth: 200,
-      });
-      if (entity.type !== 'extrusion') throw new Error('unreachable');
-      api.press('toggleGrid');
-      api.press('cyclePlane');
-      const start = h.projector.project(v3(500, 400, 0));
-      api.setCursor(start);
-      api.press('scale');
-      api.hold('draw', true);
-      api.setCursor(h.projector.project(v3(900, 700, -200)));
-      api.hold('draw', false);
-      const scaled = preview(entity.id);
-      if (scaled?.type !== 'extrusion') throw new Error('expected an extrusion preview');
-      const anchor = v3(100, 100, 200);
-      scaled.corners.forEach((point, j) => {
-        const origin = entity.corners[j];
-        expectVec3(point, anchor.x + 2 * (origin.x - anchor.x), anchor.y + 2 * (origin.y - anchor.y), anchor.z + 2 * (origin.z - anchor.z));
-      });
-      expect(scaled.depth).toBeCloseTo(400, 4);
-      api.press('cancel');
-      expect(api.sketch.get(entity.id)).toEqual(entity);
-    } finally {
-      h.projector.project = previousProject;
-      h.projector.ray = previousRay;
-    }
-  });
-
-  it('requires a corner lock first, then keeps scaling the same shape when the cursor roams', () => {
-    const entity = addBox();
-    api.setCursor(v2(300, 250));
-    api.press('toggleGrid');
-    api.press('scale');
-    api.hold('draw', true);
-    api.setCursor(v2(350, 300));
-    api.setCursor(v2(320, 260));
-    expect(preview(entity.id)).toBe(entity);
-    api.setCursor(v2(500, 400));
-    api.setCursor(v2(700, 550));
-    expectVec3(previewCorner(entity.id, 2), 700, 550, 0);
-    api.setCursor(v2(50, 700));
-    expectVec3(previewCorner(entity.id, 2), 356, 292, 0);
-    expect(previewCorner(entity.id, 0)).toEqual(v3(100, 100, 0));
-    api.hold('draw', false);
-    api.press('cancel');
-    expect(api.sketch.get(entity.id)).toEqual(entity);
-  });
-
-  it('rebases the pointer on regrips without jumping and adds no history until applied', () => {
-    const entity = startScale();
-    const before = api.sketch.serialize();
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    expectVec3(previewCorner(entity.id, 2), 700, 550, 0);
-    api.hold('draw', false);
-    api.setCursor(v2(600, 500));
-    api.hold('draw', true);
-    api.setCursor(v2(680, 560));
-    api.hold('draw', false);
-    expectVec3(previewCorner(entity.id, 2), 780, 610, 0);
-    expect(previewCorner(entity.id, 0)).toEqual(v3(100, 100, 0));
-    expect(api.sketch.serialize()).toBe(before);
-    api.press('cancel');
-  });
-
-  it('snaps the scale factor to the grid along the diagonal and re-baselines on G', () => {
-    const entity = addBox();
-    api.setCursor(v2(500, 400));
-    api.press('scale');
-    api.hold('draw', true);
-    api.setCursor(v2(600, 475));
-    expectVec3(previewCorner(entity.id, 2), 580, 460, 0);
-    api.press('toggleGrid');
-    api.setCursor(v2(640, 505));
-    expectVec3(previewCorner(entity.id, 2), 620, 490, 0);
-    api.hold('draw', false);
-    api.press('cancel');
-  });
-
-  it('rejects collapsing or inverted drags and resumes from the last valid preview', () => {
-    const entity = startScale();
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    const good = preview(entity.id);
-    api.setCursor(v2(50, 50));
-    expect(preview(entity.id)).toBe(good);
-    api.setCursor(v2(600, 475));
-    expectVec3(previewCorner(entity.id, 2), 600, 475, 0);
-    const scaled = preview(entity.id);
-    api.setCursor(v2(Infinity, Infinity));
-    expect(preview(entity.id)).toBe(scaled);
-    api.setCursor(v2(700, 550));
-    expect(preview(entity.id)).toBe(scaled);
-    api.setCursor(v2(710, 560));
-    const moved = previewCorner(entity.id, 2);
-    expect(moved.x).toBeGreaterThan(600);
-    expect(previewCorner(entity.id, 0)).toEqual(v3(100, 100, 0));
-    api.hold('draw', false);
-    api.press('cancel');
-  });
-
-  it('Esc cancels without an undo entry and restores the selection', () => {
-    const entity = startScale();
-    const before = api.sketch.serialize();
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    api.hold('draw', false);
-    keyDown('Escape');
-    expect(api.sketch.serialize()).toBe(before);
-    expect(h.renderer.ghosts.at(-1)).toEqual({ points: null, label: null });
-    expect(preview(entity.id)).toEqual(entity);
-    expect(api.selected()?.id).toBe(entity.id);
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-    expect(api.commands.undo()).toBe('add rect');
-  });
-
-  it('applying without a grip keeps the shape and the redo stack', () => {
-    const entity = startScale();
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    api.hold('draw', false);
-    api.press('scale');
-    const scaledSerialized = api.sketch.serialize();
-    api.press('undo');
-    api.press('scale');
-    api.press('confirm');
-    expect(api.sketch.get(entity.id)).toEqual(entity);
-    api.press('redo');
-    expect(api.sketch.serialize()).toBe(scaledSerialized);
-  });
-
-  it.each([
-    ['an empty hands frame', () => emitEmptyHands()],
-    ['tracker disconnection', () => h.tracker.onConnection?.('closed')],
-    ['a hand timeout', () => { h.nowMs += 700; runFrame(); }],
-    ['a different hand id', () => emitHands(handAt(700, 600, { id: 2, pinching: true }))],
-    ['focus loss', () => { fire('blur'); fire('focus'); }],
-    ['the help overlay', () => { api.press('help'); api.press('help'); }],
-  ])('a pinch scaling interrupted by %s stays frozen until a real release and regrip', (_label, interrupt) => {
-    const entity = addBox();
-    setHand(v2(500, 400));
-    api.press('toggleGrid');
-    api.press('scale');
-    emitHands(handAt(500, 400, { pinching: true }));
-    emitHands(handAt(700, 550, { pinching: true }));
-    const frozen = previewCorner(entity.id, 2);
-    expect(frozen.x).toBeCloseTo(700, 0);
-    interrupt();
-    emitHands(handAt(700, 600, { pinching: true }));
-    expect(previewCorner(entity.id, 2)).toEqual(frozen);
-    emitHands(handAt(700, 600));
-    emitHands(handAt(700, 600, { pinching: true }));
-    emitHands(handAt(710, 615, { pinching: true }));
-    const moved = previewCorner(entity.id, 2);
-    expect(moved.x - frozen.x).toBeCloseTo(13.6, 0);
-    expect(moved.y - frozen.y).toBeCloseTo(10.2, 0);
-    expect(previewCorner(entity.id, 0)).toEqual(v3(100, 100, 0));
-    api.press('cancel');
-  });
-
-  it('switches from a pinch to a mouse drag without losing the locked corner', () => {
-    const entity = addBox();
-    setHand(v2(500, 400));
-    api.press('toggleGrid');
-    api.press('scale');
-    emitHands(handAt(500, 400, { pinching: true }));
-    emitHands(handAt(700, 550, { pinching: true }));
-    const frozen = previewCorner(entity.id, 2);
-    emitEmptyHands();
-    h.mouse.onMove?.(v2(700, 600));
-    expect(previewCorner(entity.id, 2)).toEqual(frozen);
-    h.mouse.onHold?.('draw', true);
-    h.mouse.onMove?.(v2(710, 615));
-    const moved = previewCorner(entity.id, 2);
-    expect(moved.x - frozen.x).toBeCloseTo(13.6, 0);
-    h.mouse.onHold?.('draw', false);
-    api.press('cancel');
-  });
-
-  it('keeps a hard release requirement through a soft navigation pause', () => {
-    const entity = addBox();
-    setHand(v2(500, 400));
-    api.press('toggleGrid');
-    api.press('scale');
-    emitHands(handAt(500, 400, { pinching: true }));
-    emitHands(handAt(700, 550, { pinching: true }));
-    const frozen = previewCorner(entity.id, 2);
-    emitEmptyHands();
-    api.hold('orbit', true);
-    emitHands(handAt(700, 600, { pinching: true }));
-    api.hold('orbit', false);
-    emitHands(handAt(710, 600, { pinching: true }));
-    expect(previewCorner(entity.id, 2)).toEqual(frozen);
-    emitHands(handAt(710, 600));
-    emitHands(handAt(710, 600, { pinching: true }));
-    emitHands(handAt(720, 615, { pinching: true }));
-    expect(previewCorner(entity.id, 2).x).toBeGreaterThan(frozen.x);
-    api.press('cancel');
-  });
-
-  it.each(['orbit', 'pan'] as const)('%s pauses scaling and re-baselines the grip without a jump', (nav) => {
-    const entity = startScale();
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    const frozen = previewCorner(entity.id, 2);
-    api.hold(nav, true);
-    api.setCursor(v2(600, 500));
-    const spy = nav === 'orbit' ? h.orbit.orbit : h.orbit.pan;
-    const other = nav === 'orbit' ? h.orbit.pan : h.orbit.orbit;
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(other).not.toHaveBeenCalled();
-    expect(previewCorner(entity.id, 2)).toEqual(frozen);
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe(nav === 'orbit' ? 'ORBIT' : 'PAN');
-    api.hold(nav, false);
-    api.setCursor(v2(610, 515));
-    api.hold('draw', false);
-    const moved = previewCorner(entity.id, 2);
-    expect(moved.x - frozen.x).toBeCloseTo(13.6, 6);
-    expect(moved.y - frozen.y).toBeCloseTo(10.2, 6);
-    expect(previewCorner(entity.id, 0)).toEqual(v3(100, 100, 0));
-    api.press('cancel');
-  });
-
-  it.each(['viewIso', 'viewTop', 'viewFront', 'viewRight', 'toggleProjection', 'cyclePlane', 'zoomIn', 'zoomOut', 'fitAll'] as const)(
-    'allows %s mid-grip and re-baselines without a jump',
-    (action) => {
-      const entity = startScale();
-      api.hold('draw', true);
-      api.setCursor(v2(700, 550));
-      const frozen = previewCorner(entity.id, 2);
-      api.press(action);
-      expect(previewCorner(entity.id, 2)).toEqual(frozen);
-      api.setCursor(v2(710, 565));
-      const moved = previewCorner(entity.id, 2);
-      expect(moved.x - frozen.x).toBeCloseTo(13.6, 6);
-      expect(moved.y - frozen.y).toBeCloseTo(10.2, 6);
-      api.hold('draw', false);
-      api.press('cancel');
-    },
-  );
-
-  it('ignores the wheel while gripping and re-baselines after a zoom', () => {
-    const entity = startScale();
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    h.mouse.onWheel?.(-100, v2(700, 550));
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-    api.hold('draw', false);
-    h.mouse.onWheel?.(-100, v2(700, 550));
-    expect(h.orbit.zoom).toHaveBeenCalledTimes(1);
-    api.hold('draw', true);
-    api.setCursor(v2(710, 565));
-    api.hold('draw', false);
-    expect(previewCorner(entity.id, 2).x).toBeCloseTo(713.6, 6);
-    api.press('cancel');
-  });
-
-  it('re-baselines the grip on viewport resize without a jump', () => {
-    const entity = startScale();
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    const frozen = previewCorner(entity.id, 2);
-    for (const cb of h.resizeCallbacks) cb();
-    api.setCursor(v2(710, 565));
-    expect(previewCorner(entity.id, 2)).toEqual(frozen);
-    api.setCursor(v2(720, 580));
-    api.hold('draw', false);
-    expect(previewCorner(entity.id, 2).x).toBeCloseTo(713.6, 6);
-    api.press('cancel');
-  });
-
-  it('keeps automatic palm navigation disabled while scaling', () => {
-    api.press('toggleNavAssist');
-    addBox();
-    setHand(v2(500, 400));
-    api.press('scale');
-    emitHands(handAt(400, 300, { open: true, openArmed: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-    api.press('cancel');
-  });
-
-  it('cancels scaling when the target is edited or deleted programmatically', () => {
-    const entity = startScale();
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    api.hold('draw', false);
-    api.commands.setDimension(entity.id, { width: 200, height: 150 });
-    const edited = preview(entity.id);
-    if (edited?.type !== 'rect') throw new Error('expected a rect');
-    expect(edited.corners[0]).toEqual(v3(100, 100, 0));
-    expect(edited.corners[1]).toEqual(v3(300, 100, 0));
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-
-    startScale();
-    const target = api.selected()!.id;
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    api.hold('draw', false);
-    api.commands.deleteEntity(target);
-    expect(api.sketch.get(target)).toBeUndefined();
-    expect(preview(target)).toBeUndefined();
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-  });
-
-  it('keeps the preview when an unrelated entity changes and preserves that edit on cancel', () => {
-    const entity = startScale();
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    api.hold('draw', false);
-    const other = api.commands.addRect(makeRect(v3(600, 100, 0), v3(1, 0, 0), v3(0, 1, 0), 100, 100));
-    if (!other.ok) throw new Error(other.error);
-    api.commands.setDimension(other.entity.id, { width: 50, height: 50 });
-    expectVec3(previewCorner(entity.id, 2), 700, 550, 0);
-    api.press('cancel');
-    expect(api.sketch.get(entity.id)).toEqual(entity);
-    const edited = api.sketch.get(other.entity.id);
-    if (edited?.type !== 'rect') throw new Error('expected a rect');
-    expect(edited.corners[1]).toEqual(v3(650, 100, 0));
-    expect(edited.corners[2]).toEqual(v3(650, 150, 0));
-  });
-
-  it.each(['delete', 'undo', 'redo', 'clear', 'move', 'extrude', 'measure', 'select', 'export'] as const)(
-    'blocks %s during scaling but not after',
-    (action) => {
-      const entity = startScale();
-      const before = api.sketch.serialize();
-      api.hold('draw', true);
-      api.setCursor(v2(700, 550));
-      api.hold('draw', false);
-      api.press(action);
-      expect(api.sketch.serialize()).toBe(before);
-      expect(api.extrusion()).toBeNull();
-      expect(h.measure.isOpen).toBe(false);
-      runFrame();
-      expect(h.hudStates.at(-1)?.mode).toBe('SCALING');
-      api.press('cancel');
-      api.press(action);
-      if (action === 'delete') expect(api.sketch.get(entity.id)).toBeUndefined();
-      if (action === 'undo' || action === 'clear') expect(api.sketch.size).toBe(0);
-      if (action === 'move') {
-        runFrame();
-        expect(h.hudStates.at(-1)?.mode).toBe('MOVING');
-        api.press('cancel');
-      }
-      if (action === 'extrude') {
-        expect(api.extrusion()).not.toBeNull();
-        api.press('cancel');
-      }
-      if (action === 'measure') {
-        expect(h.measure.isOpen).toBe(true);
-        h.measure.isOpen = false;
-        h.measure.submit = null;
-      }
-    },
-  );
-
-  it.each([
-    ['an input', { tagName: 'INPUT' }],
-    ['a textarea', { tagName: 'TEXTAREA' }],
-    ['a contenteditable element', { tagName: 'DIV', isContentEditable: true }],
-  ])('ignores R inside %s', (_label, target) => {
-    addBox();
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    const event = keyDown('KeyR', { target });
-    expect(event.preventDefault).not.toHaveBeenCalled();
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-  });
-
-  it('ignores R while the measurement input or the help overlay is open', () => {
-    addBox();
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    api.press('measure');
-    keyDown('KeyR');
-    h.measure.isOpen = false;
-    h.measure.submit = null;
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-    api.press('help');
-    keyDown('KeyR');
-    api.press('help');
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-  });
-
-  it('does not start scaling while drawing, navigating, moving, or extruding', () => {
-    api.press('toggleGrid');
-    api.setCursor(v2(50, 50));
-    api.hold('draw', true);
-    api.setCursor(v2(80, 80));
-    api.press('scale');
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('DRAWING');
-    api.hold('draw', false);
-    api.press('cancel');
-
-    api.hold('orbit', true);
-    api.press('scale');
-    api.hold('orbit', false);
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
-
-    addBox();
-    api.setCursor(v2(250, 250));
-    api.press('select');
-    api.press('move');
-    api.press('scale');
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('MOVING');
-    api.press('cancel');
-
-    api.press('extrude');
-    api.press('scale');
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('EXTRUDING');
-    api.press('cancel');
-  });
-
-  it('commits once on R and ignores the auto-repeated key', () => {
-    startScale();
-    api.hold('draw', true);
-    api.setCursor(v2(700, 550));
-    api.hold('draw', false);
-    keyDown('KeyR');
-    keyDown('KeyR', { repeat: true });
-    expect(api.commands.undo()).toBe('scale rect');
-    expect(api.commands.undo()).toBe('add rect');
-  });
-
-  it('does not scale when the locked diagonal is degenerate on screen', () => {
-    const previousProject = h.projector.project;
-    const previousRay = h.projector.ray;
-    h.projector.project = (point: Vec3): Vec2 => v2(point.x, point.y);
-    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({ origin: v3(point.x, point.y, 1000), dir: v3(0, 0, -1) });
-    try {
-      const added = api.commands.addLine(v3(100, 100, 0), v3(100, 100, 100));
-      if (!added.ok) throw new Error(added.error);
-      const id = added.entity.id;
-      const before = api.sketch.serialize();
-      api.press('toggleGrid');
-      api.setCursor(v2(100, 100));
-      api.press('scale');
-      api.hold('draw', true);
-      api.setCursor(v2(150, 100));
-      api.hold('draw', false);
-      expect(preview(id)).toEqual(added.entity);
-      api.press('confirm');
-      expect(api.sketch.get(id)).toEqual(added.entity);
-      expect(api.sketch.serialize()).toBe(before);
-      expect(api.commands.undo()).toBe('add line');
-    } finally {
-      h.projector.project = previousProject;
-      h.projector.ray = previousRay;
-    }
-  });
-
-  it.each([false, true])('can enlarge a subpixel preview again without losing its anchor (regrip %s)', (regrip) => {
-    const entity = startScale();
-    const before = api.sketch.serialize();
-    api.hold('draw', true);
-    api.setCursor(v2(100.8, 100.6));
-    expectVec3(previewCorner(entity.id, 2), 100.8, 100.6, 0);
-    if (regrip) {
-      api.hold('draw', false);
-      api.hold('draw', true);
-    }
-    api.setCursor(v2(300, 250));
-    expectVec3(previewCorner(entity.id, 2), 300, 250, 0);
-    expectVec3(previewCorner(entity.id, 0), 100, 100, 0);
-    expect(api.sketch.serialize()).toBe(before);
-    api.hold('draw', false);
-    api.press('cancel');
-    expect(preview(entity.id)).toEqual(entity);
-  });
-
-  it('leaves an empty sketch in READY when R is pressed', () => {
-    api.setCursor(v2(250, 250));
-    const event = keyDown('KeyR');
-    expect(event.preventDefault).toHaveBeenCalled();
-    runFrame();
-    expect(h.hudStates.at(-1)?.mode).toBe('READY');
     expect(api.sketch.size).toBe(0);
-  });
-});
+    expect(state.toasts.some((message) => message.includes('edge-on'))).toBe(true);
 
-describe('triangle and prism workflows', () => {
-  const preview = (id: string): Entity | undefined => h.renderer.sketches.at(-1)?.find((entity) => entity.id === id);
-  function keyDown(code: string, overrides: Record<string, unknown> = {}) {
-    const event = { code, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, repeat: false, target: null, preventDefault: vi.fn(), ...overrides };
-    fire('keydown', event);
-    return event;
-  }
-  function drawTriangle(points: Vec2[] = triangleStroke([v2(100, 100), v2(500, 100), v2(200, 400)])): void {
-    api.setCursor(points[0]);
+    api.commands.addLine(v3(0, 1000, 0), v3(0, 1000, 2500));
+    strokeThrough([v3(0, 1000, 0), v3(0, 1500, 700), v3(0, 2000, 1250)]);
+    expect(api.sketch.size).toBe(2);
+    expect(api.sketch.all[1].type).toBe('line');
+  });
+
+  it('refuses a free start on a nearly edge-on pinned plane', () => {
+    api.press('viewTop');
+    finishTransitions();
+    api.setCursor(v2(400, 300));
+    dispatchWindow('keydown', keyEvent('ShiftLeft'));
+    api.setCursor(v2(400, 541));
+    dispatchWindow('keyup', keyEvent('ShiftLeft'));
+    api.setCursor(v2(400, 300));
     api.hold('draw', true);
-    for (const point of points.slice(1)) api.setCursor(point);
-    runFrame();
     api.hold('draw', false);
-  }
-  function addShape(kind: 'triangle' | 'prism'): Entity {
-    const added = api.commands.addTriangle([v3(0, 0, 0), v3(300, 0, 0), v3(0, 300, 0)]);
-    if (!added.ok) throw new Error(added.error);
-    if (kind === 'prism') {
-      const extruded = api.commands.extrude(added.entity.id, 50);
-      if (!extruded.ok) throw new Error(extruded.error);
-    }
-    const entity = api.sketch.get(added.entity.id);
-    if (!entity) throw new Error('missing entity');
-    return entity;
-  }
-
-  it('commits a freehand triangle, selects it, and ghosts it as a closed triangle', () => {
-    api.press('toggleGrid');
-    drawTriangle();
-    const entity = api.sketch.last;
-    if (entity?.type !== 'triangle') throw new Error('expected a triangle');
-    expect(api.lastRecognition()?.reason).toBe('triangle');
-    expect(api.selected()?.id).toBe(entity.id);
-    const ghostIndex = h.renderer.ghosts.map((entry) => entry.points !== null).lastIndexOf(true);
-    const ghost = h.renderer.ghosts[ghostIndex];
-    expect(h.renderer.ghostClosed[ghostIndex]).toBe(true);
-    expect(ghost?.points).toHaveLength(3);
-    expect(ghost?.label?.text).toBe('Triangle');
-    const [a, b, c] = entity.corners;
-    expect(ghost?.label?.at).toEqual(v3(a.x / 3 + b.x / 3 + c.x / 3, a.y / 3 + b.y / 3 + c.y / 3, a.z / 3 + b.z / 3 + c.z / 3));
-    expect(h.renderer.ghosts.at(-1)).toEqual({ points: null, label: null });
+    expect(api.sketch.size).toBe(0);
+    expect(state.toasts.some((message) => message.includes('edge-on'))).toBe(true);
   });
 
-  it('Q pulls a triangle into a prism preview and commits with the same id', () => {
-    api.press('toggleGrid');
-    drawTriangle();
-    const id = api.sketch.last!.id;
-    const serialized = api.sketch.serialize();
-    api.press('extrude');
-    expect(api.extrusion()).toMatchObject({ depth: 0, dragging: false, preview: { type: 'prism', depth: 0 } });
-    api.setCursor(v2(50, 50));
+  it('shows the frozen stroke grid step in the HUD and on the plane visual', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    api.press('viewRight');
+    finishTransitions();
+    setCursorWorld(v3(4000, 1500, 0));
     api.hold('draw', true);
-    api.setCursor(v2(50, 0));
-    expect(api.extrusion()).toMatchObject({ depth: 50, dragging: true, preview: { type: 'prism', depth: 50 } });
-    expect(api.sketch.serialize()).toBe(serialized);
+    tick();
+    const expected = adaptiveGridStep(state.viewport.projector(), api.plane(), v3(4000, 1500, 0), 8);
+    expect(state.hud.last?.gridStep).toBe(expected);
+    expect(state.planeVisual.last?.step).toBe(expected);
+    tick();
+    expect(state.hud.last?.gridStep).toBe(expected);
     api.hold('draw', false);
-    api.press('confirm');
-    expect(api.extrusion()).toBeNull();
-    expect(api.sketch.get(id)).toMatchObject({ type: 'prism', depth: 50 });
-    api.press('undo');
-    expect(api.sketch.get(id)).toMatchObject({ type: 'triangle' });
-    api.press('redo');
-    expect(api.sketch.get(id)).toMatchObject({ type: 'prism', depth: 50 });
   });
 
-  it('keeps a zero-depth extrusion live instead of committing a flat prism', () => {
-    api.press('toggleGrid');
-    drawTriangle();
-    api.press('extrude');
-    api.press('confirm');
-    expect(api.extrusion()).not.toBeNull();
-    expect(api.sketch.last?.type).toBe('triangle');
-    api.press('cancel');
-    expect(api.extrusion()).toBeNull();
-    expect(api.sketch.last?.type).toBe('triangle');
-  });
-
-  it('accepts an exact negative pull and cancels back to the triangle', () => {
-    api.press('toggleGrid');
-    drawTriangle();
-    const id = api.sketch.last!.id;
-    api.press('extrude');
-    api.press('measure');
-    h.measure.submit?.('-250');
-    h.measure.isOpen = false;
-    expect(api.extrusion()).toMatchObject({ depth: -250, dragging: false, preview: { type: 'prism', depth: -250 } });
-    api.press('cancel');
-    expect(api.extrusion()).toBeNull();
-    expect(api.sketch.get(id)).toMatchObject({ type: 'triangle' });
-    expect(api.commands.undo()).toBe('add triangle');
-  });
-
-  it('moves a prism with a mouse drag, preserving depth, and commits undoably', () => {
-    const entity = addShape('prism');
-    api.setCursor(v2(50, 50));
-    api.press('select');
-    api.press('toggleGrid');
-    const serialized = api.sketch.serialize();
-    api.press('move');
+  it('re-resolves the preview and commit when G toggles mid-stroke', () => {
+    setGrid(true);
+    const loop = [
+      v3(130, 120, 0),
+      v3(2070, 120, 0),
+      v3(4070, 120, 0),
+      v3(4070, 1660, 0),
+      v3(4070, 3180, 0),
+      v3(2070, 3180, 0),
+      v3(130, 3180, 0),
+      v3(130, 1660, 0),
+      v3(130, 120, 0),
+    ];
+    setCursorWorld(loop[0]);
     api.hold('draw', true);
-    api.setCursor(v2(90, 75));
-    api.hold('draw', false);
-    const moved = preview(entity.id);
-    if (moved?.type !== 'prism') throw new Error('expected a prism preview');
-    expect(moved.depth).toBe(50);
-    expect(moved.corners[0]).toEqual(v3(40, 25, 0));
-    expect(api.sketch.serialize()).toBe(serialized);
-    keyDown('Enter');
-    const committed = api.sketch.get(entity.id);
-    if (committed?.type !== 'prism') throw new Error('expected a prism');
-    expect(committed.depth).toBe(50);
-    expect(committed.corners[0]).toEqual(v3(40, 25, 0));
-    expect(api.selected()?.id).toBe(entity.id);
-    api.press('undo');
-    expect(api.sketch.serialize()).toBe(serialized);
-    api.press('redo');
-    expect(api.sketch.get(entity.id)).toEqual(committed);
-  });
-
-  it.each([
-    { kind: 'triangle', input: 'mouse', finish: 'confirm' },
-    { kind: 'triangle', input: 'mouse', finish: 'cancel' },
-    { kind: 'triangle', input: 'pinch', finish: 'confirm' },
-    { kind: 'triangle', input: 'pinch', finish: 'cancel' },
-    { kind: 'prism', input: 'mouse', finish: 'confirm' },
-    { kind: 'prism', input: 'mouse', finish: 'cancel' },
-    { kind: 'prism', input: 'pinch', finish: 'confirm' },
-    { kind: 'prism', input: 'pinch', finish: 'cancel' },
-  ] as const)('moves a $kind via $input with $finish', ({ kind, input, finish }) => {
-    const entity = addShape(kind);
+    for (const point of loop.slice(1)) setCursorWorld(point);
+    tick();
+    const roundedGhost = state.renderer.ghost;
+    expect(roundedGhost).not.toBeNull();
     api.press('toggleGrid');
-    const serialized = api.sketch.serialize();
-    if (input === 'mouse') api.setCursor(v2(50, 50));
-    else setHand(v2(50, 50));
-    api.press('select');
-    api.press('move');
-    const grip = (point: Vec2, down: boolean): void => {
-      if (input === 'mouse') {
-        api.hold('draw', down);
-        api.setCursor(point);
-      } else {
-        emitHands(handAt(point.x, point.y, { pinching: down }));
+    gridOn = false;
+    tick();
+    const rawGhost = state.renderer.ghost;
+    expect(rawGhost).not.toBeNull();
+    const moved =
+      roundedGhost!.points.length !== rawGhost!.points.length ||
+      roundedGhost!.points.some(
+        (point: Vec3, index: number) => Math.hypot(point.x - rawGhost!.points[index].x, point.y - rawGhost!.points[index].y) > 1,
+      );
+    expect(moved).toBe(true);
+    api.hold('draw', false);
+    const rect = api.sketch.all[0];
+    expect(rect.type).toBe('rect');
+    if (rect.type === 'rect') {
+      for (const corner of rect.corners) {
+        expect(rawGhost!.points.some((point: Vec3) => Math.hypot(point.x - corner.x, point.y - corner.y, point.z - corner.z) < 1e-3)).toBe(true);
       }
-    };
-    grip(v2(50, 50), true);
-    grip(v2(90, 75), true);
-    grip(v2(90, 75), false);
-    const moved = preview(entity.id);
-    expect(moved?.type).toBe(kind);
-    if (moved?.type === 'triangle' || moved?.type === 'prism') {
-      expect(moved.corners[0].x).toBeCloseTo(40);
-      expect(moved.corners[0].y).toBeCloseTo(25);
-      expect(moved.corners[0].z).toBeCloseTo(0);
-      if (moved.type === 'prism') expect(moved.depth).toBe(50);
     }
-    expect(api.sketch.serialize()).toBe(serialized);
+  });
+
+  it('refreshes the stroke endpoint when G toggles at a stationary cursor', () => {
+    api.press('viewTop');
+    finishTransitions();
+    setCursorWorld(v3(0, 0, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(1234, 0, 0));
+    tick();
+    const rounded = state.renderer.ghost;
+    expect(rounded).not.toBeNull();
+    const roundedEnd = rounded!.points[rounded!.points.length - 1];
+    expect(Math.abs(roundedEnd.x - 1234)).toBeGreaterThan(1);
+    setGrid(false);
+    tick();
+    const unrounded = state.renderer.ghost;
+    expect(unrounded).not.toBeNull();
+    const end = unrounded!.points[unrounded!.points.length - 1];
+    expect(end.x).toBeCloseTo(1234, 3);
+    expect(end.y).toBeCloseTo(0, 3);
+    expect(end.z).toBeCloseTo(0, 3);
+    api.hold('draw', false);
+    const line = api.sketch.all[api.sketch.size - 1];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.a.x).toBeCloseTo(0, 3);
+      expect(line.b.x).toBeCloseTo(1234, 3);
+      expect(line.b.y).toBeCloseTo(0, 3);
+      expect(line.b.z).toBeCloseTo(0, 3);
+    }
+  });
+
+  it('refreshes the stroke endpoint when an axis lock toggles at a stationary cursor', () => {
+    api.press('viewTop');
+    finishTransitions();
+    setGrid(false);
+    setCursorWorld(v3(0, 0, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(1234, 700, 0));
+    tick();
+    const free = state.renderer.ghost;
+    expect(free!.points[free!.points.length - 1].y).toBeCloseTo(700, 3);
+    api.hold('lockX', true);
+    tick();
+    const locked = state.renderer.ghost;
+    expect(locked).not.toBeNull();
+    const lockedEnd = locked!.points[locked!.points.length - 1];
+    expect(lockedEnd.y).toBeCloseTo(0, 3);
+    expect(lockedEnd.z).toBeCloseTo(0, 3);
+    expect(Math.abs(lockedEnd.x - 1234)).toBeLessThan(10);
+    api.hold('lockX', false);
+    tick();
+    const restored = state.renderer.ghost;
+    expect(restored!.points[restored!.points.length - 1].y).toBeCloseTo(700, 3);
+    api.hold('lockX', true);
+    tick();
+    api.hold('draw', false);
+    api.hold('lockX', false);
+    const line = api.sketch.all[api.sketch.size - 1];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.a.x).toBeCloseTo(0, 3);
+      expect(line.a.y).toBeCloseTo(0, 3);
+      expect(line.a.z).toBeCloseTo(0, 3);
+      expect(line.b.x).toBeCloseTo(lockedEnd.x, 3);
+      expect(line.b.y).toBeCloseTo(lockedEnd.y, 3);
+      expect(line.b.z).toBeCloseTo(lockedEnd.z, 3);
+    }
+  });
+
+  it('treats a focused panel button as CAD input, not a typing field', () => {
+    setCursorWorld(v3(0, 0, 0));
+    dispatchWindow('keydown', keyEvent('Space', { target: { tagName: 'BUTTON' } }));
+    tick();
+    expect(state.hud.last?.mode).toBe('DRAWING');
+    setCursorWorld(v3(4000, 0, 0));
+    dispatchWindow('keyup', keyEvent('Space', { target: { tagName: 'BUTTON' } }));
     expect(api.sketch.size).toBe(1);
-    api.press(finish);
-    expect(api.selected()?.id).toBe(entity.id);
-    if (finish === 'cancel') {
-      expect(api.sketch.serialize()).toBe(serialized);
-      expect(api.sketch.get(entity.id)).toEqual(entity);
-      expect(api.commands.undo()).toBe(kind === 'prism' ? 'extrude prism 50 mm' : 'add triangle');
-    } else {
-      expect(api.sketch.get(entity.id)).toEqual(moved);
-      api.press('undo');
-      expect(api.sketch.serialize()).toBe(serialized);
-      api.press('redo');
-      expect(api.sketch.get(entity.id)).toEqual(moved);
-    }
   });
 
-  it('shows triangle Q/M hints without a size control and a depth hint on prisms', () => {
-    const entity = addShape('triangle');
-    api.setCursor(v2(50, 50));
-    api.press('select');
-    runFrame();
-    const triangleKeys = h.hudKeys.at(-1) ?? [];
-    expect(triangleKeys).toContainEqual({ key: 'Q', label: 'extrude triangle' });
-    expect(triangleKeys).toContainEqual({ key: 'M', label: 'move' });
-    expect(triangleKeys).toContainEqual({ key: 'Delete', label: 'delete' });
-    expect(triangleKeys.find((hint) => hint.key === 'L')).toBeUndefined();
+  it('keeps the stroke alive while any hold source is still down', () => {
+    setCursorWorld(v3(0, 0, 0));
+    dispatchWindow('keydown', keyEvent('Space'));
+    state.mouse.onHold('draw', true);
+    dispatchWindow('keyup', keyEvent('Space'));
+    tick();
+    expect(state.hud.last?.mode).toBe('DRAWING');
+    setCursorWorld(v3(4000, 0, 0));
+    state.mouse.onHold('draw', false);
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.all[0].type).toBe('line');
+  });
+});
 
-    expect(api.commands.extrude(entity.id, 50).ok).toBe(true);
-    runFrame();
-    const prismKeys = h.hudKeys.at(-1) ?? [];
-    expect(prismKeys).toContainEqual({ key: 'Q', label: 'push/pull' });
-    expect(prismKeys).toContainEqual({ key: 'L', label: 'depth' });
+describe('navigation gestures', () => {
+  it('ignores palm navigation while an explicit orbit hold is active', () => {
+    api.hold('orbit', true);
+    const before = state.viewport.perspective.quaternion.clone();
+    state.tracker.onHands(handMessage({ mode: 'one', pan: [40, 0], zoom: 1, rotation: 0 }));
+    expect(state.viewport.perspective.quaternion.equals(before)).toBe(true);
+    api.hold('orbit', false);
   });
 
-  it('commits a jittered triangle after One-Euro-smoothed hand samples', () => {
-    const points = triangleStroke([v2(0, 0), v2(1000, 0), v2(350, 800)], { pointsPerSide: 12, jitter: 40 });
-    const scale = 0.6;
-    const ox = 80;
-    const oy = 80;
-    const previousProject = h.projector.project;
-    const previousRay = h.projector.ray;
-    h.projector.project = (point: Vec3): Vec2 => v2(ox + point.x * scale, oy + (point.y - point.z) * scale);
-    h.projector.ray = (point: Vec2): { origin: Vec3; dir: Vec3 } => ({
-      origin: { x: (point.x - ox) / scale, y: (point.y - oy) / scale, z: 1000 },
-      dir: { x: 0, y: 0, z: -1 },
-    });
-    try {
-      runFrame();
-      const screenFor = (point: Vec2): Vec2 => v2(ox + point.x * scale, oy + point.y * scale);
-      const first = screenFor(points[0]);
-      emitHands(handAt(first.x, first.y));
-      api.hold('draw', true);
-      for (const point of points.slice(1)) {
-        h.nowMs += 33;
-        const screen = screenFor(point);
-        emitHands(handAt(screen.x, screen.y));
-      }
-      api.hold('draw', false);
-    } finally {
-      h.projector.project = previousProject;
-      h.projector.ray = previousRay;
+  it('primes the cursor instead of jumping when a new hand takes over', () => {
+    api.hold('orbit', true);
+    const before = state.viewport.perspective.quaternion.clone();
+    state.tracker.onHands(handMessage(null));
+    const takeover = handMessage(null);
+    takeover.hands[0].id = 7;
+    takeover.hands[0].tip = [500, 100];
+    state.tracker.onHands(takeover);
+    expect(state.viewport.perspective.quaternion.equals(before)).toBe(true);
+    api.hold('orbit', false);
+  });
+
+  it('does not settle a fresh takeover gesture on motion from the old one', () => {
+    dispatchWindow('keydown', keyEvent('ShiftLeft'));
+    state.tracker.onHands(handMessage(null));
+    state.tracker.onHands(handMessage(null, { tip: [328, 240] }));
+    const takeover = handMessage(null, { id: 7, tip: [500, 300] });
+    state.tracker.onHands(takeover);
+    state.tracker.onHands(handMessage(null, { id: 7, tip: [502, 300] }));
+    const tilted = state.viewport.perspective.quaternion.clone();
+    dispatchWindow('keyup', keyEvent('ShiftLeft'));
+    finishTransitions();
+    expect(state.viewport.perspective.quaternion.equals(tilted)).toBe(true);
+  });
+
+  it('suspends a held orbit while drawing and resumes a fresh primed gesture', () => {
+    dispatchWindow('keydown', keyEvent('ShiftLeft'));
+    api.setCursor(v2(400, 300));
+    api.setCursor(v2(408, 300));
+    api.hold('draw', true);
+    api.hold('draw', false);
+    const primed = state.viewport.perspective.quaternion.clone();
+    api.setCursor(v2(420, 300));
+    expect(state.viewport.perspective.quaternion.equals(primed)).toBe(true);
+    api.setCursor(v2(428, 300));
+    dispatchWindow('keyup', keyEvent('ShiftLeft'));
+    finishTransitions();
+    const d = cameraDir();
+    expect(d.x).toBeCloseTo(0, 3);
+    expect(d.y).toBeCloseTo(0, 3);
+    expect(d.z).toBeCloseTo(-1, 3);
+  });
+
+  it('falls back from orbit to pan without settling and resumes a fresh orbit', () => {
+    dispatchWindow('keydown', keyEvent('ShiftLeft'));
+    api.setCursor(v2(400, 300));
+    api.setCursor(v2(430, 300));
+    const tilted = state.viewport.perspective.quaternion.clone();
+    dispatchWindow('keydown', keyEvent('ControlLeft'));
+    dispatchWindow('keyup', keyEvent('ShiftLeft'));
+    tick();
+    expect(state.viewport.perspective.quaternion.equals(tilted)).toBe(true);
+    api.setCursor(v2(430, 300));
+    const position = state.viewport.perspective.position.clone();
+    api.setCursor(v2(450, 300));
+    expect(state.viewport.perspective.position.equals(position)).toBe(false);
+    expect(state.viewport.perspective.quaternion.equals(tilted)).toBe(true);
+    dispatchWindow('keydown', keyEvent('ShiftLeft'));
+    dispatchWindow('keyup', keyEvent('ControlLeft'));
+    api.setCursor(v2(470, 300));
+    const primed = state.viewport.perspective.quaternion.clone();
+    api.setCursor(v2(480, 300));
+    expect(state.viewport.perspective.quaternion.equals(primed)).toBe(false);
+    dispatchWindow('keyup', keyEvent('ShiftLeft'));
+  });
+
+  it('blocks camera movement and new gestures under overlays', () => {
+    dispatchWindow('keydown', keyEvent('ShiftLeft'));
+    api.setCursor(v2(400, 300));
+    api.setCursor(v2(430, 300));
+    api.press('help');
+    const q = state.viewport.perspective.quaternion.clone();
+    api.setCursor(v2(500, 300));
+    expect(state.viewport.perspective.quaternion.equals(q)).toBe(true);
+    dispatchWindow('keyup', keyEvent('ShiftLeft'));
+    api.hold('orbit', true);
+    api.setCursor(v2(550, 300));
+    expect(state.viewport.perspective.quaternion.equals(q)).toBe(true);
+    api.press('help');
+    api.setCursor(v2(600, 300));
+    expect(state.viewport.perspective.quaternion.equals(q)).toBe(true);
+  });
+
+  it('reacquires a held orbit after hand loss as a fresh primed gesture', () => {
+    dispatchWindow('keydown', keyEvent('ShiftLeft'));
+    state.tracker.onHands(handMessage(null));
+    state.tracker.onHands(handMessage(null, { tip: [360, 240] }));
+    const orbited = state.viewport.perspective.quaternion.clone();
+    state.tracker.onHands(emptyHands());
+    state.tracker.onHands(handMessage(null, { tip: [500, 300] }));
+    expect(state.viewport.perspective.quaternion.equals(orbited)).toBe(true);
+    state.tracker.onHands(handMessage(null, { tip: [560, 300] }));
+    expect(state.viewport.perspective.quaternion.equals(orbited)).toBe(false);
+    dispatchWindow('keyup', keyEvent('ShiftLeft'));
+  });
+
+  it('keeps a mouse orbit continuous across empty hand frames', () => {
+    dispatchWindow('keydown', keyEvent('ShiftLeft'));
+    api.setCursor(v2(400, 300));
+    api.setCursor(v2(430, 300));
+    const q = state.viewport.perspective.quaternion.clone();
+    state.tracker.onHands(emptyHands());
+    api.setCursor(v2(460, 300));
+    const angle = q.angleTo(state.viewport.perspective.quaternion);
+    expect(angle).toBeGreaterThan(0.05);
+    expect(angle).toBeLessThan(0.4);
+    dispatchWindow('keyup', keyEvent('ShiftLeft'));
+  });
+
+  it('clears palm navigation when a manual pan takes over', () => {
+    api.press('toggleNavAssist');
+    state.tracker.onHands(handMessage({ mode: 'one', pan: [5, 0], zoom: 1, rotation: 0 }));
+    const tilted = state.viewport.perspective.quaternion.clone();
+    dispatchWindow('keydown', keyEvent('ControlLeft'));
+    state.tracker.onHands(handMessage({ mode: 'one', pan: [50, 0], zoom: 1, rotation: 0 }));
+    expect(state.viewport.perspective.quaternion.equals(tilted)).toBe(true);
+    dispatchWindow('keyup', keyEvent('ControlLeft'));
+    api.press('toggleNavAssist');
+  });
+
+  it('keeps orbiting while a second Shift source is still held', () => {
+    dispatchWindow('keydown', keyEvent('ShiftLeft'));
+    dispatchWindow('keydown', keyEvent('ShiftRight'));
+    api.setCursor(v2(400, 300));
+    api.setCursor(v2(430, 300));
+    const q = state.viewport.perspective.quaternion.clone();
+    dispatchWindow('keyup', keyEvent('ShiftLeft'));
+    api.setCursor(v2(460, 300));
+    expect(state.viewport.perspective.quaternion.equals(q)).toBe(false);
+    dispatchWindow('keyup', keyEvent('ShiftRight'));
+  });
+
+  it('settles a palm orbit onto a nearby preset and skips settling after two palms', () => {
+    api.press('toggleNavAssist');
+    api.press('viewIso');
+    finishTransitions();
+    const iso = 1 / Math.sqrt(3);
+    state.tracker.onHands(handMessage({ mode: 'one', pan: [0, 5], zoom: 1, rotation: 0 }));
+    state.tracker.onHands(handMessage(null));
+    finishTransitions();
+    const d = cameraDir();
+    expect(d.x).toBeCloseTo(-iso, 3);
+    expect(d.y).toBeCloseTo(iso, 3);
+    expect(d.z).toBeCloseTo(-iso, 3);
+
+    const startEl = state.viewport.perspective.quaternion.clone();
+    state.tracker.onHands(handMessage({ mode: 'one', pan: [0, 40], zoom: 1, rotation: 0 }));
+    state.tracker.onHands(handMessage({ mode: 'two', pan: [0, 40], zoom: 1, rotation: 0 }));
+    state.tracker.onHands(handMessage(null));
+    tick();
+    const d2 = cameraDir();
+    expect(Math.abs(d2.z + iso)).toBeGreaterThan(0.01);
+    expect(startEl.equals(state.viewport.perspective.quaternion)).toBe(false);
+    api.press('toggleNavAssist');
+  });
+});
+
+describe('stroke resolution caching', () => {
+  it('does not re-resolve while the stroke, sketch and camera stay unchanged', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    setCursorWorld(v3(0, 0, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(2000, 0, 0));
+    tick();
+    const calls = state.resolveCalls;
+    expect(calls).toBeGreaterThan(0);
+    tick();
+    tick();
+    expect(state.resolveCalls).toBe(calls);
+    setCursorWorld(v3(4000, 0, 0));
+    tick();
+    expect(state.resolveCalls).toBeGreaterThan(calls);
+    api.hold('draw', false);
+  });
+});
+
+const ORIGIN_CAM = v3(0, 0, 500);
+
+function worldToCamera(world: Vec3, origin = ORIGIN_CAM): [number, number, number] {
+  return [-world.x + origin.x, world.z + origin.y, world.y + origin.z];
+}
+
+let spatialSeq = 1;
+
+function spatialAt(world: Vec3, over: Partial<SpatialMessage> = {}): SpatialMessage {
+  const now = frameTime || 1000;
+  return {
+    type: 'spatial',
+    v: 2,
+    streamId: 's1',
+    sourceRunId: 'r1',
+    seq: spatialSeq++,
+    t: now,
+    sampleTimeMs: now,
+    ageMs: 0,
+    target: 'color',
+    trackingEpoch: 0,
+    frame: { w: 100, h: 80, mirrored: true },
+    pixel: [40, 40],
+    cameraMm: worldToCamera(world),
+    state: 'tracked',
+    fresh: true,
+    reason: null,
+    quality: { validPixels: 12, roiCount: 3, spreadMm: 2, pairSkewMs: 1 },
+    ...over,
+  };
+}
+
+function enablePlanarDepth(): void {
+  api.setTrackerSource('oak');
+  api.setDepthScale(1);
+  api.setSpatialOrigin(ORIGIN_CAM);
+}
+
+function strokeThroughSpatial(worldPoints: Vec3[]): void {
+  tick();
+  api.pushSpatial(spatialAt(worldPoints[0]));
+  api.hold('draw', true);
+  for (const point of worldPoints.slice(1)) {
+    tick();
+    api.pushSpatial(spatialAt(point));
+  }
+  api.hold('draw', false);
+}
+
+describe('depth planar strokes', () => {
+  it('previews and commits a depth-drawn triangle through the shared stroke pipeline', () => {
+    enablePlanarDepth();
+    const corners = [v3(0, 0, 0), v3(4000, 0, 0), v3(1200, 3000, 0)];
+    api.pushSpatial(spatialAt(corners[0]));
+    api.hold('draw', true);
+    for (const point of [...corners.slice(1), corners[0]]) {
+      tick();
+      api.pushSpatial(spatialAt(point));
     }
+    tick();
+    expect(state.renderer.ghost?.points).toHaveLength(3);
+    api.hold('draw', false);
     expect(api.lastRecognition()?.reason).toBe('triangle');
-    expect(api.sketch.last?.type).toBe('triangle');
+    expect(api.sketch.last).toMatchObject({ type: 'triangle', corners });
+    const committed = api.sketch.serialize();
+    api.press('undo');
+    expect(api.sketch.size).toBe(0);
+    api.press('redo');
+    expect(api.sketch.serialize()).toBe(committed);
+  });
+
+  it('projects measured points onto the work plane and completes a rectangle', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([
+      v3(0, 0, 80),
+      v3(4000, 0, 40),
+      v3(4000, 3000, 90),
+      v3(0, 3000, 20),
+      v3(0, 0, 10),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('rectangle');
+    expect(api.sketch.size).toBe(1);
+    const entity = api.sketch.all[0];
+    expect(entity.type).toBe('rect');
+    if (entity.type === 'rect') {
+      const expected = [v3(0, 0, 0), v3(4000, 0, 0), v3(4000, 3000, 0), v3(0, 3000, 0)];
+      for (const corner of expected) {
+        expect(entity.corners.some((point) => Math.hypot(point.x - corner.x, point.y - corner.y, point.z - corner.z) < 1e-3)).toBe(true);
+      }
+    }
+  });
+
+  it('completes a shared-border wall from projected depth points', () => {
+    api.commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    api.press('viewRight');
+    finishTransitions();
+    enablePlanarDepth();
+    strokeThroughSpatial([
+      v3(4000, 1500, 0),
+      v3(4000, 1500, 1200),
+      v3(4000, 1500, 2500),
+      v3(4000, 2000, 2500),
+      v3(4000, 2500, 2500),
+      v3(4000, 2500, 1200),
+      v3(4000, 2500, 0),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('shared-border rectangle');
+    expect(api.sketch.size).toBe(2);
+    expect(api.sketch.all[1].type).toBe('rect');
+    api.commands.undo();
+    expect(api.sketch.size).toBe(1);
+  });
+
+  it('starts a planar stroke on an edge-on plane with a view warning', () => {
+    api.press('viewFront');
+    finishTransitions();
+    api.press('cyclePlane');
+    expect(api.plane().kind).toBe('YZ');
+    enablePlanarDepth();
+    tick();
+    api.pushSpatial(spatialAt(v3(80, 400, 200)));
+    api.hold('draw', true);
+    expect(state.toasts.some((message) => message.includes('edge-on'))).toBe(true);
+    tick();
+    api.pushSpatial(spatialAt(v3(120, 800, 900)));
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.all[0].type).toBe('line');
+  });
+});
+
+describe('depth planar snapping', () => {
+  it('defaults depth scale to 10 when entering depth mode', () => {
+    try {
+      globalThis.localStorage?.removeItem('aircad.depthScale');
+    } catch {
+      /* node */
+    }
+    api.setTrackerSource('oak');
+    expect(api.mappingScale()).toBe(10);
+  });
+
+  it('recognizes a jittered loop as a rectangle', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([
+      v3(0, 0, 12),
+      v3(2000, 20, -8),
+      v3(4000, -10, 15),
+      v3(3980, 1500, -6),
+      v3(4010, 3000, 14),
+      v3(2000, 2985, -11),
+      v3(10, 3010, 8),
+      v3(-8, 1500, -4),
+      v3(18, 12, 6),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('rectangle');
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.all[0].type).toBe('rect');
+  });
+
+  it('assembles four chained strokes into a rectangle', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([v3(0, 0, 0), v3(2000, 0, 8), v3(4000, 0, 0)]);
+    expect(api.sketch.size).toBe(1);
+    strokeThroughSpatial([v3(4000, 0, 0), v3(4000, 1500, -6), v3(4000, 3000, 0)]);
+    expect(api.sketch.size).toBe(2);
+    strokeThroughSpatial([v3(4000, 3000, 0), v3(2000, 3000, 10), v3(0, 3000, 0)]);
+    expect(api.sketch.size).toBe(3);
+    strokeThroughSpatial([v3(0, 3000, 0), v3(0, 1500, -5), v3(0, 0, 0)]);
+    expect(api.lastRecognition()?.reason).toBe('assembled rectangle');
+    expect(api.sketch.size).toBe(1);
+    expect(api.sketch.all[0].type).toBe('rect');
+  });
+
+  it('joins an endpoint 35 mm off a vertex', () => {
+    api.commands.addLine(v3(0, 0, 0), v3(500, 0, 0));
+    enablePlanarDepth();
+    strokeThroughSpatial([v3(2000, 0, 0), v3(1000, 0, 4), v3(35, 0, 0)]);
+    expect(api.sketch.size).toBe(2);
+    const line = api.sketch.all[1];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b).toEqual(v3(0, 0, 0));
+    }
+  });
+
+  it('commits a near-axis stroke as an axis-aligned line', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([v3(0, 0, 0), v3(500, 20, 8), v3(1000, 80, 40)]);
+    expect(api.lastRecognition()?.reason).toBe('axis-aligned line');
+    expect(api.sketch.size).toBe(1);
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.a).toEqual(v3(0, 0, 0));
+      expect(line.b.y).toBeCloseTo(0, 5);
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('projects a tilted stroke onto the work plane', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([v3(0, 0, 0), v3(500, 80, 20), v3(1000, 150, 40)]);
+    expect(api.sketch.size).toBe(1);
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('snaps a 20Ã¢ÂÂ¬Ã¢ÂÂ planar stroke to a world axis', () => {
+    enablePlanarDepth();
+    const angle = (20 * Math.PI) / 180;
+    strokeThroughSpatial([
+      v3(0, 0, 0),
+      v3(Math.cos(angle) * 400, Math.sin(angle) * 400, 8),
+      v3(Math.cos(angle) * 800, Math.sin(angle) * 800, 12),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('axis-aligned line');
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.y).toBeCloseTo(0, 5);
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('prompts for a 45Ã¢ÂÂ¬Ã¢ÂÂ planar angle and applies the typed value', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([v3(0, 0, 0), v3(400, 400, 10), v3(800, 800, 20)]);
+    expect(api.lastRecognition()?.reason).toBe('plane-locked line');
+    expect(state.measure.isOpen).toBe(true);
+    expect(Number(state.measure.lastInitial)).toBeCloseTo(45, 0);
+    state.measure.submit('30');
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect((Math.atan2(line.b.y, line.b.x) * 180) / Math.PI).toBeCloseTo(30, 4);
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('snaps a nearby stroke onto an existing diagonal as a parallel line', () => {
+    const angle = (38 * Math.PI) / 180;
+    const along = { x: Math.cos(angle), y: Math.sin(angle) };
+    api.commands.addLine(v3(0, 0, 0), v3(along.x * 4000, along.y * 4000, 0));
+    enablePlanarDepth();
+    api.press('fitAll');
+    finishTransitions();
+    const drawn = (46 * Math.PI) / 180;
+    const perp = { x: -along.y, y: along.x };
+    const start = v3(along.x * 1600 + perp.x * 650, along.y * 1600 + perp.y * 650, 0);
+    strokeThroughSpatial([
+      start,
+      v3(start.x + Math.cos(drawn) * 700, start.y + Math.sin(drawn) * 700, 4),
+      v3(start.x + Math.cos(drawn) * 1400, start.y + Math.sin(drawn) * 1400, 6),
+      v3(start.x + Math.cos(drawn) * 2000, start.y + Math.sin(drawn) * 2000, 8),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('parallel line');
+    expect(state.measure.isOpen).toBe(false);
+    const line = api.sketch.all[1];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect((Math.atan2(line.b.y - line.a.y, line.b.x - line.a.x) * 180) / Math.PI).toBeCloseTo(38, 4);
+    }
+  });
+
+  it('shows a vertex snap in the HUD before pen-down', () => {
+    api.commands.addLine(v3(0, 0, 0), v3(500, 0, 0));
+    enablePlanarDepth();
+    api.pushSpatial(spatialAt(v3(10, 0, 0)));
+    tick();
+    expect(state.hud.last?.snap).toBe('vertex');
+  });
+
+  it('shows decided-by-stroke before pen-down in depth auto', () => {
+    enablePlanarDepth();
+    tick();
+    expect(state.hud.last?.planeMode).toBe('Auto');
+    expect(state.hud.last?.planeReason).toBe('decided by stroke');
+    expect(api.plane().kind).toBe('XY');
+  });
+
+  it('commits a vertical stroke as a standing line while the last plane was XY', () => {
+    enablePlanarDepth();
+    expect(api.plane().kind).toBe('XY');
+    strokeThroughSpatial([v3(0, 0, 0), v3(4, 2, 400), v3(8, 3, 800)]);
+    expect(api.sketch.size).toBe(1);
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.z).toBeGreaterThan(700);
+      expect(Math.abs(line.b.x) + Math.abs(line.b.y)).toBeLessThan(20);
+    }
+    expect(api.plane().kind).not.toBe('XY');
+  });
+
+  it('locks an X-then-Z wall rectangle onto XZ', () => {
+    enablePlanarDepth();
+    expect(api.plane().kind).toBe('XY');
+    strokeThroughSpatial([
+      v3(0, 0, 0),
+      v3(2000, 0, 8),
+      v3(4000, 0, 0),
+      v3(4000, 20, 1200),
+      v3(4000, -10, 2500),
+      v3(2000, 15, 2500),
+      v3(0, -8, 2500),
+      v3(0, 12, 1200),
+      v3(0, 0, 0),
+    ]);
+    expect(api.lastRecognition()?.reason).toBe('rectangle');
+    expect(api.sketch.size).toBe(1);
+    const entity = api.sketch.all[0];
+    expect(entity.type).toBe('rect');
+    if (entity.type === 'rect') {
+      for (const corner of entity.corners) expect(corner.y).toBeCloseTo(0, 3);
+      expect(entity.corners.some((corner) => Math.abs(corner.z - 2500) < 1)).toBe(true);
+    }
+    expect(api.plane().kind).toBe('XZ');
+  });
+
+  it('keeps a straight floor stroke on XY by continuity', () => {
+    enablePlanarDepth();
+    strokeThroughSpatial([v3(0, 0, 0), v3(400, 0, 6), v3(800, 0, 4)]);
+    expect(api.plane().kind).toBe('XY');
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.y).toBeCloseTo(0, 5);
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('still flattens onto a pinned plane in manual depth mode', () => {
+    enablePlanarDepth();
+    api.press('cyclePlane');
+    expect(api.planeMode()).toBe('manual');
+    expect(api.plane().kind).toBe('XZ');
+    strokeThroughSpatial([v3(0, 0, 0), v3(500, 400, 8), v3(1000, 800, 12)]);
+    const line = api.sketch.all[0];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.y).toBeCloseTo(0, 5);
+      expect(line.b.z).toBeCloseTo(0, 5);
+    }
+  });
+});
+
+describe('parallel edge guides', () => {
+  function setupParallelScene(): { refId: string; px: number; gap: number } {
+    const added = api.commands.addLine(v3(0, 0, 0), v3(4000, 0, 0));
+    if (!added.ok) throw new Error(added.error);
+    api.press('viewTop');
+    api.press('fitAll');
+    finishTransitions();
+    setGrid(false);
+    const px = Math.abs(api.project(v3(1, 0, 0))!.x - api.project(v3(0, 0, 0))!.x);
+    return { refId: added.entity.id, px, gap: 70 / px };
+  }
+
+  it('previews and commits an equal-length line parallel to a nearby side', () => {
+    const { refId, px, gap } = setupParallelScene();
+    setCursorWorld(v3(0, gap, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(2000, gap, 0));
+    setCursorWorld(v3(4000 - 5 / px, gap + 2 / px, 0));
+    tick();
+    const guide = state.renderer.guide;
+    expect(guide?.matchedLength).toBe(true);
+    expect(guide?.reference.entityId).toBe(refId);
+    const ghost = state.renderer.ghost;
+    expect(ghost).not.toBeNull();
+    const previewEnd = ghost!.points[ghost!.points.length - 1];
+    expect(previewEnd.x).toBeCloseTo(4000, 5);
+    expect(previewEnd.y).toBeCloseTo(gap, 5);
+    expect(previewEnd.z).toBeCloseTo(0, 5);
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(2);
+    expect(state.renderer.guide).toBeNull();
+    const line = api.sketch.all[1];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.a).toEqual(ghost!.points[0]);
+      expect(line.b).toEqual(previewEnd);
+    }
+    const ref = api.sketch.all[0];
+    expect(ref.id).toBe(refId);
+    if (ref.type === 'line') {
+      expect(ref.a).toEqual(v3(0, 0, 0));
+      expect(ref.b).toEqual(v3(4000, 0, 0));
+    }
+    api.commands.undo();
+    expect(api.sketch.size).toBe(1);
+    api.commands.redo();
+    expect(api.sketch.size).toBe(2);
+    expect(api.sketch.all[1]).toEqual(line);
+  });
+
+  it('previews and commits the same correction for a depth-drawn stroke', () => {
+    const { refId, px, gap } = setupParallelScene();
+    enablePlanarDepth();
+    api.pushSpatial(spatialAt(v3(0, gap, 0)));
+    api.hold('draw', true);
+    tick();
+    api.pushSpatial(spatialAt(v3(2000, gap, 0)));
+    tick();
+    api.pushSpatial(spatialAt(v3(4000 - 5 / px, gap + 2 / px, 0)));
+    tick();
+    const guide = state.renderer.guide;
+    expect(guide?.matchedLength).toBe(true);
+    expect(guide?.reference.entityId).toBe(refId);
+    const ghost = state.renderer.ghost;
+    expect(ghost).not.toBeNull();
+    const previewEnd = ghost!.points[ghost!.points.length - 1];
+    expect(previewEnd.x).toBeCloseTo(4000, 3);
+    expect(previewEnd.y).toBeCloseTo(gap, 3);
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(2);
+    const line = api.sketch.all[1];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.x).toBeCloseTo(4000, 3);
+      expect(line.b.y).toBeCloseTo(gap, 3);
+    }
+    expect(state.renderer.guide).toBeNull();
+    expect(state.measure.isOpen).toBe(false);
+  });
+
+  it('shows a length-only suggestion for a shorter side and clears it on cancel', () => {
+    const { refId, px, gap } = setupParallelScene();
+    setCursorWorld(v3(0, gap, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(1200, gap, 0));
+    setCursorWorld(v3(2400 - 5 / px, gap + 2 / px, 0));
+    tick();
+    const guide = state.renderer.guide;
+    expect(guide).not.toBeNull();
+    expect(guide!.matchedLength).toBe(false);
+    expect(guide!.reference.entityId).toBe(refId);
+    expect(guide!.target.x).toBeCloseTo(4000, 3);
+    const size = api.sketch.size;
+    api.press('cancel');
+    expect(state.renderer.guide).toBeNull();
+    expect(state.renderer.ghost).toBeNull();
+    expect(api.sketch.size).toBe(size);
+  });
+
+  it('drops the guide when the endpoint leaves the guide band', () => {
+    const { px, gap } = setupParallelScene();
+    setCursorWorld(v3(0, gap, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(2000, gap, 0));
+    tick();
+    expect(state.renderer.guide).not.toBeNull();
+    setCursorWorld(v3(2000, gap + 90 / px, 0));
+    tick();
+    expect(state.renderer.guide).toBeNull();
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(1);
+  });
+
+  it('guides the last leg of an unfinished outline without touching its raw first side', () => {
+    const added = api.commands.addLine(v3(0, 0, 0), v3(0, 4000, 0));
+    if (!added.ok) throw new Error(added.error);
+    api.press('viewTop');
+    api.press('fitAll');
+    finishTransitions();
+    setGrid(false);
+    const px = Math.abs(api.project(v3(1, 0, 0))!.x - api.project(v3(0, 0, 0))!.x);
+    const gap = 70 / px;
+    setCursorWorld(v3(gap + 2000, -400, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(gap, -400, 0));
+    tick();
+    expect(state.renderer.guide).toBeNull();
+    setCursorWorld(v3(gap, 3600 - 5 / px, 0));
+    tick();
+    const guide = state.renderer.guide;
+    expect(guide).not.toBeNull();
+    expect(guide!.matchedLength).toBe(true);
+    expect(guide!.reference.entityId).toBe(added.entity.id);
+    expect(guide!.start.x).toBeCloseTo(gap, 3);
+    expect(guide!.start.y).toBeCloseTo(-400, 3);
+    expect(guide!.target.x).toBeCloseTo(gap, 3);
+    expect(guide!.target.y).toBeCloseTo(3600, 3);
+    api.press('cancel');
+    expect(state.renderer.guide).toBeNull();
+    expect(api.sketch.size).toBe(1);
   });
 });

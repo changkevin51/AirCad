@@ -1,6 +1,8 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
+set "INSTALL_DEPTH=0"
+if /I "%~1"=="--depth" set "INSTALL_DEPTH=1"
 
 if exist ".venv\Scripts\python.exe" goto :install_python_deps
 
@@ -44,7 +46,11 @@ if not exist ".venv\Scripts\python.exe" (
 )
 ".venv\Scripts\python.exe" -m pip install -U pip
 if errorlevel 1 goto :fail
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
+if "%INSTALL_DEPTH%"=="1" (
+    ".venv\Scripts\python.exe" -m pip install -r requirements-depth.txt
+) else (
+    ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+)
 if errorlevel 1 goto :fail
 
 where node >nul 2>&1

@@ -1,0 +1,2 @@
+-r requirements.txt
+depthai==2.30.0.0

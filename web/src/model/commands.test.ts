@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Commands, parseDimensionSpec } from './commands';
-import { makeRect, Sketch, type CircleEntity, type EntityInput, type LineEntity, type RectEntity, type SolidEntity } from './sketch';
+import { makeRect, Sketch, type EntityInput, type LineEntity, type RectEntity, type SolidEntity } from './sketch';
 import { v3 } from './vec';
 
 describe('parseDimensionSpec', () => {
@@ -80,75 +80,108 @@ describe('Commands.setDimension', () => {
     expect(commands.deleteLast().ok).toBe(false);
     expect(commands.addLine(v3(1, 1, 1), v3(1, 1, 1)).ok).toBe(false);
   });
+
+  it('sets a line angle in-plane, keeps length, and undoes', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const added = commands.addLine(v3(0, 0, 0), v3(100, 100, 0));
+    const id = added.ok ? added.entity.id : '';
+    const result = commands.setLineAngle(id, '30', 'XY');
+    expect(result.ok).toBe(true);
+    const line = sketch.get(id) as LineEntity;
+    expect(line.a).toEqual(v3(0, 0, 0));
+    expect(Math.hypot(line.b.x, line.b.y, line.b.z)).toBeCloseTo(Math.hypot(100, 100, 0), 6);
+    expect((Math.atan2(line.b.y, line.b.x) * 180) / Math.PI).toBeCloseTo(30, 5);
+    expect(commands.setLineAngle(id, 'abc', 'XY').ok).toBe(false);
+    expect(commands.undo()).toMatch(/set angle/);
+    expect((sketch.get(id) as LineEntity).b).toEqual(v3(100, 100, 0));
+  });
+
+  it('keeps an arbitrary XYZ line through undo and export', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const added = commands.commitStroke({ type: 'line', a: v3(12, 34, 56), b: v3(78, 90, 123) });
+    expect(added.ok).toBe(true);
+    const exported = commands.exportPayload().entities[0];
+    expect(exported.type).toBe('line');
+    if (exported.type === 'line' || exported.type === 'rect' || exported.type === 'extrusion') {
+      expect(exported.points).toEqual([[12, 34, 56], [78, 90, 123]]);
+    }
+    expect(commands.undo()).toMatch(/line/i);
+    expect(sketch.size).toBe(0);
+    expect(commands.redo()).toMatch(/line/i);
+    const line = sketch.last as LineEntity;
+    expect(line.a).toEqual(v3(12, 34, 56));
+    expect(line.b).toEqual(v3(78, 90, 123));
+  });
 });
 
-describe('Commands: circles', () => {
-  it('adds a circle and sets its diameter with units, undoable', () => {
+describe('Commands.commitStroke', () => {
+  const completedRect = (): [ReturnType<typeof v3>, ReturnType<typeof v3>, ReturnType<typeof v3>, ReturnType<typeof v3>] =>
+    [v3(4000, 0, 0), v3(4000, 3000, 0), v3(7000, 3000, 0), v3(7000, 0, 0)];
+
+  it('dispatches to addLine/addRect when no replacements are given', () => {
     const sketch = new Sketch();
     const commands = new Commands(sketch);
-    const added = commands.addCircle(v3(100, 200, 300), v3(0, 1, 0), 50);
-    expect(added.ok).toBe(true);
-    const id = added.ok ? added.entity.id : '';
-    expect(commands.setDimension(id, '5 cm').ok).toBe(true);
-    let circle = sketch.get(id) as CircleEntity;
-    expect(circle.radius).toBe(25);
-    expect(circle.center).toEqual(v3(100, 200, 300));
-    expect(circle.normal).toEqual(v3(0, 1, 0));
-    expect(commands.undo()).toMatch(/set diameter/);
-    expect((sketch.get(id) as CircleEntity).radius).toBe(50);
-    expect(commands.redo()).toMatch(/set diameter/);
-    expect((sketch.get(id) as CircleEntity).radius).toBe(25);
-    expect(commands.setDimension(id, '2 m').ok).toBe(true);
-    circle = sketch.get(id) as CircleEntity;
-    expect(circle.radius).toBe(1000);
+    const line = commands.commitStroke({ type: 'line', a: v3(0, 0, 0), b: v3(100, 0, 0) });
+    expect(line.ok).toBe(true);
+    const rect = commands.commitStroke({ type: 'rect', corners: completedRect() });
+    expect(rect.ok).toBe(true);
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e2']);
+    expect(commands.commitStroke({ type: 'line', a: v3(0, 0, 0), b: v3(0, 0, 0) }).ok).toBe(false);
   });
 
-  it('rejects bad diameters without changing geometry or history', () => {
+  it('commits a completed rectangle and removes the consolidated lines atomically', () => {
     const sketch = new Sketch();
     const commands = new Commands(sketch);
-    const added = commands.addCircle(v3(100, 200, 300), v3(0, 1, 0), 50);
-    const id = added.ok ? added.entity.id : '';
-    const before = sketch.get(id);
-    const undoable = sketch.canUndo;
-    for (const spec of ['10x20', '0', 'NaN', '-5', '0.000001', { length: NaN }, { length: -5 }]) {
-      expect(commands.setDimension(id, spec).ok).toBe(false);
-    }
-    expect(sketch.get(id)).toBe(before);
-    expect(sketch.canUndo).toBe(undoable);
-    expect(commands.undo()).toBe('add circle');
-    expect(sketch.size).toBe(0);
-  });
+    commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000));
+    commands.addLine(v3(4000, 0, 0), v3(7000, 0, 0));
+    commands.addLine(v3(7000, 0, 0), v3(7000, 3000, 0));
 
-  it('serializes circles alongside lines and rectangles', () => {
-    const sketch = new Sketch();
-    const commands = new Commands(sketch);
-    commands.addLine(v3(0, 0, 0), v3(0, 0, 10));
-    commands.addRect(makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 10, 20));
-    commands.addCircle(v3(100, 200, 300), v3(0, 1, 0), 50);
-    const restored = Sketch.fromJSON(JSON.parse(sketch.serialize()));
-    expect(restored.toJSON()).toEqual(sketch.toJSON());
-    expect(restored.all.map((entity) => entity.type)).toEqual(['line', 'rect', 'circle']);
-    expect(restored.last).toEqual({ id: 'e3', type: 'circle', center: v3(100, 200, 300), normal: v3(0, 1, 0), radius: 50 });
-  });
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
+    const result = commands.commitStroke({ type: 'rect', corners: completedRect() }, ['e2', 'e3']);
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.entity.id).toBe('e4');
+    expect(result.ok && result.message).toMatch(/rectangle/i);
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e4']);
+    expect(reasons).toEqual(['complete rectangle']);
 
-  it('extrudes a circle and validates circle inputs', () => {
-    const sketch = new Sketch();
-    const commands = new Commands(sketch);
-    const added = commands.addCircle(v3(100, 200, 300), v3(0, 1, 0), 50);
-    const id = added.ok ? added.entity.id : '';
-    expect(commands.extrude(id, 100).ok).toBe(true);
-    expect(sketch.get(id)?.type).toBe('cylinder');
-    expect((sketch.get(id) as { radius: number }).radius).toBe(50);
-    expect(commands.undo()).toMatch(/extrude/);
-    expect((sketch.get(id) as CircleEntity).radius).toBe(50);
-    expect(commands.redo()).toMatch(/extrude/);
-    expect(sketch.get(id)?.type).toBe('cylinder');
-    expect(commands.deleteEntity(id).ok).toBe(true);
-    expect(sketch.size).toBe(0);
     commands.undo();
-    expect(sketch.size).toBe(1);
-    expect(commands.addCircle(v3(0, 0, 0), v3(0, 0, 0), 10).ok).toBe(false);
-    expect(commands.addCircle(v3(0, 0, 0), v3(0, 0, 1), -5).ok).toBe(false);
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e2', 'e3']);
+    commands.redo();
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e4']);
+  });
+
+  it('fails on unknown replacement ids without history or id allocation', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    commands.addLine(v3(4000, 0, 0), v3(7000, 0, 0));
+    const result = commands.commitStroke({ type: 'rect', corners: completedRect() }, ['e1', 'e9']);
+    expect(result.ok).toBe(false);
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1']);
+    expect(commands.undo()).toBe('add line');
+    const after = commands.addLine(v3(0, 0, 0), v3(5, 0, 0));
+    expect(after.ok && after.entity.id).toBe('e2');
+  });
+
+  it('rejects invalid or non-rectangle input for replacements', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    commands.addLine(v3(4000, 0, 0), v3(7000, 0, 0));
+    expect(commands.commitStroke({ type: 'line', a: v3(0, 0, 0), b: v3(9, 0, 0) }, ['e1']).ok).toBe(false);
+    const flat = commands.commitStroke(
+      { type: 'rect', corners: [v3(0, 0, 0), v3(0, 0, 0), v3(0, 0, 0), v3(0, 0, 0)] },
+      ['e1'],
+    );
+    expect(flat.ok).toBe(false);
+    const nan = commands.commitStroke(
+      { type: 'rect', corners: [v3(0, 0, 0), v3(Number.NaN, 0, 0), v3(3, 3, 0), v3(0, 3, 0)] },
+      ['e1'],
+    );
+    expect(nan.ok).toBe(false);
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1']);
+    expect(commands.undo()).toBe('add line');
   });
 });
 
@@ -158,15 +191,16 @@ describe('Commands.extrudeMany', () => {
     const commands = new Commands(sketch);
     const corners = makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300);
     const a = sketch.addEntity({ type: 'rect', corners });
-    const b = sketch.addEntity({ type: 'circle', center: v3(700, 200, 0), normal: v3(0, 0, 1), radius: 50 });
+    const other = makeRect(v3(700, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 100, 80);
+    const b = sketch.addEntity({ type: 'rect', corners: other });
     const previews: SolidEntity[] = [
       { id: a.id, type: 'extrusion', corners, depth: 100 },
-      { id: b.id, type: 'cylinder', center: v3(700, 200, 0), normal: v3(0, 0, 1), radius: 50, depth: -200 },
+      { id: b.id, type: 'extrusion', corners: other, depth: -200 },
     ];
     return { sketch, commands, previews };
   }
 
-  it('applies mixed box and cylinder previews atomically and undoes both together', () => {
+  it('applies mixed box previews atomically and undoes both together', () => {
     const { sketch, commands, previews } = setup();
     const before = sketch.serialize();
     const reasons: string[] = [];
@@ -184,18 +218,14 @@ describe('Commands.extrudeMany', () => {
 
   it('validates every preview and rejects duplicates before any mutation', () => {
     const { sketch, commands, previews } = setup();
-    const [box, cylinder] = previews;
-    if (cylinder.type !== 'cylinder') throw new Error('expected cylinder fixture');
+    const [box, other] = previews;
+    if (other.type !== 'extrusion') throw new Error('expected extrusion fixture');
     const before = sketch.serialize();
     const invalid: SolidEntity[][] = [
-      [box, { ...cylinder, depth: 0 }],
-      [box, { ...cylinder, depth: NaN }],
-      [box, { ...cylinder, radius: 0 }],
-      [box, { ...cylinder, normal: v3(0, 0, 0) }],
-      [box, { ...cylinder, id: 'missing' }],
+      [box, { ...other, depth: 0 }],
+      [box, { ...other, depth: NaN }],
+      [box, { ...other, id: 'missing' }],
       [box, box],
-      [{ ...cylinder, id: box.id }],
-      [{ ...box, id: cylinder.id }],
     ];
     const reasons: string[] = [];
     sketch.onChange((reason) => reasons.push(reason));
@@ -204,7 +234,7 @@ describe('Commands.extrudeMany', () => {
       expect(sketch.serialize()).toBe(before);
     }
     expect(reasons).toEqual([]);
-    expect(commands.undo()).toBe('add circle');
+    expect(commands.undo()).toBe('add rect');
   });
 
   it('keeps single-shape undo labels and does not record empty or unchanged batches', () => {
@@ -227,9 +257,7 @@ describe('Commands.move', () => {
   const inputs: EntityInput[] = [
     { type: 'line', a: v3(10, 20, 30), b: v3(110, 20, 30) },
     { type: 'rect', corners: makeRect(v3(10, 20, 30), v3(1, 0, 0), v3(0, 1, 0), 100, 80) },
-    { type: 'circle', center: v3(10, 20, 30), normal: v3(0, 1, 0), radius: 25 },
     { type: 'extrusion', corners: makeRect(v3(10, 20, 30), v3(1, 0, 0), v3(0, 1, 0), 100, 80), depth: -50 },
-    { type: 'cylinder', center: v3(10, 20, 30), normal: v3(0, 1, 0), radius: 25, depth: -50 },
     { type: 'triangle', corners: [v3(10, 20, 30), v3(110, 20, 30), v3(10, 100, 30)] },
     { type: 'prism', corners: [v3(10, 20, 30), v3(110, 20, 30), v3(10, 100, 30)], depth: -50 },
   ];
@@ -253,11 +281,6 @@ describe('Commands.move', () => {
     if (moved.type === 'line') {
       expect(moved.a).toEqual(v3(35, 5, 70));
       expect(moved.b).toEqual(v3(135, 5, 70));
-    } else if (moved.type === 'circle' || moved.type === 'cylinder') {
-      expect(moved.center).toEqual(v3(35, 5, 70));
-      expect(moved.normal).toEqual(v3(0, 1, 0));
-      expect(moved.radius).toBe(25);
-      if (moved.type === 'cylinder') expect(moved.depth).toBe(-50);
     } else if (moved.type === 'triangle' || moved.type === 'prism') {
       expect(moved.corners).toEqual([v3(35, 5, 70), v3(135, 5, 70), v3(35, 85, 70)]);
       if (moved.type === 'prism') expect(moved.depth).toBe(-50);
@@ -326,9 +349,7 @@ describe('Commands.scale', () => {
   const inputs: EntityInput[] = [
     { type: 'line', a: v3(10, 20, 30), b: v3(110, 20, 30) },
     { type: 'rect', corners: makeRect(v3(10, 20, 30), v3(1, 0, 0), v3(0, 1, 0), 100, 80) },
-    { type: 'circle', center: v3(10, 20, 30), normal: v3(0, 1, 0), radius: 25 },
     { type: 'extrusion', corners: makeRect(v3(10, 20, 30), v3(1, 0, 0), v3(0, 1, 0), 100, 80), depth: -50 },
-    { type: 'cylinder', center: v3(10, 20, 30), normal: v3(0, 1, 0), radius: 25, depth: -50 },
     { type: 'triangle', corners: [v3(10, 20, 30), v3(110, 20, 30), v3(40, 100, 30)] },
     { type: 'prism', corners: [v3(10, 20, 30), v3(110, 20, 30), v3(40, 100, 30)], depth: -50 },
   ];
@@ -355,11 +376,6 @@ describe('Commands.scale', () => {
       if (scaled.type === 'line') {
         expect(scaled.a).toEqual(pivot);
         expect(scaled.b).toEqual(v3(10 + 100 * factor, 20, 30));
-      } else if (scaled.type === 'circle' || scaled.type === 'cylinder') {
-        expect(scaled.center).toEqual(pivot);
-        expect(scaled.normal).toEqual(v3(0, 1, 0));
-        expect(scaled.radius).toBeCloseTo(25 * factor, 9);
-        if (scaled.type === 'cylinder') expect(scaled.depth).toBe(-50 * factor);
       } else if (scaled.type === 'triangle' || scaled.type === 'prism') {
         expect(scaled.corners).toEqual([v3(10, 20, 30), v3(10 + 100 * factor, 20, 30), v3(10 + 30 * factor, 20 + 80 * factor, 30)]);
         if (scaled.type === 'prism') expect(scaled.depth).toBe(-50 * factor);
@@ -508,7 +524,6 @@ describe('Commands: triangles and prisms', () => {
 
     const four = makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 100, 80);
     expect(commands.extrude(triangle.entity.id, 100, four).ok).toBe(false);
-    expect(commands.extrude(triangle.entity.id, 100, { center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 50 }).ok).toBe(false);
     expect(commands.extrude(rect.entity.id, 100, tri()).ok).toBe(false);
     for (const depth of [0, NaN, Infinity, -Infinity]) {
       expect(commands.extrude(triangle.entity.id, depth).ok).toBe(false);
@@ -573,18 +588,47 @@ describe('Commands: triangles and prisms', () => {
     expect(reasons).toEqual([]);
   });
 
-  it('throws a clear legacy-exporter error instead of dropping triangles', () => {
+  it('exports triangles and signed prisms without dropping other entities', () => {
     const sketch = new Sketch();
     const commands = new Commands(sketch);
     commands.addLine(v3(0, 0, 0), v3(0, 0, 10));
-    expect(() => commands.exportPayload()).not.toThrow();
-    commands.addTriangle(tri());
-    expect(() => commands.exportPayload()).toThrow(/not supported by the legacy exporter/);
-    commands.undo();
-    const prism = commands.addTriangle(tri());
-    if (!prism.ok) throw new Error(prism.error);
-    commands.extrude(prism.entity.id, 100);
-    expect(() => commands.exportPayload()).toThrow(/not supported by the legacy exporter/);
+    const triangle = commands.addTriangle(tri());
+    if (!triangle.ok) throw new Error(triangle.error);
+    const first = commands.exportPayload();
+    expect(first).toEqual({ units: 'mm', entities: [
+      { type: 'line', points: [[0, 0, 0], [0, 0, 10]] },
+      { type: 'triangle', points: [[10, 20, 30], [110, 20, 30], [10, 100, 30]] },
+    ] });
+    expect(commands.extrude(triangle.entity.id, -50).ok).toBe(true);
+    expect(commands.exportPayload().entities[1]).toEqual({
+      type: 'prism', points: [[10, 20, 30], [110, 20, 30], [10, 100, 30]], vector: [-0, -0, -50],
+    });
+    expect(first.entities[1].type).toBe('triangle');
+  });
+
+  it.each([-50, 50])('preserves a tilted prism with signed depth %s', (depth) => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    sketch.addEntity({ type: 'prism', corners: [v3(10, 20, 30), v3(110, 20, 30), v3(40, 100, 90)], depth });
+    const entity = commands.exportPayload().entities[0];
+    expect(entity.type).toBe('prism');
+    if (entity.type !== 'prism') throw new Error('expected a prism');
+    expect(entity.points).toEqual([[10, 20, 30], [110, 20, 30], [40, 100, 90]]);
+    expect(entity.vector[0]).toBeCloseTo(0);
+    expect(entity.vector[1]).toBeCloseTo(-0.6 * depth);
+    expect(entity.vector[2]).toBeCloseTo(0.8 * depth);
+  });
+
+  it('exports an explicit preview without changing model or undo history', () => {
+    const sketch = new Sketch();
+    const commands = new Commands(sketch);
+    const entity = sketch.addEntity({ type: 'prism', corners: tri(), depth: 50 });
+    if (entity.type !== 'prism') throw new Error('expected a prism');
+    const before = sketch.serialize();
+    const payload = commands.exportPayload([{ ...entity, depth: 75 }]);
+    expect(payload.entities[0]).toMatchObject({ type: 'prism', vector: [0, 0, 75] });
+    expect(sketch.serialize()).toBe(before);
+    expect(commands.undo()).toBe('add prism');
   });
 
   it('rejects triangle and prism moves that overflow or collapse coordinates without mutation or history', () => {

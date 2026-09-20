@@ -111,7 +111,7 @@ describe('recognizeStroke: lines', () => {
 });
 
 describe('recognizeStroke: rectangles', () => {
-  it('keeps jittered, bowed, softened and rotated rectangles out of circle correction', () => {
+  it('recognises jittered, bowed, softened and rotated rectangles', () => {
     const strokes = [
       rectStroke(0, 0, 1000, 1000, { pointsPerSide: 12, jitter: 80 }),
       rectStroke(0, 0, 1000, 1000, { pointsPerSide: 8, jitter: 120, overshoot: 0.04 }),
@@ -122,9 +122,17 @@ describe('recognizeStroke: rectangles', () => {
     for (const stroke of strokes) expect(recognizeStroke(stroke).shape?.kind).toBe('rect');
   });
 
-  it('does not correct an open three-sided angular stroke into a circle', () => {
+  it('does not force an open three-sided angular stroke into a rectangle', () => {
     const stroke = rectStroke(0, 0, 1000, 1000, { pointsPerSide: 12, jitter: 70, gapFraction: 0.2 });
-    expect(recognizeStroke(stroke).shape?.kind).not.toBe('circle');
+    expect(recognizeStroke(stroke).shape).toBeNull();
+  });
+
+  it('snaps a closed circular loop to a rectangle', () => {
+    const result = recognizeStroke(circleStroke(0, 0, 500));
+    expect(result.shape?.kind).toBe('rect');
+    if (result.shape?.kind !== 'rect') return;
+    expect(result.shape.width).toBeCloseTo(1000, -2);
+    expect(result.shape.height).toBeCloseTo(1000, -2);
   });
 
   it('recognises a clean axis-aligned rectangle', () => {
@@ -273,134 +281,12 @@ describe('recognizeStroke: triangles', () => {
   });
 });
 
-describe('recognizeStroke: circles', () => {
-  it.each([[0, 0, 1000], [125, -400, 25], [1e9, -1e9, 500], [0, 0, 0.01]])('fits a circle at %s, %s with radius %s', (cx, cy, radius) => {
-    const result = recognizeStroke(circleStroke(cx, cy, radius));
-    expect(result.reason).toBe('circle');
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(result.shape.center.x).toBeCloseTo(cx, 5);
-    expect(result.shape.center.y).toBeCloseTo(cy, 5);
-    expect(result.shape.radius).toBeCloseTo(radius, 5);
-  });
-
-  it('accepts either direction, arbitrary starts and a small closing gap', () => {
-    const ring = circleStroke(200, -300, 600).slice(0, -1);
-    const shifted = [...ring.slice(19), ...ring.slice(0, 19)];
-    for (const points of [[...shifted, shifted[0]], [...shifted, shifted[0]].reverse(), shifted.slice(0, -2)]) {
-      const result = recognizeStroke(points);
-      expect(result.shape?.kind).toBe('circle');
-      if (result.shape?.kind === 'circle') expect(result.shape.radius).toBeCloseTo(600, 4);
-    }
-  });
-
-  it('autocorrects a wobbly slightly oval loop', () => {
-    const points = Array.from({ length: 121 }, (_, i) => {
-      const angle = (i * Math.PI * 2) / 120;
-      const radius = 500 * (1 + 0.05 * Math.sin(angle * 3) + 0.025 * Math.cos(angle * 7));
-      return v2(200 + Math.cos(angle) * radius * 1.04, -300 + Math.sin(angle) * radius * 0.97);
-    });
-    const result = recognizeStroke(points);
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(Math.hypot(result.shape.center.x - 200, result.shape.center.y + 300)).toBeLessThan(25);
-    expect(Math.abs(result.shape.radius - 500)).toBeLessThan(30);
-  });
-
-  it('handles unequal drawing speed and repeated samples', () => {
-    const points = Array.from({ length: 161 }, (_, i) => {
-      const t = (i / 160) ** 3 * Math.PI * 2;
-      return v2(120 + 500 * Math.cos(t), 80 + 500 * Math.sin(t));
-    });
-    const result = recognizeStroke(points.flatMap((point, i) => (i < 100 ? [point, point, point] : [point])));
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind === 'circle') {
-      expect(result.shape.center.x).toBeCloseTo(120, 4);
-      expect(result.shape.center.y).toBeCloseTo(80, 4);
-      expect(result.shape.radius).toBeCloseTo(500, 4);
-    }
-  });
-
-  it.each([40, 100, 240])('autocorrects seeded jitter with %s samples', (count) => {
-    const rand = seededRandom(17);
-    const points = circleStroke(200, -300, 500, count).map((p) => v2(p.x + (rand() - 0.5) * 60, p.y + (rand() - 0.5) * 60));
-    const result = recognizeStroke(points);
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(Math.hypot(result.shape.center.x - 200, result.shape.center.y + 300)).toBeLessThan(30);
-    expect(Math.abs(result.shape.radius - 500)).toBeLessThan(30);
-  });
-
-  it.each([240, 270, 300])('closes a circular arc covering %s degrees in either direction', (sweep) => {
-    for (const direction of [1, -1]) {
-      for (const phase of [0, 0.7]) {
-        const points = Array.from({ length: 101 }, (_, i) => {
-          const angle = phase + direction * sweep * Math.PI / 180 * i / 100;
-          return v2(200 + 500 * Math.cos(angle), -300 + 500 * Math.sin(angle));
-        });
-        const result = recognizeStroke(points);
-        expect(result.shape?.kind).toBe('circle');
-        if (result.shape?.kind !== 'circle') continue;
-        expect(result.shape.center.x).toBeCloseTo(200, 5);
-        expect(result.shape.center.y).toBeCloseTo(-300, 5);
-        expect(result.shape.radius).toBeCloseTo(500, 5);
-      }
-    }
-  });
-
-  it.each([[0.20, 5], [0.24, 4]])('autocorrects circular squiggles with wobble %s and frequency %s', (amplitude, frequency) => {
-    const points = Array.from({ length: 161 }, (_, i) => {
-      const angle = i * Math.PI * 2 / 160;
-      const radius = 500 * (1 + amplitude * Math.sin(frequency * angle) + 0.06 * Math.cos(9 * angle));
-      return v2(200 + radius * Math.cos(angle), -300 + radius * Math.sin(angle));
-    });
-    const result = recognizeStroke(points);
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(Math.hypot(result.shape.center.x - 200, result.shape.center.y + 300)).toBeLessThan(100);
-    expect(Math.abs(result.shape.radius - 500)).toBeLessThan(100);
-  });
-
-  it.each([40, 100, 240])('accepts stronger hand jitter with %s samples', (count) => {
-    const rand = seededRandom(17);
-    const points = circleStroke(200, -300, 500, count).map((point) => v2(point.x + (rand() - 0.5) * 160, point.y + (rand() - 0.5) * 160));
-    const result = recognizeStroke(points);
-    expect(result.shape?.kind).toBe('circle');
-    if (result.shape?.kind !== 'circle') return;
-    expect(Math.hypot(result.shape.center.x - 200, result.shape.center.y + 300)).toBeLessThan(100);
-    expect(Math.abs(result.shape.radius - 500)).toBeLessThan(100);
-  });
-
-  it('accepts an incomplete wavy circle', () => {
-    const points = Array.from({ length: 161 }, (_, i) => {
-      const angle = 0.7 + 240 * Math.PI / 180 * i / 160;
-      const radius = 500 * (1 + 0.16 * Math.sin(4 * angle) + 0.05 * Math.cos(7 * angle));
-      return v2(200 + radius * Math.cos(angle), -300 + radius * Math.sin(angle));
-    });
-    expect(recognizeStroke(points).shape?.kind).toBe('circle');
-  });
-
-  it('still requires most of a circular loop and honors the circle gap option', () => {
-    const arc = (sweep: number) => Array.from({ length: 101 }, (_, i) => { const a = sweep * Math.PI / 180 * i / 100; return v2(500 * Math.cos(a), 500 * Math.sin(a)); });
-    expect(recognizeStroke(arc(210)).shape?.kind).not.toBe('circle');
-    expect(recognizeStroke(arc(240), { circleMaxGapDeg: 90 }).shape?.kind).not.toBe('circle');
-    expect(recognizeStroke(arc(240)).shape?.kind).toBe('circle');
-  });
-
-  it('preserves squares/rectangles and rejects short arcs, elongated ellipses and retraced loops as circles', () => {
-    expect(recognizeStroke(rectStroke(0, 0, 1000, 1000)).shape?.kind).toBe('rect');
-    expect(recognizeStroke(rotatePoints(rectStroke(0, 0, 1000, 1000), Math.PI / 4, v2(500, 500))).shape?.kind).toBe('rect');
-    expect(recognizeStroke(rectStroke(0, 0, 1000, 1000, { jitter: 30 })).shape?.kind).toBe('rect');
+describe('recognizeStroke: closed loops without corners', () => {
+  it('still requires a closed stroke and rejects scribbles and short arcs', () => {
+    expect(recognizeStroke(scribbleStroke()).shape).toBeNull();
+    expect(recognizeStroke(rectStroke(0, 0, 1000, 1000, { gapFraction: 0.3 })).shape).toBeNull();
     const circle = circleStroke(0, 0, 500);
-    for (const points of [
-      circle.slice(0, 41),
-      circle.map((p) => v2(p.x * 1.8, p.y)),
-      [...circle, ...circle.slice(1)],
-      [v2(0, 0), v2(500, 0), v2(0, 0)],
-      Array.from({ length: 121 }, (_, i) => { const a = (i * Math.PI * 2) / 120; return v2(500 * Math.sin(a), 500 * Math.sin(2 * a)); }),
-    ]) {
-      expect(recognizeStroke(points).shape?.kind).not.toBe('circle');
-    }
+    expect(recognizeStroke(circle.slice(0, 41)).shape).toBeNull();
   });
 });
 

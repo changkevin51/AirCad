@@ -1,3 +1,5 @@
+import type { PlaneKind } from './plane';
+import { applyInPlaneAngle } from './spatial-plane-fit';
 import {
   describeEntity,
   formatMm,
@@ -5,16 +7,15 @@ import {
   extrusionOffset,
   isExtrudableProfile,
   isTriangleProfile,
-  isValidCircle,
   lineLength,
   makeRect,
   rectFrame,
   scaleEntity,
   translateEntity,
   type Entity,
-  type CircleGeometry,
   type PrismEntity,
   type RectEntity,
+  type EntityInput,
   type Sketch,
   type SolidEntity,
   type TriangleEntity,
@@ -39,9 +40,8 @@ export type BatchCommandResult =
   | { ok: false; error: string };
 
 export type ExportEntity =
-  | { type: 'line' | 'rect' | 'extrusion'; points: [number, number, number][]; vector?: [number, number, number] }
-  | { type: 'circle'; center: [number, number, number]; normal: [number, number, number]; radius: number }
-  | { type: 'cylinder'; center: [number, number, number]; normal: [number, number, number]; radius: number; depth: number };
+  | { type: 'line' | 'rect' | 'triangle'; points: [number, number, number][] }
+  | { type: 'extrusion' | 'prism'; points: [number, number, number][]; vector: [number, number, number] };
 
 export interface ExportPayload {
   units: 'mm';
@@ -70,6 +70,14 @@ export function parseDepth(text: string): number | null {
  *
  * `"4000"` → `{ length: 4000 }`, `"4000x3000"` / `"4 m by 3 m"` → `{ width, height }`.
  */
+/** Parse a typed in-plane angle: `45`, `45°`, `45 deg`. */
+export function parseAngleDeg(text: string): number | null {
+  const match = /^\s*(-?\d+(?:[.,]\d+)?)\s*(?:°|deg(?:rees?)?)?\s*$/i.exec(text);
+  if (!match) return null;
+  const value = Number(match[1].replace(',', '.'));
+  return Number.isFinite(value) ? value : null;
+}
+
 export function parseDimensionSpec(text: string): DimensionSpec | null {
   const parts = text
     .trim()
@@ -110,10 +118,23 @@ export class Commands {
     return { ok: true, entity, message: `Added ${describeEntity(entity)}` };
   }
 
-  addCircle(center: Vec3, normal: Vec3, radius: number): CommandResult {
-    if (!isValidCircle({ center, normal, radius })) return { ok: false, error: 'A circle needs a finite center, a non-zero normal, and a positive radius' };
-    const entity = this.sketch.addEntity({ type: 'circle', center, normal, radius });
-    return { ok: true, entity, message: `Added ${describeEntity(entity)}` };
+  commitStroke(input: EntityInput, replaceIds: readonly string[] = []): CommandResult {
+    if (replaceIds.length === 0) {
+      if (input.type === 'line') return this.addLine(input.a, input.b);
+      if (input.type === 'rect') return this.addRect(input.corners);
+      if (input.type === 'triangle') return this.addTriangle(input.corners);
+      return { ok: false, error: 'stroke completion expects a line, rectangle, or triangle' };
+    }
+    if (input.type !== 'rect') return { ok: false, error: 'stroke completion expects a rectangle' };
+    if (!input.corners.every(isFinite3)) return { ok: false, error: 'entity coordinates must be finite' };
+    const width = distance(input.corners[0], input.corners[1]);
+    const height = distance(input.corners[0], input.corners[3]);
+    if (width < 1e-6 || height < 1e-6) return { ok: false, error: 'rectangle has a zero-length side' };
+    for (const id of replaceIds) {
+      if (!this.sketch.get(id)) return { ok: false, error: 'shared geometry changed; draw again' };
+    }
+    const [entity] = this.sketch.replaceEntities(replaceIds, [input], 'complete rectangle');
+    return { ok: true, entity, message: `Completed ${describeEntity(entity)}` };
   }
 
   addTriangle(corners: TriangleEntity['corners']): CommandResult {
@@ -132,6 +153,22 @@ export class Commands {
   deleteLast(): CommandResult {
     const entity = this.sketch.last;
     return entity ? this.deleteEntity(entity.id) : { ok: false, error: 'nothing to delete' };
+  }
+
+  setLineAngle(id: string, spec: string | number, kind: PlaneKind): CommandResult {
+    const entity = this.sketch.get(id);
+    if (!entity) return { ok: false, error: 'no entity selected' };
+    if (entity.type !== 'line') return { ok: false, error: 'angle applies to a line' };
+    const deg = typeof spec === 'number' ? spec : parseAngleDeg(spec);
+    if (deg === null || !Number.isFinite(deg)) return { ok: false, error: `could not read angle "${spec}" (try 45 or 45°)` };
+    const nextB = applyInPlaneAngle(entity.a, entity.b, kind, deg);
+    if (nearlyEqual(nextB, entity.b, 1e-6)) {
+      return { ok: true, entity, message: `Line angle already ${deg}°` };
+    }
+    const next = this.sketch.replaceEntity(id, { type: 'line', a: entity.a, b: nextB }, `set angle ${deg}°`);
+    return next
+      ? { ok: true, entity: next, message: `Line angle set to ${deg}°` }
+      : { ok: false, error: 'entity vanished' };
   }
 
   move(id: string, offset: Vec3): CommandResult {
@@ -160,10 +197,10 @@ export class Commands {
     return next ? { ok: true, entity: next, message: `Scaled ${describeEntity(next)}` } : { ok: false, error: 'entity vanished' };
   }
 
-  extrude(id: string, depth: number, geometry?: RectEntity['corners'] | TriangleEntity['corners'] | CircleGeometry): CommandResult {
+  extrude(id: string, depth: number, geometry?: RectEntity['corners'] | TriangleEntity['corners']): CommandResult {
     const result = this.prepareExtrusion(id, depth, geometry);
     if (!result.ok || result.entity === this.sketch.get(id)) return result;
-    const label = `extrude ${result.entity.type === 'cylinder' ? 'cylinder ' : result.entity.type === 'prism' ? 'prism ' : ''}${formatMm(depth)}`;
+    const label = `extrude ${result.entity.type === 'prism' ? 'prism ' : ''}${formatMm(depth)}`;
     const next = this.sketch.replaceEntity(id, result.entity, label);
     return next ? { ...result, entity: next } : { ok: false, error: 'entity vanished' };
   }
@@ -174,7 +211,7 @@ export class Commands {
     for (const preview of previews) {
       if (ids.has(preview.id)) return { ok: false, error: 'A shape can only appear once in an extrusion operation' };
       ids.add(preview.id);
-      const geometry = preview.type === 'cylinder' ? preview : preview.corners;
+      const geometry = preview.corners;
       const result = this.prepareExtrusion(preview.id, preview.depth, geometry);
       if (!result.ok) return result;
       if (result.entity !== this.sketch.get(preview.id)) changed.push(result.entity);
@@ -182,7 +219,7 @@ export class Commands {
     if (!changed.length) return { ok: true, entities: [], message: 'No extrusion changes' };
     const first = changed[0];
     const label = changed.length === 1
-      ? `extrude ${first.type === 'cylinder' ? 'cylinder ' : first.type === 'prism' ? 'prism ' : ''}${formatMm(first.depth)}`
+      ? `extrude ${first.type === 'prism' ? 'prism ' : ''}${formatMm(first.depth)}`
       : `extrude ${changed.length} shapes`;
     const entities = this.sketch.replaceEntities(changed, label);
     return entities
@@ -190,33 +227,11 @@ export class Commands {
       : { ok: false, error: 'An extrusion target is no longer available' };
   }
 
-  private prepareExtrusion(id: string, depth: number, geometry?: RectEntity['corners'] | TriangleEntity['corners'] | CircleGeometry): CommandResult<SolidEntity> {
+  private prepareExtrusion(id: string, depth: number, geometry?: RectEntity['corners'] | TriangleEntity['corners']): CommandResult<SolidEntity> {
     const entity = this.sketch.get(id);
-    if (!entity) return { ok: false, error: 'Select a closed rectangle, triangle, or circle to extrude' };
-    if (entity.type === 'line') return { ok: false, error: 'A line cannot be extruded. Draw a closed rectangle, triangle, or circle first.' };
+    if (!entity) return { ok: false, error: 'Select a closed rectangle or triangle to extrude' };
+    if (entity.type === 'line') return { ok: false, error: 'A line cannot be extruded. Draw a closed rectangle or triangle first.' };
     if (!Number.isFinite(depth) || Math.abs(depth) < 1e-6) return { ok: false, error: 'Extrusion depth must be a non-zero distance' };
-
-    if (entity.type === 'circle' || entity.type === 'cylinder') {
-      if (geometry && Array.isArray(geometry)) return { ok: false, error: 'Cylinder extrusion needs circular base geometry' };
-      const source: CircleGeometry = {
-        center: entity.center,
-        normal: entity.normal,
-        radius: entity.radius,
-      };
-      const base = geometry && !Array.isArray(geometry) ? geometry : source;
-      if (!isValidCircle(base)) return { ok: false, error: 'Cylinder base needs a finite centre, non-zero normal, and positive radius' };
-      const unchanged = entity.type === 'cylinder'
-        && entity.depth === depth
-        && nearlyEqual(entity.center, base.center, 1e-6)
-        && nearlyEqual(entity.normal, base.normal, 1e-6)
-        && Math.abs(entity.radius - base.radius) <= 1e-6;
-      if (unchanged) return { ok: true, entity, message: 'Cylinder depth unchanged' };
-      return {
-        ok: true,
-        entity: { id, type: 'cylinder', center: base.center, normal: base.normal, radius: base.radius, depth },
-        message: `Cylinder depth set to ${formatMm(depth)}`,
-      };
-    }
 
     if (entity.type === 'triangle' || entity.type === 'prism') {
       if (geometry && !Array.isArray(geometry)) return { ok: false, error: 'Triangle extrusion needs three corners' };
@@ -246,24 +261,14 @@ export class Commands {
   setDimension(id: string, spec: DimensionSpec | string): CommandResult {
     const entity = this.sketch.get(id);
     if (!entity) return { ok: false, error: 'no entity selected' };
-    if ((entity.type === 'extrusion' || entity.type === 'cylinder' || entity.type === 'prism') && typeof spec === 'string') {
+    if ((entity.type === 'extrusion' || entity.type === 'prism') && typeof spec === 'string') {
       const depth = parseDepth(spec);
       if (depth !== null) return this.extrude(id, depth);
     }
     const parsed = typeof spec === 'string' ? parseDimensionSpec(spec) : spec;
     if (!parsed) return { ok: false, error: `could not read "${spec}" (try 4000 or 4000x3000)` };
     if (Object.values(parsed).some((value) => !Number.isFinite(value) || value <= 0)) return { ok: false, error: 'Dimensions must be positive finite distances' };
-    if ((entity.type === 'extrusion' || entity.type === 'cylinder' || entity.type === 'prism') && parsed.length !== undefined) return this.extrude(id, parsed.length);
-
-    if (entity.type === 'circle') {
-      if (parsed.length === undefined || parsed.width !== undefined || parsed.height !== undefined) {
-        return { ok: false, error: 'a circle takes one diameter, e.g. 50 or 5 cm' };
-      }
-      const radius = parsed.length / 2;
-      if (!isValidCircle({ ...entity, radius })) return { ok: false, error: 'Circle diameter is too small' };
-      const next = this.sketch.replaceEntity(id, { ...entity, radius }, `set diameter ${formatMm(parsed.length)}`);
-      return next ? { ok: true, entity: next, message: `Circle diameter set to ${formatMm(parsed.length)}` } : { ok: false, error: 'entity vanished' };
-    }
+    if ((entity.type === 'extrusion' || entity.type === 'prism') && parsed.length !== undefined) return this.extrude(id, parsed.length);
 
     if (entity.type === 'line') {
       if (parsed.length === undefined) return { ok: false, error: 'a line takes one length, e.g. 4000' };
@@ -278,10 +283,6 @@ export class Commands {
       return next
         ? { ok: true, entity: next, message: `Line length set to ${formatMm(parsed.length)}` }
         : { ok: false, error: 'entity vanished' };
-    }
-
-    if (entity.type === 'cylinder') {
-      return { ok: false, error: 'a cylinder takes one depth, e.g. 100 or 10 cm' };
     }
 
     if (entity.type === 'triangle') return { ok: false, error: 'Use Q to extrude the triangle or M to move it' };
@@ -313,20 +314,14 @@ export class Commands {
     return this.sketch.clear();
   }
 
-  exportPayload(): ExportPayload {
+  exportPayload(entities: readonly Entity[] = this.sketch.all): ExportPayload {
     return {
       units: 'mm',
-      entities: this.sketch.all.map((entity): ExportEntity => {
-        if (entity.type === 'triangle' || entity.type === 'prism') throw new Error('Triangles and triangular prisms are not supported by the legacy exporter');
-        return entity.type === 'circle'
-        ? { type: 'circle', center: toArray(entity.center), normal: toArray(entity.normal), radius: entity.radius }
-        : entity.type === 'cylinder'
-        ? { type: 'cylinder', center: toArray(entity.center), normal: toArray(entity.normal), radius: entity.radius, depth: entity.depth }
-        : {
-            type: entity.type,
-            points: (entity.type === 'line' ? [entity.a, entity.b] : entity.corners).map(toArray),
-            ...(entity.type === 'extrusion' ? { vector: toArray(extrusionOffset(entity)) } : {}),
-          };
+      entities: entities.map((entity): ExportEntity => {
+        const points = (entity.type === 'line' ? [entity.a, entity.b] : entity.corners).map(toArray);
+        return entity.type === 'extrusion' || entity.type === 'prism'
+          ? { type: entity.type, points, vector: toArray(extrusionOffset(entity)) }
+          : { type: entity.type, points };
       }),
     };
   }

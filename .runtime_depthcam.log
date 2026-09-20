@@ -1,0 +1,404 @@
+﻿.\.venv\Scripts\python.exe : Exception in thread aircad-depth-camera:
+At C:\Users\chang\AppData\Local\Temp\ps-script-d25704a0-eb38-477a-8c11-4989704d87e6.ps1:104 char:1
++ .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_dep ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Exception in thread aircad-depth-camera::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+FException in thread aircad-depth-camera:
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 382, in run
+    self._run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 396, in _run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 384, in run
+    self.on_status(
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\depth_camera.py", line 390, in run
+    self.on_status("stopped", "Camera stopped", revision=self._applied_revision)
+TypeError: WorkerHarness.__init__.<locals>.<lambda>() got an unexpected keyword argument 'revision'
+E
+======================================================================
+ERROR: test_stop_with_empty_queue (test_depth_camera.DepthCameraWorkerTests.test_stop_with_empty_queue)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 230, in 
+test_stop_with_empty_queue
+    self.assertEqual(harness.statuses[-1][0], "stopped")
+                     ~~~~~~~~~~~~~~~~^^^^
+IndexError: list index out of range
+
+======================================================================
+FAIL: test_age_and_skew_rejected (test_depth_camera.DepthCameraWorkerTests.test_age_and_skew_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 164, in 
+test_age_and_skew_rejected
+    self.assertTrue(harness.wait_for(lambda: len(harness.samples) >= 2))
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_bad_frame_shapes_rejected (test_depth_camera.DepthCameraWorkerTests.test_bad_frame_shapes_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 185, in 
+test_bad_frame_shapes_rejected
+    self.assertTrue(harness.wait_for(lambda: len(harness.samples) >= 2))
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_capture_timestamp_translated_to_host_clock 
+(test_depth_camera.DepthCameraWorkerTests.test_capture_timestamp_translated_to_host_clock)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 193, in 
+test_capture_timestamp_translated_to_host_clock
+    self.assertTrue(harness.wait_for(lambda: len(harness.samples) >= 1))
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_color_target_tracks_and_mirrors_pixel 
+(test_depth_camera.DepthCameraWorkerTests.test_color_target_tracks_and_mirrors_pixel)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 121, in 
+test_color_target_tracks_and_mirrors_pixel
+    self.assertTrue(harness.wait_for(lambda: any(s.state == "tracked" for s in harness.samples)))
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_duplicate_and_backward_sequences_dropped 
+(test_depth_camera.DepthCameraWorkerTests.test_duplicate_and_backward_sequences_dropped)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 176, in 
+test_duplicate_and_backward_sequences_dropped
+    self.assertTrue(harness.wait_for(lambda: len(harness.samples) >= 4))
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_finger_target_with_fake_landmarker 
+(test_depth_camera.DepthCameraWorkerTests.test_finger_target_with_fake_landmarker)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 308, in 
+test_finger_target_with_fake_landmarker
+    self.assertTrue(harness.wait_for(lambda: any(s.state == "tracked" for s in harness.samples)))
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_held_xyz_survives_pixel_motion 
+(test_depth_camera.DepthCameraWorkerTests.test_held_xyz_survives_pixel_motion)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 204, in 
+test_held_xyz_survives_pixel_motion
+    self.assertTrue(harness.wait_for(lambda: any(s.state == "tracked" for s in harness.samples)))
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_invalid_intrinsics_report_error 
+(test_depth_camera.DepthCameraWorkerTests.test_invalid_intrinsics_report_error)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 221, in 
+test_invalid_intrinsics_report_error
+    self.assertTrue(harness.wait_for(lambda: any(s[0] == "error" for s in harness.statuses)))
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_no_sdk_or_mediapipe_import_in_color_mode 
+(test_depth_camera.DepthCameraWorkerTests.test_no_sdk_or_mediapipe_import_in_color_mode)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 147, in 
+test_no_sdk_or_mediapipe_import_in_color_mode
+    self.assertTrue(harness.wait_for(lambda: any(s.state == "tracked" for s in harness.samples)))
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_revision_switch_resets_tracking 
+(test_depth_camera.DepthCameraWorkerTests.test_revision_switch_resets_tracking)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 247, in 
+test_revision_switch_resets_tracking
+    self.assertTrue(harness.wait_for(lambda: any(s.state == "tracked" for s in harness.samples)))
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_stall_watchdog_emits_nonfresh (test_depth_camera.DepthCameraWorkerTests.test_stall_watchdog_emits_nonfresh)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_depth_camera.py", line 235, in 
+test_stall_watchdog_emits_nonfresh
+    self.assertTrue(harness.wait_for(lambda: any(s.state == "tracked" for s in harness.samples)))
+AssertionError: False is not true
+
+----------------------------------------------------------------------
+Ran 12 tests in 33.129s
+
+FAILED (failures=11, errors=1)

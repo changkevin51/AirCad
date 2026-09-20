@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { circlePoints, cylinderTopCenter, describeEntity, entityCenter, entityFaces, entityMidpoints, entityScaleHandles, entitySegments, entityTriangles, entityVertices, extrusionNormal, extrusionOffset, isTriangleProfile, makeRect, rectFrame, scaleEntity, Sketch, translateEntity, type Entity, type EntityInput, type PrismEntity, type TriangleEntity } from './sketch';
+import { describeEntity, entityCenter, entityFaces, entityMidpoints, entityScaleHandles, entitySegments, entityTriangles, entityVertices, extrusionNormal, extrusionOffset, isTriangleProfile, makeRect, rectFrame, scaleEntity, Sketch, translateEntity, type Entity, type EntityInput, type PrismEntity, type TriangleEntity } from './sketch';
 import { entityLabel } from '../render/sketch-renderer';
-import { add, cross, distance, dot, lerp, nearlyEqual, normalize, sub, v3, type Vec3 } from './vec';
+import { add, cross, distance, dot, lerp, nearlyEqual, sub, v3, type Vec3 } from './vec';
 
 const floor = (): [ReturnType<typeof v3>, ReturnType<typeof v3>, ReturnType<typeof v3>, ReturnType<typeof v3>] =>
   makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 4000, 3000);
@@ -84,82 +84,44 @@ describe('Sketch', () => {
     expect(frame.uDir).toEqual(v3(1, 0, 0));
     expect(frame.vDir).toEqual(v3(0, 0, 1));
   });
-});
 
-describe('Sketch: circles', () => {
-  it('stores a unit normal and isolates the input vectors', () => {
+  it('replaces several entities atomically with one event and exact undo/redo', () => {
     const sketch = new Sketch();
-    const center = v3(100, 200, 300);
-    const normal = v3(0, 0, 2);
-    const circle = sketch.addEntity({ type: 'circle', center, normal, radius: 50 });
-    expect(circle.type).toBe('circle');
-    if (circle.type !== 'circle') return;
-    expect(circle.normal).toEqual(v3(0, 0, 1));
-    center.x = 999;
-    normal.z = -5;
-    expect(circle.center).toEqual(v3(100, 200, 300));
-    expect(circle.normal).toEqual(v3(0, 0, 1));
-  });
+    sketch.addEntity({ type: 'rect', corners: floor() });
+    sketch.addEntity({ type: 'line', a: v3(4000, 0, 0), b: v3(7000, 0, 0) });
+    sketch.addEntity({ type: 'line', a: v3(7000, 0, 0), b: v3(7000, 3000, 0) });
+    const reasons: string[] = [];
+    sketch.onChange((reason) => reasons.push(reason));
 
-  it('serialises and survives add/delete undo and redo', () => {
-    const sketch = new Sketch();
-    const circle = sketch.addEntity({ type: 'circle', center: v3(100, 200, 300), normal: v3(0, 0, 1), radius: 50 });
-    const restored = Sketch.fromJSON(JSON.parse(sketch.serialize()));
-    expect(restored.toJSON()).toEqual(sketch.toJSON());
+    const added = sketch.replaceEntities(
+      ['e2', 'e3'],
+      [{ type: 'rect', corners: makeRect(v3(4000, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 3000, 3000) }],
+      'complete rectangle',
+    );
+    expect(added).toHaveLength(1);
+    expect(added[0].id).toBe('e4');
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e4']);
+    expect(reasons).toEqual(['complete rectangle']);
+
     sketch.undo();
-    expect(sketch.size).toBe(0);
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e2', 'e3']);
+    expect((sketch.get('e2') as { b: { x: number } }).b.x).toBe(7000);
     sketch.redo();
-    expect(sketch.size).toBe(1);
-    sketch.removeEntity(circle.id);
-    expect(sketch.size).toBe(0);
-    sketch.undo();
-    expect(sketch.get(circle.id)?.type).toBe('circle');
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1', 'e4']);
+    expect(sketch.get('e4')?.type).toBe('rect');
   });
 
-  it('exposes centre + quadrant vertices, a 96-segment outline and 96 disk triangles', () => {
+  it('validates every replacement id and input before mutating', () => {
     const sketch = new Sketch();
-    sketch.addEntity({ type: 'circle', center: v3(100, 200, 300), normal: v3(0, 0, 1), radius: 50 });
-    expect(sketch.vertices()).toHaveLength(5);
-    expect(sketch.midpoints()).toHaveLength(0);
-    expect(sketch.segments()).toHaveLength(96);
-    expect(entityTriangles(sketch.all[0])).toHaveLength(96);
-  });
-
-  it('computes exact world-axis extrema and planar points for a tilted circle', () => {
-    const sketch = new Sketch();
-    const circle = sketch.addEntity({ type: 'circle', center: v3(100, 200, 300), normal: v3(1, 1, 1), radius: 30 });
-    if (circle.type !== 'circle') throw new Error('unreachable');
-    const box = sketch.boundingBox();
-    expect(box).not.toBeNull();
-    const extent = 30 * Math.sqrt(2 / 3);
-    for (const axis of ['x', 'y', 'z'] as const) {
-      expect(Math.abs(box!.min[axis] - (circle.center[axis] - extent))).toBeLessThan(1e-6);
-      expect(Math.abs(box!.max[axis] - (circle.center[axis] + extent))).toBeLessThan(1e-6);
-    }
-    const normal = normalize(circle.normal);
-    for (const point of circlePoints(circle)) {
-      expect(Math.abs(dot(sub(point, circle.center), normal))).toBeLessThan(1e-9);
-      expect(distance(point, circle.center)).toBeCloseTo(30, 9);
-    }
-  });
-
-  it('rejects invalid circles without touching the model or history', () => {
-    const sketch = new Sketch();
-    const base = { type: 'circle' as const, center: v3(100, 200, 300), normal: v3(0, 0, 1), radius: 50 };
-    const invalid = [
-      { ...base, radius: 0 },
-      { ...base, radius: -1 },
-      { ...base, radius: Number.NaN },
-      { ...base, radius: Infinity },
-      { ...base, normal: v3(0, 0, 0) },
-      { ...base, normal: v3(0, 0, Number.NaN) },
-      { ...base, center: v3(Infinity, 200, 300) },
-      { type: 'circle' as const, center: v3(0, 0, 0), radius: 5 },
-    ];
-    for (const input of invalid) {
-      expect(() => sketch.addEntity(input as Parameters<Sketch['addEntity']>[0])).toThrow();
-    }
-    expect(sketch.size).toBe(0);
+    sketch.addEntity({ type: 'line', a: v3(0, 0, 0), b: v3(100, 0, 0) });
+    expect(() =>
+      sketch.replaceEntities(['e1', 'missing'], [{ type: 'line', a: v3(0, 0, 0), b: v3(5, 0, 0) }], 'x'),
+    ).toThrow('entity vanished');
+    expect(() =>
+      sketch.replaceEntities(['e1'], [{ type: 'line', a: v3(0, 0, 0), b: v3(Number.NaN, 0, 0) }], 'x'),
+    ).toThrow();
+    expect(sketch.all.map((entity) => entity.id)).toEqual(['e1']);
+    expect(sketch.undo()).toBe('add line');
     expect(sketch.canUndo).toBe(false);
   });
 });
@@ -168,14 +130,14 @@ describe('Sketch.replaceEntities', () => {
   it('replaces multiple entities with stable IDs in one event and undo step', () => {
     const sketch = new Sketch();
     const a = sketch.addEntity({ type: 'rect', corners: floor() });
-    const b = sketch.addEntity({ type: 'circle', center: v3(6000, 0, 0), normal: v3(0, 0, 1), radius: 50 });
+    const b = sketch.addEntity({ type: 'rect', corners: makeRect(v3(6000, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300) });
     const untouched = sketch.addEntity({ type: 'line', a: v3(0, 0, 0), b: v3(0, 0, 20) });
     const before = sketch.serialize();
     const reasons: string[] = [];
     sketch.onChange((reason) => reasons.push(reason));
     const inputs: (EntityInput & { id: string })[] = [
       { id: a.id, type: 'extrusion', corners: floor(), depth: 100 },
-      { id: b.id, type: 'cylinder', center: v3(6000, 0, 0), normal: v3(0, 0, 1), radius: 50, depth: -200 },
+      { id: b.id, type: 'extrusion', corners: makeRect(v3(6000, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300), depth: -200 },
     ];
     expect(sketch.replaceEntities(inputs, 'extrude 2 shapes')).toHaveLength(2);
     expect(reasons).toEqual(['extrude 2 shapes']);
@@ -214,34 +176,18 @@ describe('corner scale handles', () => {
   const fixtures: Entity[] = [
     { id: 'l', type: 'line', a: v3(10, 20, 30), b: v3(110, 20, 30) },
     { id: 'r', type: 'rect', corners: rectCorners() },
-    { id: 'c', type: 'circle', center: v3(10, 20, 30), normal: v3(0, 0, 1), radius: 25 },
     { id: 'e', type: 'extrusion', corners: rectCorners(), depth: 50 },
-    { id: 'y', type: 'cylinder', center: v3(10, 20, 30), normal: v3(0, 0, 1), radius: 25, depth: 50 },
   ];
 
   it.each([
     ['line', 2],
     ['rect', 4],
-    ['circle', 4],
     ['extrusion', 8],
-    ['cylinder', 8],
   ] as const)('a %s offers %i corner handles', (type, count) => {
     const entity = fixtures.find((candidate) => candidate.type === type)!;
     expect(entityScaleHandles(entity)).toHaveLength(count);
   });
 
-  it('excludes circle and cap centres from the handles', () => {
-    const circle = fixtures.find((entity) => entity.type === 'circle')!;
-    const cylinder = fixtures.find((entity) => entity.type === 'cylinder')!;
-    if (circle.type !== 'circle' || cylinder.type !== 'cylinder') throw new Error('unreachable');
-    for (const handle of entityScaleHandles(circle)) {
-      expect(distance(handle.point, circle.center)).toBeGreaterThan(1);
-    }
-    for (const handle of entityScaleHandles(cylinder)) {
-      expect(distance(handle.point, cylinder.center)).toBeGreaterThan(1);
-      expect(distance(handle.point, cylinderTopCenter(cylinder))).toBeGreaterThan(1);
-    }
-  });
 
   it.each(fixtures.map((entity) => [entity.type, entity] as const))(
     'anchors every %s handle on another offered point, symmetric about the centre',

@@ -1,12 +1,17 @@
 import type { WorkPlane } from './plane';
 import { recognizeStroke, type RecognizeOptions, type RecognizeResult, type RecognizedShape } from './recognize';
+import { alignRectangleToBorder, completeLineRectangle, completeSharedBorder, sameRectangle } from './rect-completion';
 import type { Projector, SnapResult } from './snap';
-import { isTriangleProfile, type EntityInput, type TriangleEntity, type Vertex } from './sketch';
-import { add, distance2, dot, normalize, roundTo, scale, sub, v2, type Vec2, type Vec3 } from './vec';
+import { snapTriangleToSegments } from './spatial-join';
+import { entitySegments, isTriangleProfile, type Entity, type EntityInput, type TriangleEntity, type Vertex } from './sketch';
+import { add, distance, distance2, dot, nearlyEqual, normalize, roundTo, scale, sub, v2, type Vec2, type Vec3 } from './vec';
 
 const OBJECT_SNAPS = new Set(['vertex', 'midpoint', 'edge', 'lock']);
 
 export const isObjectSnap = (snap: SnapResult): boolean => OBJECT_SNAPS.has(snap.type);
+
+const BORDER_SNAPS = new Set(['vertex', 'midpoint', 'edge']);
+const isBorderSnap = (snap: SnapResult): boolean => BORDER_SNAPS.has(snap.type) && snap.onPlane;
 
 /**
  * One pen-down → pen-up gesture.
@@ -24,6 +29,7 @@ export class StrokeSession {
   private readonly rawScreen: Vec2[] = [];
   private lastSnap: SnapResult;
   private lastScreen: Vec2;
+  private revisionCount = 0;
   /** Set when the plane anchor moved to a snapped vertex at pen-down. */
   readonly anchorMoved: boolean;
 
@@ -39,18 +45,46 @@ export class StrokeSession {
     return this.lastSnap;
   }
 
+  get revision(): number {
+    return this.revisionCount;
+  }
+
   get pointCount(): number {
     return this.rawPlane.length + 2;
   }
 
   /** Add a cursor sample.  Returns false when it was too close to the last one. */
-  add(snap: SnapResult, rawWorld: Vec3 | null, cursorScreen: Vec2, minScreenDistance = 2): boolean {
+  add(
+    snap: SnapResult,
+    rawWorld: Vec3 | null,
+    cursorScreen: Vec2,
+    minScreenDistance = 2,
+    minWorldDistance?: number,
+  ): boolean {
+    const previous = this.lastSnap;
+    if (
+      snap.type !== previous.type ||
+      snap.entityId !== previous.entityId ||
+      snap.onPlane !== previous.onPlane ||
+      !nearlyEqual(snap.world, previous.world) ||
+      (snap.raw === null) !== (previous.raw === null) ||
+      (snap.raw !== null && previous.raw !== null && !nearlyEqual(snap.raw, previous.raw)) ||
+      distance2(snap.plane, previous.plane) > 1e-9
+    ) {
+      this.revisionCount++;
+    }
     this.lastSnap = snap;
-    if (distance2(cursorScreen, this.lastScreen) < minScreenDistance) return false;
-    this.lastScreen = cursorScreen;
     const raw = rawWorld ?? snap.world;
+    const tooClose =
+      minWorldDistance !== undefined && minWorldDistance > 0
+        ? distance(raw, this.rawPlane.length ? this.plane.toWorld(this.rawPlane[this.rawPlane.length - 1]) : this.start.world) <
+          minWorldDistance
+        : distance2(cursorScreen, this.lastScreen) < minScreenDistance;
+    if (tooClose) return false;
+    this.lastScreen = cursorScreen;
     this.rawPlane.push(this.plane.toPlane(raw));
     this.rawScreen.push(cursorScreen);
+    this.revisionCount++;
     return true;
   }
 
@@ -92,6 +126,26 @@ export class StrokeSession {
     return Math.hypot(maxX - minX, maxY - minY);
   }
 
+  /** Diagonal of the stroke's world-space bounding box in millimetres. */
+  worldExtent(): number {
+    const points = this.worldPath();
+    let minX = Infinity;
+    let minY = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let maxZ = -Infinity;
+    for (const p of points) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      minZ = Math.min(minZ, p.z);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+      maxZ = Math.max(maxZ, p.z);
+    }
+    return Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
+  }
+
   recognize(options: Partial<RecognizeOptions> = {}): RecognizeResult {
     const raw = [
       this.plane.toPlane(this.start.raw ?? this.start.world),
@@ -99,9 +153,9 @@ export class StrokeSession {
       this.plane.toPlane(this.lastSnap.raw ?? this.lastSnap.world),
     ];
     const result = recognizeStroke(raw, options);
-    if (result.shape?.kind === 'circle' || result.shape?.kind === 'triangle') return result;
+    if (result.shape?.kind === 'rect' || result.shape?.kind === 'triangle') return result;
     const snapped = recognizeStroke(this.planePoints(), options);
-    return snapped.shape?.kind === 'circle' || snapped.shape?.kind === 'triangle' ? result : snapped;
+    return snapped.shape?.kind === 'triangle' ? result : snapped.shape ? snapped : result;
   }
 }
 
@@ -112,6 +166,7 @@ export interface CommitContext {
   tolerancePx: number;
   /** Grid step in mm for rounding the far rectangle corner; 0/undefined disables it. */
   gridStep?: number;
+  entities?: readonly Entity[];
 }
 
 /**
@@ -210,11 +265,43 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
     const b = isObjectSnap(session.last) ? session.last.world : plane.toWorld(shape.b);
     return { type: 'line', a, b };
   }
-  if (shape.kind === 'circle') {
-    return { type: 'circle', center: plane.toWorld(shape.center), normal: { ...plane.normal }, radius: shape.radius };
-  }
   if (shape.kind === 'triangle') {
     const raw = shape.corners.map((corner) => plane.toWorld(corner)) as TriangleEntity['corners'];
+    let edgeAligned: TriangleEntity['corners'] | null = null;
+    const explicitStart = isObjectSnap(session.start) && session.start.onPlane ? session.start.world : null;
+    let protectedCornerIndex = -1;
+    if (explicitStart && context.entities?.length) {
+      const startScreen = context.projector.project(explicitStart);
+      if (startScreen) {
+        let nearest = context.tolerancePx;
+        raw.forEach((corner, index) => {
+          const screen = context.projector.project(corner);
+          if (!screen) return;
+          const d = distance2(startScreen, screen);
+          if (d < nearest) {
+            nearest = d;
+            protectedCornerIndex = index;
+          }
+        });
+      }
+    }
+    const candidateCorners =
+      explicitStart && protectedCornerIndex >= 0
+        ? raw.map((corner, index) => (index === protectedCornerIndex ? { ...explicitStart } : add(corner, sub(explicitStart, raw[protectedCornerIndex]))))
+        : raw;
+    if (context.entities?.length) {
+      const fit = snapTriangleToSegments(candidateCorners, context.entities.flatMap(entitySegments), {
+        plane,
+        projector: context.projector,
+        tolerancePx: context.tolerancePx,
+        protectedAnchor:
+          explicitStart && protectedCornerIndex >= 0
+            ? { point: explicitStart, cornerIndex: protectedCornerIndex }
+            : undefined,
+      });
+      edgeAligned = fit?.corners ?? null;
+    }
+    if (edgeAligned && isTriangleProfile(edgeAligned)) return { type: 'triangle', corners: edgeAligned };
     const step = context.gridStep ?? 0;
     const corners = raw.map((corner, index) => {
       const screen = context.projector.project(corner);
@@ -239,12 +326,88 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
     return { type: 'triangle', corners: isTriangleProfile(corners) ? corners : raw };
   }
   const corners2 = shape.oriented ? shape.corners : alignRectToStart(shape.corners, session.start.plane, context.gridStep ?? 0);
-  const corners = pullRectCorners(corners2.map((c) => plane.toWorld(c)), plane, context);
+  const rawCorners = corners2.map((c) => plane.toWorld(c));
+  const aligned = context.entities
+    ? alignRectangleToBorder(rawCorners, {
+        plane,
+        entities: context.entities,
+        projector: context.projector,
+        tolerancePx: context.tolerancePx,
+      })
+    : null;
+  const corners = aligned?.corners ?? pullRectCorners(rawCorners, plane, context);
   return { type: 'rect', corners: corners as [Vec3, Vec3, Vec3, Vec3] };
 }
 
 /** The point the work-plane anchor moves to after a commit. */
 export function anchorAfterCommit(entity: EntityInput): Vec3 {
-  if (entity.type === 'circle' || entity.type === 'cylinder') return entity.center;
   return entity.type === 'line' ? entity.b : entity.corners[0];
+}
+
+export type StrokeResolution =
+  | { status: 'ready'; input: EntityInput; removeIds: string[]; reason: string }
+  | { status: 'unrecognized' | 'duplicate'; input: null; removeIds: []; reason: string };
+
+const isDuplicateRectangle = (corners: readonly Vec3[], entities: readonly Entity[]): boolean =>
+  entities.some((entity) => entity.type === 'rect' && sameRectangle(entity.corners, corners));
+
+export function resolveStroke(
+  session: StrokeSession,
+  context: CommitContext & { entities: readonly Entity[] },
+): StrokeResolution {
+  const result: RecognizeResult =
+    session.last.type === 'lock'
+      ? { shape: { kind: 'line', a: session.start.plane, b: session.last.plane, alignedTo: null }, reason: 'axis-locked line' }
+      : session.recognize();
+  const completionContext = { plane: session.plane, entities: context.entities, gridStep: context.gridStep };
+
+  if (result.shape?.kind === 'line') {
+    const input = buildEntityFromStroke(session, result.shape, context);
+    if (input.type === 'line') {
+      const completion = completeLineRectangle(input, completionContext);
+      if (completion) {
+        if (isDuplicateRectangle(completion.corners, context.entities)) {
+          return { status: 'duplicate', input: null, removeIds: [], reason: 'rectangle already exists' };
+        }
+        return {
+          status: 'ready',
+          input: { type: 'rect', corners: completion.corners },
+          removeIds: completion.removeIds,
+          reason: 'assembled rectangle',
+        };
+      }
+    }
+    return { status: 'ready', input, removeIds: [], reason: result.reason };
+  }
+
+  if (result.shape?.kind === 'rect' || result.shape?.kind === 'triangle') {
+    const input = buildEntityFromStroke(session, result.shape, context);
+    if (input.type === 'rect' && isDuplicateRectangle(input.corners, context.entities)) {
+      return { status: 'duplicate', input: null, removeIds: [], reason: 'rectangle already exists' };
+    }
+    return { status: 'ready', input, removeIds: [], reason: result.reason };
+  }
+
+  if (isBorderSnap(session.start) && isBorderSnap(session.last)) {
+    const completion = completeSharedBorder(session.planePoints(), session.start.world, session.last.world, completionContext);
+    if (completion) {
+      const aligned =
+        alignRectangleToBorder(completion.corners, {
+          ...completionContext,
+          projector: context.projector,
+          tolerancePx: context.tolerancePx,
+        }) ?? completion;
+      if (isDuplicateRectangle(aligned.corners, context.entities)) {
+        return { status: 'duplicate', input: null, removeIds: [], reason: 'rectangle already exists' };
+      }
+      return {
+        status: 'ready',
+        input: { type: 'rect', corners: aligned.corners },
+        removeIds: aligned.removeIds,
+        reason: 'shared-border rectangle',
+      };
+    }
+  }
+
+  return { status: 'unrecognized', input: null, removeIds: [], reason: result.reason };
 }

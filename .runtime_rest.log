@@ -1,0 +1,156 @@
+﻿.\.venv\Scripts\python.exe : .........E..C:\Users\chang\Documents\Projects\Codex AirCad\server.py:286: 
+NotAppKeyWarning: It is recommended to use web.AppKey instances for keys.
+At C:\Users\chang\AppData\Local\Temp\ps-script-8d8f20e3-5826-49df-b56c-84d21861fad7.ps1:104 char:1
++ .\.venv\Scripts\python.exe -m unittest tests.test_protocol tests.test ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (.........E..C:\...ances for keys.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+https://docs.aiohttp.org/en/stable/web_advanced.html#application-s-config
+  app["broadcaster"] = Broadcaster()
+C:\Users\chang\Documents\Projects\Codex AirCad\server.py:287: NotAppKeyWarning: It is recommended to use web.AppKey 
+instances for keys.
+https://docs.aiohttp.org/en/stable/web_advanced.html#application-s-config
+  app["send_to_freecad"] = send_to_freecad
+C:\Users\chang\Documents\Projects\Codex AirCad\server.py:292: NotAppKeyWarning: It is recommended to use web.AppKey 
+instances for keys.
+https://docs.aiohttp.org/en/stable/web_advanced.html#application-s-config
+  app["tracker"] = controller
+C:\Users\chang\Documents\Projects\Codex AirCad\server.py:305: NotAppKeyWarning: It is recommended to use web.AppKey 
+instances for keys.
+https://docs.aiohttp.org/en/stable/web_advanced.html#application-s-config
+  application["pump_task"] = asyncio.create_task(broadcaster.pump())
+......Camera: Starting webcam
+FCamera: Starting webcam
+Camera: Starting oak
+.Camera: Starting webcam
+.Camera: Starting webcam
+.Camera: Starting webcam
+.Camera: Starting webcam
+F...Camera: Starting webcam
+Camera: The previous camera is still stopping; the change was not applied.
+.Camera: Starting webcam
+Camera: Starting oak
+.Camera: Starting webcam
+Camera: Device unplugged
+.Camera: Starting webcam
+.Camera: Starting webcam
+Camera: Starting oak
+.Camera: Starting webcam
+.Camera: Camera disabled (source: none)
+.Camera: Starting webcam
+FCamera: Starting webcam
+.Camera: Starting webcam
+Camera: Starting oak
+.Camera: Starting oak
+Camera: Tracker serialization failed: held samples require the last trusted point, time and age
+FCamera: Starting webcam
+.Camera: Starting webcam
+FCamera: Starting oak
+Camera: Applying color tracking
+.
+======================================================================
+ERROR: test_lost_sample_nulls_point (tests.test_protocol.SpatialMessageTests.test_lost_sample_nulls_point)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_protocol.py", line 189, in 
+test_lost_sample_nulls_point
+    message = protocol.spatial_message(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tracker\protocol.py", line 245, in spatial_message
+    raise ValueError("{} samples must not carry a point".format(state))
+ValueError: lost samples must not carry a point
+
+======================================================================
+FAIL: test_get_tracker_snapshot (tests.test_server.TrackerApiTests.test_get_tracker_snapshot)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\asyncio\base_events.py", line 691, in 
+run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_server.py", line 145, in test_get_tracker_snapshot
+    self.assertIsInstance(payload["serverTimeMs"], int)
+AssertionError: 396335406.0 is not an instance of <class 'int'>
+
+======================================================================
+FAIL: test_retry_restarts_current_source (tests.test_server.TrackerApiTests.test_retry_restarts_current_source)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\asyncio\base_events.py", line 691, in 
+run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_server.py", line 211, in 
+test_retry_restarts_current_source
+    self.assertEqual(payload["streamId"], before["streamId"])
+AssertionError: '051588d7c16f' != '7ffd458deea4'
+- 051588d7c16f
++ 7ffd458deea4
+
+
+======================================================================
+FAIL: test_retry_restarts_same_source 
+(tests.test_tracker_controller.TrackerControllerTests.test_retry_restarts_same_source)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\asyncio\base_events.py", line 691, in 
+run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_tracker_controller.py", line 186, in 
+test_retry_restarts_same_source
+    self.assertEqual(snapshot["streamId"], stream)  # config unchanged
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: '486f26017790' != 'aadad30229f0'
+- 486f26017790
++ aadad30229f0
+
+
+======================================================================
+FAIL: test_spatial_publish_carries_stream_tags_and_seq 
+(tests.test_tracker_controller.TrackerControllerTests.test_spatial_publish_carries_stream_tags_and_seq)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\asyncio\base_events.py", line 691, in 
+run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_tracker_controller.py", line 256, in 
+test_spatial_publish_carries_stream_tags_and_seq
+    self.assertEqual(len(spatial), 2)
+AssertionError: 1 != 2
+
+======================================================================
+FAIL: test_start_opens_configured_source 
+(tests.test_tracker_controller.TrackerControllerTests.test_start_opens_configured_source)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\chang\AppData\Local\Programs\Python\Python312\Lib\asyncio\base_events.py", line 691, in 
+run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\chang\Documents\Projects\Codex AirCad\tests\test_tracker_controller.py", line 121, in 
+test_start_opens_configured_source
+    self.assertIsInstance(snapshot["serverTimeMs"], int)
+AssertionError: 396336218.0 is not an instance of <class 'int'>
+
+----------------------------------------------------------------------
+Ran 41 tests in 1.289s
+
+FAILED (failures=5, errors=1)

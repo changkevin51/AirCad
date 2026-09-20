@@ -24,7 +24,11 @@ if [[ ! -x .venv/bin/python ]]; then
 fi
 
 .venv/bin/python -m pip install -U pip || fail
-.venv/bin/python -m pip install -r requirements.txt || fail
+if [[ "$1" == "--depth" ]]; then
+    .venv/bin/python -m pip install -r requirements-depth.txt || fail
+else
+    .venv/bin/python -m pip install -r requirements.txt || fail
+fi
 
 if ! command -v node >/dev/null 2>&1; then
     print '\nNode.js was not found. Install Node 18 or newer from https://nodejs.org/'
