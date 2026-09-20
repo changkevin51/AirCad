@@ -909,7 +909,7 @@ class App {
     if (this.measure.isOpen) return [{ key: 'Enter', label: 'apply' }, { key: 'Esc', label: 'cancel' }];
     if (this.voiceCapture) {
       return [
-        { key: key('voice'), label: 'send / retry' },
+        { key: key('voice'), label: 'confirm / retry' },
         { key: key('cancel'), label: 'cancel draft' },
       ];
     }

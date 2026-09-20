@@ -7,20 +7,53 @@ import { StrokeSession } from '../model/stroke';
 import { add, v2, v3 } from '../model/vec';
 import { captureVoiceTarget, dispatchVoiceCommand, sameVoiceTarget, type VoiceTarget } from './commands';
 import { VoiceControl, type VoiceControlOptions } from './control';
-import { recordMicrophone } from './microphone';
+import { UNSUPPORTED_SPEECH, type SpeechRecognitionEventLike, type SpeechRecognitionHandle, type SpeechRecognitionResultLike } from './speech';
 
 const h = vi.hoisted(() => ({
-  recording: null as null | { audio: Promise<Blob>; stop(): void; cancel(): void },
   pagehide: null as null | (() => void),
 }));
 
-vi.mock('./microphone', () => ({
-  audioBase64: vi.fn(async () => 'QUJD'),
-  recordMicrophone: vi.fn(async (signal: AbortSignal) => {
-    signal?.addEventListener('abort', () => h.recording?.cancel());
-    return h.recording;
-  }),
-}));
+let current: FakeRecognition | null = null;
+
+class FakeRecognition implements SpeechRecognitionHandle {
+  continuous = false;
+  interimResults = false;
+  maxAlternatives = 1;
+  lang = '';
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null = null;
+  onerror: ((event: { error: string }) => void) | null = null;
+  onend: (() => void) | null = null;
+  startCount = 0;
+  stopCount = 0;
+  abortCount = 0;
+
+  constructor() {
+    current = this;
+  }
+
+  start(): void {
+    this.startCount += 1;
+  }
+
+  stop(): void {
+    this.stopCount += 1;
+    this.onend?.();
+  }
+
+  abort(): void {
+    this.abortCount += 1;
+    this.onerror?.({ error: 'aborted' });
+    this.onend?.();
+  }
+
+  emit(isFinal: boolean, ...transcripts: string[]): void {
+    const result = { isFinal, length: transcripts.length } as SpeechRecognitionResultLike;
+    transcripts.forEach((transcript, index) => {
+      result[index] = { transcript };
+    });
+    this.onresult?.({ resultIndex: 0, results: [result] });
+  }
+}
 
 class FakeEl {
   className = '';
@@ -74,16 +107,7 @@ const find = (el: FakeEl, className: string): FakeEl => {
 };
 
 const ORIGIN = v3(100, 200, 300);
-const TRANSCRIPT = '500 millimetres';
-const envelope = (command: unknown = { distance_mm: 500 }) => ({
-  ok: true, transcript: TRANSCRIPT, command, response_text: JSON.stringify({ transcript: TRANSCRIPT, command, error: null }), call_id: 'call-1',
-});
-const respond = (body: unknown, init: { ok?: boolean; status?: number } = {}) => ({
-  ok: init.ok ?? true,
-  status: init.status ?? 200,
-  json: async () => body,
-});
-const wavBlob = (): Blob => new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/wav' });
+const IDLE_STATUS = 'Start a line or pull a face, then press V while holding. Say “500 mm” or “by 1 m”. Units apply immediately; V confirms a bare number.';
 
 const snapOn = (plane: WorkPlane, world: ReturnType<typeof v3>): SnapResult => ({
   type: 'free',
@@ -118,11 +142,15 @@ describe('VoiceControl', () => {
   let captureSpy: ReturnType<typeof vi.fn>;
   let infoSpy: ReturnType<typeof vi.spyOn>;
   let errorSpy: ReturnType<typeof vi.spyOn>;
-  const fetchMock = vi.fn();
 
   const line = (): LineEntity | null => {
     const last = sketch.last;
     return last?.type === 'line' ? last : null;
+  };
+
+  const rec = (): FakeRecognition => {
+    if (!current) throw new Error('expected speech recognition to start');
+    return current;
   };
 
   beforeEach(() => {
@@ -132,17 +160,11 @@ describe('VoiceControl', () => {
     captured = null;
     stale = false;
     ready = true;
+    current = null;
     notify = vi.fn();
-    h.recording = null;
     h.pagehide = null;
-    fetchMock.mockReset();
-    vi.mocked(recordMicrophone).mockReset().mockImplementation(async (signal: AbortSignal) => {
-      signal?.addEventListener('abort', () => h.recording?.cancel());
-      return h.recording!;
-    });
     vi.stubGlobal('document', { createElement: () => new FakeEl() });
     vi.stubGlobal('window', { addEventListener: (type: string, listener: () => void) => { if (type === 'pagehide') h.pagehide = listener; } });
-    vi.stubGlobal('fetch', fetchMock);
     infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     captureSpy = vi.fn(() => {
@@ -160,13 +182,13 @@ describe('VoiceControl', () => {
         }
       },
       execute: (command, target) => {
-        let current: VoiceTarget | null = null;
+        let currentTarget: VoiceTarget | null = null;
         try {
-          current = captureVoiceTarget(stroke, null, ready);
+          currentTarget = captureVoiceTarget(stroke, null, ready);
         } catch {
-          current = null;
+          currentTarget = null;
         }
-        const result = dispatchVoiceCommand(command, target, commands, current);
+        const result = dispatchVoiceCommand(command, target, commands, currentTarget);
         if (result.ok) {
           stroke = null;
           captured = null;
@@ -174,6 +196,7 @@ describe('VoiceControl', () => {
         return result;
       },
       notify,
+      speechRecognition: FakeRecognition,
     };
     root = new FakeEl();
     control = new VoiceControl(root as unknown as HTMLElement, options);
@@ -192,300 +215,230 @@ describe('VoiceControl', () => {
 
   it('renders the idle panel', () => {
     expect(recordButton.type).toBe('button');
-    expect(recordButton.textContent).toBe('Record distance');
+    expect(recordButton.textContent).toBe('Speak distance');
     expect(cancelButton.hidden).toBe(true);
-    expect(statusEl.textContent).toBe('Start a line or pull a face, then press V while holding. Say “500 mm” or “by 1 m”. V again stops and sends (max 10 s).');
+    expect(statusEl.textContent).toBe(IDLE_STATUS);
     expect(statusEl.attrs.get('role')).toBe('status');
     expect(statusEl.attrs.get('aria-live')).toBe('polite');
   });
 
-  it('runs the full mocked flow: record, upload and create the measured line', async () => {
-    h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockResolvedValue(respond(envelope()));
-    await control.record();
+  it('captures the operation before starting speech recognition', async () => {
+    const pending = control.listen();
+    await flush();
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    expect(current).not.toBeNull();
+    rec().emit(false, '500 mm');
+    await pending;
+    expect(line()!.b).toEqual(v3(400, 600, 300));
+  });
 
-    const created = line();
-    expect(created).not.toBeNull();
-    expect(created!.a).toEqual(ORIGIN);
-    expect(created!.b).toEqual(v3(400, 600, 300));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api/voice/command');
-    expect(init.method).toBe('POST');
-    expect(init.credentials).toBe('same-origin');
-    expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
-    const sent = JSON.parse(init.body as string);
-    expect(sent.audio_wav_base64).toBe('QUJD');
-    expect(sent.context).toEqual({ operation: 'line', units: 'mm' });
-    expect(statusEl.textContent).toBe(`Heard: ${TRANSCRIPT}\nCreated 500 mm line on XY`);
+  it('auto-commits an interim transcript that includes units', async () => {
+    const pending = control.listen();
+    await flush();
+    rec().emit(false, '500 millimetres');
+    await pending;
+    expect(line()!.b).toEqual(v3(400, 600, 300));
+    expect(statusEl.textContent).toBe('Heard: 500 millimetres\nCreated 500 mm line on XY');
     expect(notify).toHaveBeenCalledWith('Created 500 mm line on XY', false);
-    expect(infoSpy).toHaveBeenCalledWith('[voice] API response', expect.any(String));
-    expect(infoSpy).toHaveBeenCalledWith('[voice] transcript', TRANSCRIPT);
+    expect(infoSpy).toHaveBeenCalledWith('[voice] transcript', '500 millimetres');
     expect(infoSpy).toHaveBeenCalledWith('[voice] executed', expect.objectContaining({ kind: 'line' }));
-    expect(recordButton.textContent).toBe('Record distance');
-    expect(recordButton.disabled).toBe(false);
+    expect(recordButton.textContent).toBe('Speak distance');
     expect(cancelButton.hidden).toBe(true);
   });
 
-  it('captures the operation synchronously before awaiting the microphone', async () => {
-    h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockResolvedValue(respond(envelope()));
-    await control.record();
-    expect(captureSpy).toHaveBeenCalledTimes(1);
-    expect(captureSpy.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(recordMicrophone).mock.invocationCallOrder[0]);
+  it('commits only once even if a final result follows the interim match', async () => {
+    const pending = control.listen();
+    await flush();
+    rec().emit(false, '500 mm');
+    rec().emit(true, '500 mm');
+    await pending;
+    expect(sketch.all.filter((entity) => entity.type === 'line')).toHaveLength(1);
   });
 
-  it('never opens the microphone or the network without an eligible operation', async () => {
+  it('uses a later alternative when the first transcript is not a measurement', async () => {
+    const pending = control.listen();
+    await flush();
+    rec().emit(false, 'about 500', '500 mm');
+    await pending;
+    expect(line()!.b).toEqual(v3(400, 600, 300));
+  });
+
+  it('keeps a bare number open until V confirms it', async () => {
+    const pending = control.listen();
+    await flush();
+    rec().emit(false, '500');
+    await flush();
+    expect(line()).toBeNull();
+    expect(statusEl.textContent).toContain('Heard: 500');
+    control.toggle();
+    await pending;
+    expect(line()!.b).toEqual(v3(400, 600, 300));
+  });
+
+  it('commits a bare number when the recognizer marks the result final', async () => {
+    const pending = control.listen();
+    await flush();
+    rec().emit(true, '500');
+    await pending;
+    expect(line()!.b).toEqual(v3(400, 600, 300));
+  });
+
+  it('never starts speech without an eligible operation', async () => {
     stroke = null;
-    await control.record();
-    expect(vi.mocked(recordMicrophone)).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled();
+    await control.listen();
+    expect(current).toBeNull();
     expect(notify).toHaveBeenCalledWith('Voice command failed; see the voice panel', true);
 
     stroke = drawStroke();
     const plane = new WorkPlane('XY', ORIGIN);
     stroke = new StrokeSession(plane, snapOn(plane, ORIGIN));
-    await control.record();
-    expect(vi.mocked(recordMicrophone)).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled();
+    await control.listen();
+    expect(current).toBeNull();
     expect(line()).toBeNull();
   });
 
-  it('ignores a second record while one flight is in progress', async () => {
-    let resolveAudio: (blob: Blob) => void = () => {};
-    h.recording = { audio: new Promise<Blob>((resolve) => { resolveAudio = resolve; }), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockResolvedValue(respond(envelope()));
-    const first = control.record();
+  it('fails immediately when the browser has no speech recognition', async () => {
+    const options: VoiceControlOptions = {
+      capture: captureSpy as unknown as () => VoiceTarget,
+      isCurrent: () => true,
+      execute: () => ({ ok: false, error: 'unused' }),
+      notify,
+      speechRecognition: null,
+    };
+    const unsupported = new VoiceControl(new FakeEl() as unknown as HTMLElement, options);
+    await unsupported.listen();
+    expect(captureSpy).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith('Voice command failed; see the voice panel', true);
+  });
+
+  it('reports the unsupported-browser message', async () => {
+    const status = find(
+      (() => {
+        const host = new FakeEl();
+        const options: VoiceControlOptions = {
+          capture: captureSpy as unknown as () => VoiceTarget,
+          isCurrent: () => true,
+          execute: () => ({ ok: false, error: 'unused' }),
+          notify,
+          speechRecognition: null,
+        };
+        new VoiceControl(host as unknown as HTMLElement, options).listen();
+        return host;
+      })(),
+      'voice-control__status',
+    );
     await flush();
-    expect(recordButton.textContent).toBe('Stop and send');
-    expect(statusEl.textContent).toContain('Recording…');
+    expect(status.textContent).toContain(UNSUPPORTED_SPEECH);
+  });
+
+  it('ignores a second listen while one session is in progress', async () => {
+    const first = control.listen();
+    await flush();
+    expect(recordButton.textContent).toBe('Confirm number');
+    expect(statusEl.textContent).toContain('Listening…');
     expect(statusEl.textContent).toContain('Line · XY');
-    await control.record();
-    expect(vi.mocked(recordMicrophone).mock.calls).toHaveLength(1);
-    resolveAudio(wavBlob());
+    await control.listen();
+    expect(rec().startCount).toBe(1);
+    rec().emit(false, '500 mm');
     await first;
     expect(line()!.b).toEqual(v3(400, 600, 300));
   });
 
-  it('toggle() starts recording when idle and stops while recording', async () => {
-    let resolveAudio: (blob: Blob) => void = () => {};
-    h.recording = { audio: new Promise<Blob>((resolve) => { resolveAudio = resolve; }), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockResolvedValue(respond(envelope()));
+  it('toggle() starts listening when idle and confirms while listening', async () => {
     control.toggle();
     await flush();
-    expect(vi.mocked(recordMicrophone).mock.calls).toHaveLength(1);
-    control.toggle();
-    expect(h.recording.stop).toHaveBeenCalledTimes(1);
-    resolveAudio(wavBlob());
+    expect(rec().startCount).toBe(1);
+    rec().emit(false, 'by 1 m');
     await flush();
-    await flush();
-    expect(line()!.b).toEqual(v3(400, 600, 300));
+    expect(line()!.b).toEqual(v3(700, 1000, 300));
   });
 
   it('routes the record button through toggle()', async () => {
-    h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockResolvedValue(respond(envelope()));
     recordButton.click();
     await flush();
-    expect(vi.mocked(recordMicrophone).mock.calls).toHaveLength(1);
+    expect(rec().startCount).toBe(1);
+    rec().emit(false, '500 mm');
+    await flush();
+    expect(line()).not.toBeNull();
   });
 
-  it('rejects an unsupported model command before execution', async () => {
-    h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockResolvedValue(respond(envelope({ distance_mm: -50 })));
-    await control.record();
+  it('rejects a confirm with no usable transcript', async () => {
+    const pending = control.listen();
+    await flush();
+    control.stop();
+    await pending;
     expect(statusEl.textContent).toContain('Say one positive distance, such as 500 mm or by 1 m');
     expect(line()).toBeNull();
     expect(notify).toHaveBeenCalledWith('Voice command failed; see the voice panel', true);
     expect(errorSpy).toHaveBeenCalledWith('[voice] error', 'Say one positive distance, such as 500 mm or by 1 m');
   });
 
-  it('rejects a legacy axis command before execution', async () => {
-    h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockResolvedValue(respond(envelope({ action: 'resize', target: 'current_object', axis: 'z', mode: 'delta', value_mm: 50 })));
-    await control.record();
+  it('rejects a non-measurement transcript on confirm', async () => {
+    const pending = control.listen();
+    await flush();
+    rec().emit(false, 'make it 500 mm tall');
+    control.stop();
+    await pending;
     expect(statusEl.textContent).toContain('Say one positive distance');
     expect(line()).toBeNull();
   });
 
-  it('surfaces API errors, logs the raw response text and never executes', async () => {
-    h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockResolvedValue(respond({ ok: false, error: 'Yibu returned HTTP 500', response_text: 'provider error body', call_id: 'c9' }));
-    await control.record();
-    expect(statusEl.textContent).toContain('Yibu returned HTTP 500');
-    expect(infoSpy).toHaveBeenCalledWith('[voice] API response', 'provider error body');
+  it('surfaces permission errors and never executes', async () => {
+    const pending = control.listen();
+    await flush();
+    rec().onerror?.({ error: 'not-allowed' });
+    await pending;
+    expect(statusEl.textContent).toContain('Microphone permission was denied');
     expect(line()).toBeNull();
     expect(notify).toHaveBeenCalledWith('Voice command failed; see the voice panel', true);
   });
 
-  it('prevents the fetch when the operation goes stale during recording', async () => {
-    let resolveAudio: (blob: Blob) => void = () => {};
-    h.recording = { audio: new Promise<Blob>((resolve) => { resolveAudio = resolve; }), stop: vi.fn(), cancel: vi.fn() };
-    const first = control.record();
+  it('does not execute when the operation goes stale before a match', async () => {
+    const pending = control.listen();
     await flush();
     stale = true;
-    resolveAudio(wavBlob());
-    await first;
-    expect(fetchMock).not.toHaveBeenCalled();
+    rec().emit(false, '500 mm');
+    await pending;
     expect(statusEl.textContent).toContain('Operation or geometry changed');
     expect(line()).toBeNull();
   });
 
-  it('rejects execution when the operation goes stale while the API call is pending', async () => {
-    h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-    let resolveFetch: (value: unknown) => void = () => {};
-    fetchMock.mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve; }));
-    const first = control.record();
+  it('reports cancellation and restores idle', async () => {
+    const pending = control.listen();
     await flush();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    stale = true;
-    resolveFetch(respond(envelope()));
-    await first;
-    expect(statusEl.textContent).toContain('Operation or geometry changed');
-    expect(line()).toBeNull();
-  });
-
-  it('reports cancellation when the in-flight fetch rejects on abort', async () => {
-    h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockImplementation((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
-      (init.signal as AbortSignal).addEventListener('abort', () => reject(new DOMException('The user aborted a request.', 'AbortError')));
-    }));
-    const first = control.record();
-    await flush();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    control.cancel();
-    await first;
-    expect(statusEl.textContent).toContain('Voice request cancelled');
-    expect(line()).toBeNull();
-    expect(recordButton.textContent).toBe('Record distance');
-  });
-
-  it('ignores a late successful response that resolves after cancel', async () => {
-    h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-    let resolveFetch: (value: unknown) => void = () => {};
-    fetchMock.mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve; }));
-    const first = control.record();
-    await flush();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    control.cancel();
-    expect(cancelButton.disabled).toBe(true);
-    resolveFetch(respond(envelope()));
-    await first;
-    expect(statusEl.textContent).toContain('Voice request cancelled');
-    expect(line()).toBeNull();
-    expect(recordButton.textContent).toBe('Record distance');
-  });
-
-  it('acknowledges cancellation while microphone permission is still pending', async () => {
-    vi.mocked(recordMicrophone).mockImplementationOnce(async (signal: AbortSignal) => new Promise((_resolve, reject) => {
-      signal.addEventListener('abort', () => reject(new DOMException('Voice recording cancelled', 'AbortError')));
-    }));
-    const first = control.record();
-    await flush();
-    expect(recordButton.textContent).toBe('Opening microphone…');
     control.cancel();
     expect(statusEl.textContent).toBe('Cancelling voice request… dismiss the microphone permission prompt if it is still open.');
     expect(recordButton.disabled).toBe(true);
     expect(cancelButton.disabled).toBe(true);
-    await control.record();
-    expect(vi.mocked(recordMicrophone).mock.calls).toHaveLength(1);
-    await first;
+    await pending;
     expect(statusEl.textContent).toContain('Voice request cancelled');
-    expect(recordButton.textContent).toBe('Record distance');
-    expect(recordButton.disabled).toBe(false);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('cancels a microphone promise that resolves after the request was cancelled', async () => {
-    let resolveMic: (recording: NonNullable<typeof h.recording>) => void = () => {};
-    vi.mocked(recordMicrophone).mockImplementationOnce(async () => new Promise((resolve) => { resolveMic = resolve; }));
-    const first = control.record();
-    await flush();
-    expect(recordButton.textContent).toBe('Opening microphone…');
-    control.cancel();
-    let resolveAudio: (blob: Blob) => void = () => {};
-    const audio = new Promise<Blob>((resolve) => { resolveAudio = resolve; });
-    h.recording = { audio, stop: vi.fn(), cancel: vi.fn() };
-    try {
-      resolveMic(h.recording);
-      await flush();
-      expect(h.recording.cancel).toHaveBeenCalledTimes(1);
-      expect(statusEl.textContent).toContain('Voice request cancelled');
-      expect(recordButton.textContent).toBe('Record distance');
-      expect(recordButton.disabled).toBe(false);
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(line()).toBeNull();
-    } finally {
-      resolveAudio(wavBlob());
-      await first;
-    }
-  });
-
-  it('aborts a stalled API request after the fetch timeout and restores idle', async () => {
-    vi.useFakeTimers();
-    try {
-      h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-      fetchMock.mockImplementation((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
-        (init.signal as AbortSignal).addEventListener('abort', () => reject(new DOMException('The user aborted a request.', 'AbortError')));
-      }));
-      const first = control.record();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(statusEl.textContent).toContain('Waiting for Yibu…');
-      expect(statusEl.textContent).toContain('Line · XY');
-      await vi.advanceTimersByTimeAsync(310_000);
-      await first;
-      expect(statusEl.textContent).toContain('Voice request timed out');
-      expect(h.recording.cancel).toHaveBeenCalled();
-      expect(recordButton.textContent).toBe('Record distance');
-      expect(recordButton.disabled).toBe(false);
-      expect(cancelButton.hidden).toBe(true);
-      expect(line()).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('reports an invalid JSON response and restores idle', async () => {
-    h.recording = { audio: Promise.resolve(wavBlob()), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token'); } });
-    await control.record();
-    expect(statusEl.textContent).toContain('Voice server returned an invalid response; restart the Python server after updating');
-    expect(recordButton.textContent).toBe('Record distance');
-    expect(recordButton.disabled).toBe(false);
     expect(line()).toBeNull();
+    expect(recordButton.textContent).toBe('Speak distance');
+    expect(recordButton.disabled).toBe(false);
   });
 
-  it('restores idle after a microphone denial', async () => {
-    vi.mocked(recordMicrophone).mockRejectedValue(new Error('Microphone permission was denied'));
-    await control.record();
-    expect(statusEl.textContent).toContain('Microphone permission was denied');
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(recordButton.textContent).toBe('Record distance');
-    expect(notify).toHaveBeenCalledWith('Voice command failed; see the voice panel', true);
-  });
-
-  it('stops the active recording from the public stop() and the record button', async () => {
-    let resolveAudio: (blob: Blob) => void = () => {};
-    h.recording = { audio: new Promise<Blob>((resolve) => { resolveAudio = resolve; }), stop: vi.fn(), cancel: vi.fn() };
-    fetchMock.mockResolvedValue(respond(envelope()));
-    const first = control.record();
+  it('does not execute a late result after cancel', async () => {
+    const pending = control.listen();
     await flush();
+    const recognition = rec();
+    control.cancel();
+    recognition.emit(false, '500 mm');
+    await pending;
+    expect(line()).toBeNull();
+    expect(recordButton.textContent).toBe('Speak distance');
+  });
+
+  it('stops listening from the public stop() and the record button', async () => {
+    const pending = control.listen();
+    await flush();
+    rec().emit(false, '500');
     control.stop();
-    expect(h.recording.stop).toHaveBeenCalledTimes(1);
-    resolveAudio(wavBlob());
-    await first;
+    await pending;
     expect(line()!.b).toEqual(v3(400, 600, 300));
   });
 
   it('keeps panel keystrokes away from the CAD keymap and cancels on pagehide', async () => {
-    let rejectAudio: (error: unknown) => void = () => {};
-    h.recording = {
-      audio: new Promise<Blob>((_resolve, reject) => { rejectAudio = reject; }),
-      stop: vi.fn(),
-      cancel: vi.fn(() => rejectAudio(new DOMException('Voice recording cancelled', 'AbortError'))),
-    };
-    const first = control.record();
+    const pending = control.listen();
     await flush();
     const stop = vi.fn();
     root.children[0].fire('keydown', { stopPropagation: stop });
@@ -493,8 +446,7 @@ describe('VoiceControl', () => {
     expect(stop).toHaveBeenCalledTimes(2);
     expect(h.pagehide).not.toBeNull();
     h.pagehide!();
-    await expect(h.recording.audio).rejects.toMatchObject({ name: 'AbortError' });
-    await first;
+    await pending;
     expect(statusEl.textContent).toContain('Voice request cancelled');
   });
 });
