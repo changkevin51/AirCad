@@ -1,10 +1,10 @@
 # AirCAD
 
-A spatial CAD sketching app: draw lines and closed outlines in millimetres on a 3D work plane, then extrude them into solids using a webcam-tracked fingertip (stand-in for a digital pen) or the mouse. The browser owns the CAD model; Python tracks the hand and can export the model to FreeCAD.
+A spatial CAD sketching app: draw lines and closed outlines in millimetres on a 3D work plane, then extrude them into solids using a camera-tracked green keycap or the mouse. The browser owns the CAD model; Python tracks the green keycap and can export the model to FreeCAD.
 
 ## Requirements
 
-- **Python 3.10, 3.11, or 3.12** (MediaPipe 0.10.35 has no wheels for 3.13+)
+- **Python 3.10, 3.11, or 3.12** (recommended for optional OAK-D support)
 - **Node.js 18+** (to install and build the web UI)
 - A webcam is optional. Without one, run with `--no-camera` and draw with the mouse.
 - An **OAK-D S2** is optional. Depth tracking needs the extra package in `requirements-depth.txt` (`depthai==2.30.0.0`). The default install does not install DepthAI.
@@ -69,7 +69,7 @@ Useful flags:
 - `--no-camera` — skip the webcam; the mouse drives the cursor
 - `--no-browser` — do not open a browser tab
 - `--camera 1` — another webcam index
-- `--source oak` — start with the OAK-D depth camera (`--target finger|color`, `--color green|red|blue`)
+- `--source oak` — start with the OAK-D depth camera (`--target keycap`, `--color green`)
 - `--tracking-debug` — write bounded JSONL diagnostics to `.runtime/depth-tracking.jsonl`
 - `--port 8765` — HTTP port
 
@@ -93,12 +93,12 @@ Hold **Space** or left-drag around any simple closed shape. A closed loop that i
 
 Select any shape and press **M** to move it on the work plane, or **R** to scale it by dragging a corner while the opposite corner stays fixed. **Enter** (or **M** / **R**) applies the preview as one undoable edit. **Esc** cancels.
 
-## Extrude with your hand
+## Extrude with the green keycap
 
-1. Draw a closed outline — one stroke, or separate endpoint-connected lines. New shapes are selected automatically. To select another shape, point inside it and pinch your thumb and index finger, click it, or press **S**. The selected outline stays highlighted.
-2. Press **Q** to start push/pull. The face most facing the camera is highlighted — hover another face of the same shape (while not pinching) or press **Tab** to switch which side you push/pull. **E** remains the FreeCAD export shortcut.
-3. Pinch thumb + index and move to pull the highlighted face **out**, or back to push it **in**. Pulling a cap face sets the depth; pulling a side face moves that boundary edge. Grid snapping applies to the pull distance. If tracking is lost, the preview freezes; show your hand, release, then pinch again to resume.
-4. Release the pinch to pause. Reposition your hand and pinch again to continue. Hold **Shift** to orbit or **Ctrl** to pan even during a pull; the preview stays fixed while you move the view. Release the navigation key to continue pulling from the current position without a depth jump.
+1. Draw a closed outline — one stroke, or separate endpoint-connected lines. New shapes are selected automatically. To select another shape, point inside it and press **S** or click it. The selected outline stays highlighted.
+2. Press **Q** to start push/pull. The face most facing the camera is highlighted — hover another face of the same shape (while Space is released) or press **Tab** to switch which side you push/pull. **E** remains the FreeCAD export shortcut.
+3. Hold **Space** and move the keycap to pull the highlighted face **out**, or back to push it **in**. Pulling a cap face sets the depth; pulling a side face moves that boundary edge. Grid snapping applies to the pull distance. If tracking is lost, the preview freezes; show the green keycap, release Space, then hold Space again to resume.
+4. Release **Space** to pause. Reposition the keycap and hold **Space** again to continue. Hold **Shift** to orbit or **Ctrl** to pan even during a pull; the preview stays fixed while you move the view. Release the navigation key to continue pulling from the current position without a depth jump.
 5. Press **Enter** or **Q** to apply, or **Esc** to cancel. **L** types an exact pull distance for the active face (`500`, `-250`, or `2 m`); **0** shows the result in isometric view. A zero-depth preview cannot be applied.
 
 Without a webcam, use **Q**, then **left-drag** (or hold **Space** while moving) along the highlighted direction. Release to pause, then **Enter** to apply. Extrusion is one undoable edit; undo restores the outline. Select an existing solid and press **Q** to push/pull any of its faces. **L** on a solid edits depth with one value or, for rectangular bases, base size with `width x height`.
@@ -139,7 +139,6 @@ Views glide smoothly into place, and releasing an orbit within about 6° of a vi
 | **A** | Automatic / manual work plane (auto picks XY / XZ / YZ from the view and what you hover) |
 | **Tab** | Cycle work plane XY → XZ → YZ and pin it (A returns to auto; while extruding: switch the pushed face) |
 | **G** | Grid snap on / off |
-| **N** | Off-hand palm navigation on / off (one open palm orbits, two palms pan/zoom) |
 
 Nearby vertices, midpoints, and edges attract the cursor before the grid. A soft axis alignment (±16°) uses an exact edge intersection when possible, but will not keep a stroke floating beside a nearby line. A stroke drawn nearly parallel to an existing edge can adopt that edge's direction and length. X / Y / Z remain hard axis locks. Starting on an object snap moves the work plane through that point.
 
@@ -154,7 +153,7 @@ Roughly matching adjacent rectangles align along the entire shared border, with 
 | **Delete** / **Backspace** | Delete the selected, hovered, or last entity |
 | **Ctrl+Backspace** / **Cmd+Backspace** | Clear the sketch |
 | **Esc** | Cancel the current stroke / move / scale / extrusion, deselect, or close overlays |
-| **S** | Select the shape under the cursor (also pinch or click) |
+| **S** | Select the shape under the cursor (or click) |
 | **Q** | Start push/pull on a selected closed outline or solid; press again to apply |
 | **M** | Move the selected shape on the work plane; press again to apply |
 | **R** | Scale the selected shape from a corner; press again to apply |
@@ -173,7 +172,7 @@ Keep the camera **fixed, upright, and approximately level**. The browser maps ca
 
 | Control | Action |
 | --- | --- |
-| Input panel | Webcam / Depth camera / Mouse, Finger or LED/Colour, scale |
+| Input panel | Webcam / Depth camera / Mouse, Green keycap, scale |
 | **O** | Set origin from a 400 ms stable capture (maps that pose to world 0,0,0) |
 | **Shift+R** | Recenter mapping on the last committed endpoint |
 | **F** | Fit a local workspace cube (about 400 mm physical × scale) |
@@ -249,13 +248,24 @@ Python tests use synthetic observations and never require a webcam. The TypeScri
 - **Browser shows “web UI is not built yet”:** run **install.bat** / **install.command**, or `npm install && npm run build` inside `web/`.
 - **Keys do nothing:** click the 3D viewport so it has focus. If a measurement field is open, finish or cancel it first.
 - **Plane is edge-on:** press **A** for auto, **Tab** or **1 / 2 / 3**, or orbit with **Shift**.
-- **Palm navigation moves unexpectedly:** press **N** to turn it off. Drawing (**Space**) always wins over palm nav; held **Shift** / **Ctrl** deliberately take priority to move the camera.
 - **FreeCAD not found:** set `FREECAD_EXECUTABLE` as above and confirm `freecad_import.py` is beside `server.py`.
 - **Depth camera will not start:** install `pip install -r requirements-depth.txt` (DepthAI 2.30.0.0), use USB3, and close `track-finger.py` if it still has the device.
 - **Origin needed:** press **O** and hold still for about half a second. Unplugging the OAK invalidates calibration.
 - **Missing Python packages:** run **install.bat** / **install.command**, or `pip install -r requirements.txt` in `.venv`.
 - **Missing Node packages:** run `npm install` inside `web/`.
 
-The `hand_landmarker.task` file next to the scripts is Google's hand-tracking model. If missing, the server downloads it automatically on first camera run (about 8 MB). Tracking then runs locally; camera frames are not uploaded or saved.
 
-MediaPipe is pinned to 0.10.35 because the 1.0.1 release crashed during hand-landmarker initialization on Apple Silicon. See Google's [Hand Landmarker Python guide](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker/python).
+
+## Green keycap tracking
+
+Both webcam and OAK-D inputs follow the green keycap center. Hold **Space** to draw or grab, press **S** to select, hold **Shift** to orbit or **Ctrl** to pan, and use **+ / −** to zoom. Mouse input remains available. A brief webcam detection gap freezes the current line without adding samples. While Space stays held, the same nearby keycap can resume it within 250 ms as one undoable edit. A longer loss, different identity, or remote recovery finishes the line at its last valid point; release and press Space again to start a new stroke. Active move, scale and face-pull previews pause until you release and re-grab.
+
+The detector in `tracker/keycap.py` adapts the supplied `test/tracker.js`: dominant-green calibration, connected components, convex-outline centering, two-frame acquisition, and immediate rejection of missing, clipped, weak or implausibly displaced targets. `tracker/keycap-model.json` was calibrated from the supplied `IMG_6363.png` crop at x=35.5%, y=47%, width=23.5%, height=19%; the small reference fixture is in `tests/fixtures/green-keycap.png`. The attached folder is not needed at runtime.
+
+The supplied tracking folder's pipeline is implemented with a coarse search (maximum 640 pixels on the long edge), followed by native-resolution outline measurement. Established targets are measured in a local crop first, keeping distant green objects out of the search. Acquisition tolerates frame intervals up to 300 ms, and the bounded movement gate scales with elapsed camera time. Invalid candidates are excluded before scoring so a clipped green background cannot hide an intact keycap. Missing measurements immediately stop CAD sampling; idle and briefly suspended line warnings wait 250 ms to avoid flashing on single-frame gaps.
+
+Each webcam preview carries the measurement from its own captured frame. The browser paints that image and its independently smoothed dot onto one canvas, so newer CAD cursor packets cannot move the dot ahead of the displayed keycap. Preview delivery is capped at 30 fps; CAD measurements follow the camera rate. Both filters use camera timestamps instead of network-arrival timing.
+
+Webcam smoothing is applied in viewport coordinates with at most one pixel of smoothing lag relative to the measurement. This bounds filter delay, not camera accuracy or latency. Similar green objects, motion blur and occlusion can still interrupt tracking. Keep the keycap visible and evenly lit. No hand model or model download is required. Images are processed locally and previewed in the local browser.
+
+The legacy-named `track-finger.py` diagnostic also uses this shared green keycap depth tracker; Space sets its origin, C clears it, and Q exits.

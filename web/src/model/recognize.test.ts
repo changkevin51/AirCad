@@ -43,7 +43,7 @@ describe('recognizeStroke: lines', () => {
     if (result.shape?.kind === 'line') expect(result.shape.alignedTo).toBeNull();
   });
 
-  it('tolerates hand jitter along a line', () => {
+  it('tolerates keycap jitter along a line', () => {
     const result = recognizeStroke(lineStroke(v2(0, 0), v2(2000, 0), 60, 60));
     expect(result.shape?.kind).toBe('line');
   });

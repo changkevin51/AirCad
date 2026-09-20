@@ -85,7 +85,8 @@ BleKeyboard bleKeyboard("Smart Pen", "Maker", 100);
 const int buttonPins[] = {0, 1, 3, 4};
 const int numButtons = sizeof(buttonPins) / sizeof(buttonPins[0]);
 // uint8_t, not char: KEY_F17..KEY_F20 are HID constants, not printable characters.
-const uint8_t buttonKeys[] = {KEY_F19, KEY_F20, KEY_F17, KEY_F18};
+// Order must match REMOTE_BUTTON_CODES in web/src/input/remote.ts.
+const uint8_t buttonKeys[] = {KEY_F17, KEY_F18, KEY_F19, KEY_F20};
 // Labels only used for logging, so the monitor reads as button numbers not codes.
 const char *keyNames[] = {"F17", "F18", "F19", "F20"};
 
@@ -164,7 +165,7 @@ void loop() {
     }
   }
 
-#if DEBUG_SERIAL3434344433
+#if DEBUG_SERIAL
   // Raw levels every two seconds: shows a pin that never moves while you press
   // it, which no amount of AirCAD debugging would reveal.
   if (millis() - lastHeartbeat > 2000) {

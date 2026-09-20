@@ -165,7 +165,7 @@ describe('presentation guards', () => {
       expect(presentationAllows(action)).toBe(true);
       expect(pressAvailability(action, presenting).enabled).toBe(true);
     }
-    for (const action of ['select', 'move', 'scale', 'extrude', 'undo', 'redo', 'delete', 'clear', 'cyclePlane', 'toggleAutoPlane', 'toggleGrid', 'measure', 'voice', 'export', 'togglePip', 'toggleNavAssist', 'help', 'setOrigin', 'recenter', 'confirm', 'saveSketch', 'openSketch'] as const) {
+    for (const action of ['select', 'move', 'scale', 'extrude', 'undo', 'redo', 'delete', 'clear', 'cyclePlane', 'toggleAutoPlane', 'toggleGrid', 'measure', 'voice', 'export', 'togglePip', 'help', 'setOrigin', 'recenter', 'confirm', 'saveSketch', 'openSketch'] as const) {
       expect(presentationAllows(action)).toBe(false);
       const result = pressAvailability(action, presenting);
       expect(result.enabled).toBe(false);

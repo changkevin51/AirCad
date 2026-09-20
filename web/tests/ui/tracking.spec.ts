@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { test, expect, webcamSnapshot, oakSnapshot, statusMessage, handsMessage } from './fixtures';
+import { test, expect, webcamSnapshot, oakSnapshot, statusMessage, keycapMessage } from './fixtures';
 import type { Page } from '@playwright/test';
 
 const REVIEW_DIR = path.resolve('test-results/review');
@@ -104,6 +104,88 @@ test.describe('input tracking', () => {
 test.describe('webcam source', () => {
   test.use({ viewport: { width: 1440, height: 900 }, trackerSnapshot: webcamSnapshot });
 
+  test('camera preview paints the dot from its own frame, not the newest cursor packet', async ({ page, tracker }) => {
+    await page.goto('/');
+    await openInputTab(page, 'Webcam');
+    tracker.send(statusMessage('ready'));
+    const jpeg = await page.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 384; canvas.height = 288;
+      const context = canvas.getContext('2d')!;
+      context.fillStyle = 'black'; context.fillRect(0, 0, 384, 288);
+      return canvas.toDataURL('image/jpeg').split(',')[1];
+    });
+    const captured = keycapMessage(1000);
+    captured.keycaps[0].center = [160, 240];
+    tracker.send({ type: 'thumb', jpeg, w: 384, h: 288, keycapFrame: captured });
+    const newer = keycapMessage(1033);
+    newer.keycaps[0].center = [480, 240];
+    tracker.send(newer);
+    const greenAt = (x: number) => page.locator('.pip canvas').evaluate((node, px) => {
+      const pixel = (node as HTMLCanvasElement).getContext('2d')!.getImageData(px, 144, 1, 1).data;
+      return pixel[1];
+    }, x);
+    await expect.poll(() => greenAt(96)).toBeGreaterThan(200);
+    expect(await greenAt(288)).toBeLessThan(20);
+    await page.screenshot({ path: path.join(REVIEW_DIR, 'input-keycap-paired.png') });
+    tracker.send({ type: 'thumb', jpeg, w: 384, h: 288, keycapFrame: { ...newer, keycaps: [] } });
+    await expect.poll(() => greenAt(96)).toBeLessThan(20);
+  });
+
+  test('holding Space makes one undoable line across a short same-target dropout', async ({ page, tracker }) => {
+    await page.goto('/');
+    await openInputTab(page, 'Webcam');
+    tracker.send(statusMessage('ready'));
+    await page.locator('.viewport').focus();
+    await page.keyboard.press('1');
+    await page.waitForTimeout(250);
+    tracker.send(keycapMessage(1000));
+    await expect(panelStatus(page)).toHaveText('Tracking');
+    await page.keyboard.down('Space');
+    const move = keycapMessage(1033);
+    move.keycaps[0].center = [360, 240];
+    tracker.send(move);
+    await page.waitForTimeout(30);
+    tracker.send({ ...keycapMessage(1066), keycaps: [] });
+    await page.waitForTimeout(70);
+    expect(await page.evaluate(() => (window as any).aircad.sketch.size)).toBe(0);
+    const recovered = keycapMessage(1133);
+    recovered.keycaps[0].center = [390, 240];
+    tracker.send(recovered);
+    await page.waitForTimeout(30);
+    await page.keyboard.up('Space');
+    await expect.poll(() => page.evaluate(() => (window as any).aircad.sketch.size)).toBe(1);
+    await page.evaluate(() => (window as any).aircad.commands.undo());
+    expect(await page.evaluate(() => (window as any).aircad.sketch.size)).toBe(0);
+  });
+
+  test('brief startup dropouts stay quiet; sustained loss warns and recovery clears it', async ({ page, tracker }) => {
+    await page.goto('/');
+    await openInputTab(page, 'Webcam');
+    tracker.send(statusMessage('ready'));
+    tracker.send(keycapMessage(1));
+    await expect(panelStatus(page)).toHaveText('Tracking');
+    await page.evaluate(() => {
+      const notices: string[] = [];
+      (window as any).trackingNotices = notices;
+      new MutationObserver(() => notices.push(document.querySelector('.viewport-notice')!.textContent ?? ''))
+        .observe(document.querySelector('.viewport-notice')!, { childList: true, subtree: true });
+    });
+    for (let i = 0; i < 4; i++) {
+      tracker.send({ ...keycapMessage(2 + i * 2), keycaps: [] });
+      await page.waitForTimeout(60);
+      tracker.send(keycapMessage(3 + i * 2));
+      await page.waitForTimeout(60);
+    }
+    expect(await page.evaluate(() => (window as any).trackingNotices.some((text: string) => text.includes('Tracking paused')))).toBe(false);
+    tracker.send({ ...keycapMessage(20), keycaps: [] });
+    await expect(page.locator('.viewport-notice')).toContainText('Tracking paused');
+    await expect(panelStatus(page)).toHaveText('Keycap lost — show the green keycap');
+    tracker.send(keycapMessage(21));
+    await expect(page.locator('.viewport-notice')).not.toContainText('Tracking paused');
+    await expect(panelStatus(page)).toHaveText('Tracking');
+  });
+
   test('status follows camera state through error, tracking, and offline', async ({ page, tracker }) => {
     await page.goto('/');
     await openInputTab(page, 'Webcam');
@@ -116,7 +198,7 @@ test.describe('webcam source', () => {
     await expect(status).toHaveText('Camera starting…');
 
     tracker.send(statusMessage('ready'));
-    await expect(status).toHaveText('Show a hand to track');
+    await expect(status).toHaveText('Show the green keycap to track');
 
     tracker.send(statusMessage('error', 'device busy'));
     await expect(status).toHaveText('Camera unavailable: device busy');
@@ -128,7 +210,7 @@ test.describe('webcam source', () => {
     await page.screenshot({ path: path.join(REVIEW_DIR, 'input-webcam-error.png') });
 
     tracker.send(statusMessage('ready'));
-    tracker.send(handsMessage(1));
+    tracker.send(keycapMessage(1));
     await expect(status).toHaveText('Tracking');
     await expect(status).toHaveAttribute('data-tone', 'ok');
 

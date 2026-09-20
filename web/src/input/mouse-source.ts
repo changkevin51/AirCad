@@ -21,7 +21,7 @@ export function wheelZoomFactor(deltaY: number, deltaMode: number, pageHeight: n
 }
 
 /**
- * Mouse fallback: moves the cursor when no hand is tracked and maps the
+ * Mouse fallback: moves the cursor when no keycap is tracked and maps the
  * buttons onto the same hold actions as the pen keys.
  */
 export class MouseSource {

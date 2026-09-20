@@ -1,6 +1,6 @@
 import { OrthographicCamera, PerspectiveCamera, Raycaster, Vector2, Vector3 } from 'three';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { HandsMessage, NavMessage, TrackedHandMessage } from './input/tracker-client';
+import type { KeycapMessage, TrackedKeycapMessage } from './input/tracker-client';
 import type { AirCadApi } from './main';
 import { makeRect, type Entity } from './model/sketch';
 import { circleStroke, rectStroke, triangleStroke } from './model/test-helpers';
@@ -30,7 +30,7 @@ const h = vi.hoisted(() => ({
     transitioning: false,
   },
   tracker: {} as {
-    onHands?: (message: HandsMessage) => void;
+    onKeycap?: (message: KeycapMessage) => void;
     onThumb?: (message: unknown) => void;
     onStatus?: (message: unknown) => void;
     onConnection?: (state: string) => void;
@@ -305,7 +305,7 @@ vi.mock('./ui/pip', () => ({
     visible = true;
     constructor(_root: unknown) {}
     setThumb(): void {}
-    setHands(): void {}
+    setKeycap(): void {}
     setCameraState(): void {}
     setSpatial(): void {}
     setStream(): void {}
@@ -408,26 +408,22 @@ function tipFor(px: number, py: number): [number, number] {
   return [FRAME.w * 0.12 + (px / 1000) * FRAME.w * 0.76, FRAME.h * 0.12 + (py / 800) * FRAME.h * 0.76];
 }
 
-function handAt(px: number, py: number, overrides: Partial<TrackedHandMessage> = {}, nav: NavMessage | null = null): HandsMessage {
-  const hand: TrackedHandMessage = {
+function keycapAt(px: number, py: number, overrides: Partial<TrackedKeycapMessage> & { spaceHeld?: boolean } = {}): KeycapMessage & { spaceHeld?: boolean } {
+  const keycap: TrackedKeycapMessage = {
     id: 1,
-    handedness: 'right',
-    tip: tipFor(px, py),
-    thumb: [0, 0],
-    palm: [0, 0],
-    palmSize: 80,
-    pinching: false,
-    open: false,
-    openArmed: false,
-    landmarks: [],
+    center: tipFor(px, py),
+    confidence: 1,
     ...overrides,
   };
-  return { type: 'hands', t: h.nowMs / 1000, frame: { ...FRAME }, hands: [hand], nav };
+  return { type: 'keycap', t: h.nowMs / 1000, frame: { ...FRAME }, keycaps: [keycap], spaceHeld: overrides.spaceHeld };
 }
 
-const emitHands = (message: HandsMessage): void => h.tracker.onHands?.(message);
-const emitEmptyHands = (): void => h.tracker.onHands?.({ type: 'hands', t: 0, frame: { ...FRAME }, hands: [], nav: null });
-const setHand = (p: Vec2): void => emitHands(handAt(p.x, p.y));
+const emitKeycap = (message: KeycapMessage & { spaceHeld?: boolean }): void => {
+  if (message.spaceHeld !== undefined) api.hold('draw', message.spaceHeld);
+  h.tracker.onKeycap?.(message);
+};
+const emitEmptyKeycaps = (): void => h.tracker.onKeycap?.({ type: 'keycap', t: 0, frame: { ...FRAME }, keycaps: [] });
+const setKeycap = (p: Vec2): void => emitKeycap(keycapAt(p.x, p.y));
 
 function startExtrusion(setCursor: (p: Vec2) => void = (p) => api.setCursor(p)): string {
   api.commands.addRect([v3(100, 100, 0), v3(500, 100, 0), v3(500, 400, 0), v3(100, 400, 0)]);
@@ -523,10 +519,10 @@ describe('camera navigation during push/pull', () => {
     expect(api.sketch.size).toBe(0);
   });
 
-  it.each(['orbit', 'pan'] as const)('%s overrides an active hand pinch and resumes without a depth jump', (nav) => {
-    const serialized = startExtrusion(setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(250, 200, { pinching: true }));
+  it.each(['orbit', 'pan'] as const)('%s overrides an active keycap Space grab and resumes without a depth jump', (nav) => {
+    const serialized = startExtrusion(setKeycap);
+    emitKeycap(keycapAt(250, 250, { spaceHeld: true }));
+    emitKeycap(keycapAt(250, 200, { spaceHeld: true }));
     expect(api.extrusion()!.depth).toBeCloseTo(50);
     expect(api.extrusion()!.dragging).toBe(true);
     const preview = structuredClone(api.extrusion()!);
@@ -534,7 +530,7 @@ describe('camera navigation during push/pull', () => {
     const other = nav === 'orbit' ? h.orbit.pan : h.orbit.orbit;
 
     api.hold(nav, true);
-    emitHands(handAt(300, 150, { pinching: true }));
+    emitKeycap(keycapAt(300, 150, { spaceHeld: true }));
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.calls[0][0]).toBeCloseTo(50);
     expect(spy.mock.calls[0][1]).toBeCloseTo(-50);
@@ -547,7 +543,7 @@ describe('camera navigation during push/pull', () => {
     expect(api.sketch.serialize()).toBe(serialized);
 
     api.hold(nav, false);
-    emitHands(handAt(300, 140, { pinching: true }));
+    emitKeycap(keycapAt(300, 140, { spaceHeld: true }));
     expect(api.extrusion()!.depth).toBeCloseTo(60);
     api.press('confirm');
     api.press('undo');
@@ -601,28 +597,26 @@ describe('camera navigation during push/pull', () => {
     }
   });
 
-  it.each([true, false])('applies the camera once per hand frame while navigating (navAssist=%s)', (assist) => {
-    if (assist) api.press('toggleNavAssist');
+  it('applies the camera once per keycap frame while navigating', () => {
     api.hold('orbit', true);
-    emitHands(handAt(300, 300));
+    emitKeycap(keycapAt(300, 300));
     h.orbit.orbit.mockClear();
-    emitHands(handAt(340, 320, {}, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
+    emitKeycap(keycapAt(340, 320, {}));
     expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
     expect(h.orbit.orbit).toHaveBeenCalledWith(40, 20, v3(0, 0, 0));
     expect(h.orbit.pan).not.toHaveBeenCalled();
     expect(h.orbit.zoom).not.toHaveBeenCalled();
   });
 
-  it('applies the camera once while pinching mid-extrusion and keeps preview + selection', () => {
-    api.press('toggleNavAssist');
-    startExtrusion(setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(250, 200, { pinching: true }));
+  it('applies the camera once while holding Space mid-extrusion and keeps preview + selection', () => {
+    startExtrusion(setKeycap);
+    emitKeycap(keycapAt(250, 250, { spaceHeld: true }));
+    emitKeycap(keycapAt(250, 200, { spaceHeld: true }));
     const preview = structuredClone(api.extrusion()!);
     const selectedId = api.selected()?.id;
     api.hold('orbit', true);
     h.orbit.orbit.mockClear();
-    emitHands(handAt(350, 120, { pinching: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
+    emitKeycap(keycapAt(350, 120, { spaceHeld: true }));
     expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
     expect(h.orbit.orbit.mock.calls[0][0]).toBeCloseTo(100);
     expect(h.orbit.orbit.mock.calls[0][1]).toBeCloseTo(-80);
@@ -633,50 +627,6 @@ describe('camera navigation during push/pull', () => {
     expect(frozen.depth).toBe(preview.depth);
     expect(frozen.corners).toEqual(preview.corners);
     expect(api.selected()?.id).toBe(selectedId);
-  });
-
-  it('applies the camera once with an open palm while an extrusion idles', () => {
-    api.press('toggleNavAssist');
-    startExtrusion(setHand);
-    api.hold('orbit', true);
-    emitHands(handAt(300, 250));
-    h.orbit.orbit.mockClear();
-    emitHands(handAt(360, 300, { open: true, openArmed: true }, { mode: 'two', pan: [10, 10], zoom: 1.2, rotation: 0 }));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    expect(h.orbit.orbit.mock.calls[0][0]).toBeCloseTo(60);
-    expect(h.orbit.orbit.mock.calls[0][1]).toBeCloseTo(50);
-    expect(h.orbit.orbit.mock.calls[0][2]).toEqual(v3(300, 250, 0));
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-  });
-
-  it('unmodified palm navigation still drives the camera when idle', () => {
-    api.press('toggleNavAssist');
-    emitHands(handAt(400, 300, { open: true, openArmed: true }));
-    emitHands(handAt(420, 310, { open: true, openArmed: true }, { mode: 'one', pan: [10, 20], zoom: 1, rotation: 0 }));
-    expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
-    expect(h.orbit.orbit).toHaveBeenCalledWith(15.625, 31.25, v3(0, 0, 0));
-    h.orbit.orbit.mockClear();
-    emitHands(handAt(430, 320, { open: true, openArmed: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
-    expect(h.orbit.pan).toHaveBeenCalledWith(62.5, 46.875);
-    expect(h.orbit.zoom).toHaveBeenCalledWith(1.3);
-  });
-
-  it('disabled palm assist makes no camera calls', () => {
-    emitHands(handAt(400, 300, { open: true, openArmed: true }));
-    emitHands(handAt(420, 310, { open: true, openArmed: true }, { mode: 'one', pan: [10, 20], zoom: 1, rotation: 0 }));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
-  });
-
-  it('automatic palm navigation stays blocked during an extrusion without modifiers', () => {
-    api.press('toggleNavAssist');
-    startExtrusion(setHand);
-    emitHands(handAt(400, 300, { open: true, openArmed: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
   });
 
   it('keeps the mouse fallback: right-drag orbits, middle-drag pans, wheel zooms', () => {
@@ -702,30 +652,30 @@ describe('navigation rebases when the cursor source changes', () => {
     api.hold('orbit', true);
   });
 
-  it('a lost hand returning far away seeds a new baseline', () => {
-    emitHands(handAt(300, 300));
-    emitHands(handAt(320, 300));
+  it('a lost keycap returning far away seeds a new baseline', () => {
+    emitKeycap(keycapAt(300, 300));
+    emitKeycap(keycapAt(320, 300));
     expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
     h.orbit.orbit.mockClear();
-    emitEmptyHands();
-    emitHands(handAt(700, 600));
+    emitEmptyKeycaps();
+    emitKeycap(keycapAt(700, 600));
     expect(h.orbit.orbit).not.toHaveBeenCalled();
-    emitHands(handAt(710, 600));
+    emitKeycap(keycapAt(710, 600));
     expect(h.orbit.orbit).toHaveBeenCalledWith(10, 0, v3(0, 0, 0));
   });
 
-  it('a different hand id rebases instead of jumping', () => {
-    emitHands(handAt(300, 300));
+  it('a different keycap id rebases instead of jumping', () => {
+    emitKeycap(keycapAt(300, 300));
     h.orbit.orbit.mockClear();
-    emitHands(handAt(700, 600, { id: 2 }));
+    emitKeycap(keycapAt(700, 600, { id: 2 }));
     expect(h.orbit.orbit).not.toHaveBeenCalled();
-    emitHands(handAt(710, 600, { id: 2 }));
+    emitKeycap(keycapAt(710, 600, { id: 2 }));
     expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
   });
 
-  it('the mouse taking over from a lost hand rebases', () => {
-    emitHands(handAt(300, 300));
-    emitEmptyHands();
+  it('the mouse taking over from a lost keycap rebases', () => {
+    emitKeycap(keycapAt(300, 300));
+    emitEmptyKeycaps();
     h.orbit.orbit.mockClear();
     h.mouse.onMove?.(v2(200, 200));
     expect(h.orbit.orbit).not.toHaveBeenCalled();
@@ -733,49 +683,49 @@ describe('navigation rebases when the cursor source changes', () => {
     expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
   });
 
-  it('a hand timeout in the frame loop rebases', () => {
-    emitHands(handAt(300, 300));
+  it('a keycap timeout in the frame loop rebases', () => {
+    emitKeycap(keycapAt(300, 300));
     h.orbit.orbit.mockClear();
     h.nowMs += 1000;
     runFrame();
-    emitHands(handAt(700, 600));
+    emitKeycap(keycapAt(700, 600));
     expect(h.orbit.orbit).not.toHaveBeenCalled();
-    emitHands(handAt(710, 600));
+    emitKeycap(keycapAt(710, 600));
     expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
   });
 
-  it('tracker disconnection rebases even when the same hand id returns', () => {
-    emitHands(handAt(300, 300));
+  it('tracker disconnection rebases even when the same keycap id returns', () => {
+    emitKeycap(keycapAt(300, 300));
     h.orbit.orbit.mockClear();
     h.tracker.onConnection?.('closed');
     h.tracker.onConnection?.('open');
-    emitHands(handAt(700, 600));
+    emitKeycap(keycapAt(700, 600));
     expect(h.orbit.orbit).not.toHaveBeenCalled();
-    emitHands(handAt(710, 600));
+    emitKeycap(keycapAt(710, 600));
     expect(h.orbit.orbit).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('navigation safety pauses', () => {
   it('a tracking-loss hard pause survives camera navigation until a real release and regrip', () => {
-    startExtrusion(setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(250, 200, { pinching: true }));
+    startExtrusion(setKeycap);
+    emitKeycap(keycapAt(250, 250, { spaceHeld: true }));
+    emitKeycap(keycapAt(250, 200, { spaceHeld: true }));
     expect(api.extrusion()!.depth).toBeCloseTo(50);
-    emitEmptyHands();
-    emitHands(handAt(600, 500, { pinching: true }));
+    emitEmptyKeycaps();
+    emitKeycap(keycapAt(600, 500, { spaceHeld: true }));
     expect(api.extrusion()!.depth).toBeCloseTo(50);
     expect(api.extrusion()!.dragging).toBe(false);
     api.hold('orbit', true);
-    emitHands(handAt(650, 450, { pinching: true }));
+    emitKeycap(keycapAt(650, 450, { spaceHeld: true }));
     expect(api.extrusion()!.depth).toBeCloseTo(50);
     api.hold('orbit', false);
-    emitHands(handAt(660, 450, { pinching: true }));
+    emitKeycap(keycapAt(660, 450, { spaceHeld: true }));
     expect(api.extrusion()!.depth).toBeCloseTo(50);
     expect(api.extrusion()!.dragging).toBe(false);
-    emitHands(handAt(660, 450));
-    emitHands(handAt(660, 450, { pinching: true }));
-    emitHands(handAt(660, 440, { pinching: true }));
+    emitKeycap(keycapAt(660, 450, { spaceHeld: false }));
+    emitKeycap(keycapAt(660, 450, { spaceHeld: true }));
+    emitKeycap(keycapAt(660, 440, { spaceHeld: true }));
     expect(api.extrusion()!.depth).toBeCloseTo(60);
   });
 
@@ -864,8 +814,8 @@ describe('navigation HUD', () => {
   });
 });
 
-describe('drawing commits through the timed hand path', () => {
-  it('commits a rough square as a rectangle after One-Euro-smoothed hand samples', () => {
+describe('drawing commits through the timed keycap path', () => {
+  it('commits a rough square as a rectangle after One-Euro-smoothed keycap samples', () => {
     const points = rectStroke(0, 0, 1000, 1000, { pointsPerSide: 12, jitter: 150 });
     const scale = 0.6;
     const ox = 80;
@@ -881,15 +831,15 @@ describe('drawing commits through the timed hand path', () => {
       runFrame();
       const screenFor = (point: Vec2): Vec2 => v2(ox + point.x * scale, oy + point.y * scale);
       const first = screenFor(points[0]);
-      emitHands(handAt(first.x, first.y));
+      emitKeycap(keycapAt(first.x, first.y));
       api.hold('draw', true);
       for (const point of points.slice(1)) {
         h.nowMs += 33;
         const screen = screenFor(point);
-        emitHands(handAt(screen.x, screen.y));
+        emitKeycap(keycapAt(screen.x, screen.y));
       }
       h.nowMs += 33;
-      emitHands(handAt(first.x, first.y));
+      emitKeycap(keycapAt(first.x, first.y));
       api.hold('draw', false);
     } finally {
       h.projector.project = previousProject;
@@ -951,9 +901,9 @@ describe('preview rendering invalidation', () => {
 
 describe('face switching during the first extrusion', () => {
   it.each([
-    ['hand', 'confirm'],
+    ['keycap', 'confirm'],
     ['mouse', 'confirm'],
-    ['hand', 'cancel'],
+    ['keycap', 'cancel'],
   ] as const)('%s input can release and pull a new side without restarting Q (%s)', (input, finish) => {
     const previousProject = h.projector.project;
     const previousRay = h.projector.ray;
@@ -963,15 +913,14 @@ describe('face switching during the first extrusion', () => {
       dir: v3(-Math.SQRT1_2, 0, -Math.SQRT1_2),
     });
     const move = (point: Vec2, gripping: boolean): void => {
-      if (input === 'hand') {
-        emitHands(handAt(point.x, point.y, { pinching: gripping, open: !gripping, openArmed: !gripping }));
+      if (input === 'keycap') {
+        emitKeycap(keycapAt(point.x, point.y, { spaceHeld: gripping }));
       } else {
         api.hold('draw', gripping);
         api.setCursor(point);
       }
     };
     try {
-      if (input === 'hand') api.press('toggleNavAssist');
       const serialized = startExtrusion((point) => move(point, false));
       const id = api.selected()!.id;
       move(v2(250, 250), true);
@@ -1323,38 +1272,38 @@ describe('shape movement', () => {
     expect(previewOrigin(entity.id)).toEqual(v3(150, 125, 0));
   });
 
-  it('moves with pinch grabs and resumes cleanly after a release', () => {
-    const entity = startMove(false, setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(290, 275, { pinching: true }));
+  it('moves with Space grabs and resumes cleanly after a release', () => {
+    const entity = startMove(false, setKeycap);
+    emitKeycap(keycapAt(250, 250, { spaceHeld: true }));
+    emitKeycap(keycapAt(290, 275, { spaceHeld: true }));
     expect(previewOrigin(entity.id).x).toBeCloseTo(140, 0);
     expect(previewOrigin(entity.id).y).toBeCloseTo(125, 0);
-    emitHands(handAt(290, 275));
-    emitHands(handAt(600, 500));
-    emitHands(handAt(600, 500, { pinching: true }));
-    emitHands(handAt(610, 515, { pinching: true }));
+    emitKeycap(keycapAt(290, 275, { spaceHeld: false }));
+    emitKeycap(keycapAt(600, 500, { spaceHeld: false }));
+    emitKeycap(keycapAt(600, 500, { spaceHeld: true }));
+    emitKeycap(keycapAt(610, 515, { spaceHeld: true }));
     expect(previewOrigin(entity.id).x).toBeCloseTo(150, 0);
     expect(previewOrigin(entity.id).y).toBeCloseTo(140, 0);
   });
 
   it.each([
-    ['an empty hands frame', () => emitEmptyHands()],
+    ['an empty keycaps frame', () => emitEmptyKeycaps()],
     ['tracker disconnection', () => h.tracker.onConnection?.('closed')],
-    ['a hand timeout', () => { h.nowMs += 700; runFrame(); }],
-    ['a different hand id', () => emitHands(handAt(700, 600, { id: 2, pinching: true }))],
+    ['a keycap timeout', () => { h.nowMs += 700; runFrame(); }],
+    ['a different keycap id', () => emitKeycap(keycapAt(700, 600, { id: 2, spaceHeld: true }))],
     ['focus loss', () => { fire('blur'); fire('focus'); }],
     ['the help overlay', () => { api.press('help'); api.press('help'); }],
-  ])('a pinch interrupted by %s stays frozen until a real release and regrip', (_label, interrupt) => {
-    const entity = startMove(false, setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(290, 275, { pinching: true }));
+  ])('a Space grab interrupted by %s stays frozen until a real release and regrip', (_label, interrupt) => {
+    const entity = startMove(false, setKeycap);
+    emitKeycap(keycapAt(250, 250, { spaceHeld: true }));
+    emitKeycap(keycapAt(290, 275, { spaceHeld: true }));
     const frozen = previewOrigin(entity.id);
     interrupt();
-    emitHands(handAt(700, 600, { pinching: true }));
+    emitKeycap(keycapAt(700, 600, { spaceHeld: true }));
     expect(previewOrigin(entity.id)).toEqual(frozen);
-    emitHands(handAt(700, 600));
-    emitHands(handAt(700, 600, { pinching: true }));
-    emitHands(handAt(710, 615, { pinching: true }));
+    emitKeycap(keycapAt(700, 600, { spaceHeld: false }));
+    emitKeycap(keycapAt(700, 600, { spaceHeld: true }));
+    emitKeycap(keycapAt(710, 615, { spaceHeld: true }));
     const moved = previewOrigin(entity.id);
     expect(moved.x - frozen.x).toBeCloseTo(10, 0);
     expect(moved.y - frozen.y).toBeCloseTo(15, 0);
@@ -1362,31 +1311,22 @@ describe('shape movement', () => {
   });
 
   it('keeps a hard release requirement through a soft navigation pause', () => {
-    const entity = startMove(false, setHand);
-    emitHands(handAt(250, 250, { pinching: true }));
-    emitHands(handAt(290, 275, { pinching: true }));
+    const entity = startMove(false, setKeycap);
+    emitKeycap(keycapAt(250, 250, { spaceHeld: true }));
+    emitKeycap(keycapAt(290, 275, { spaceHeld: true }));
     const frozen = previewOrigin(entity.id);
-    emitEmptyHands();
+    emitEmptyKeycaps();
     api.hold('orbit', true);
-    emitHands(handAt(700, 600, { pinching: true }));
+    emitKeycap(keycapAt(700, 600, { spaceHeld: true }));
     api.hold('orbit', false);
-    emitHands(handAt(710, 600, { pinching: true }));
+    emitKeycap(keycapAt(710, 600, { spaceHeld: true }));
     expect(previewOrigin(entity.id)).toEqual(frozen);
-    emitHands(handAt(710, 600));
-    emitHands(handAt(710, 600, { pinching: true }));
-    emitHands(handAt(720, 615, { pinching: true }));
+    emitKeycap(keycapAt(710, 600, { spaceHeld: false }));
+    emitKeycap(keycapAt(710, 600, { spaceHeld: true }));
+    emitKeycap(keycapAt(720, 615, { spaceHeld: true }));
     const moved = previewOrigin(entity.id);
     expect(moved.x - frozen.x).toBeCloseTo(10, 0);
     expect(moved.y - frozen.y).toBeCloseTo(15, 0);
-  });
-
-  it('keeps automatic palm navigation disabled while moving', () => {
-    api.press('toggleNavAssist');
-    startMove(false, setHand);
-    emitHands(handAt(400, 300, { open: true, openArmed: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
   });
 
   it('cancels the move when the target is edited or deleted programmatically', () => {
@@ -1642,7 +1582,6 @@ describe('corner scaling', () => {
     api.press('cancel');
   });
 
-
   it.each([200, -200])('scales a box from a base corner with the opposite cap corner fixed (depth %i)', (depth) => {
     const previousProject = h.projector.project;
     const previousRay = h.projector.ray;
@@ -1678,7 +1617,6 @@ describe('corner scaling', () => {
       h.projector.ray = previousRay;
     }
   });
-
 
   it.each([['triangle', 0], ['prism', 200], ['prism', -200]] as const)('scales a %s from a corner at depth %i', (type, depth) => {
     const previousProject = h.projector.project;
@@ -1872,27 +1810,27 @@ describe('corner scaling', () => {
   });
 
   it.each([
-    ['an empty hands frame', () => emitEmptyHands()],
+    ['an empty keycaps frame', () => emitEmptyKeycaps()],
     ['tracker disconnection', () => h.tracker.onConnection?.('closed')],
-    ['a hand timeout', () => { h.nowMs += 700; runFrame(); }],
-    ['a different hand id', () => emitHands(handAt(700, 600, { id: 2, pinching: true }))],
+    ['a keycap timeout', () => { h.nowMs += 700; runFrame(); }],
+    ['a different keycap id', () => emitKeycap(keycapAt(700, 600, { id: 2, spaceHeld: true }))],
     ['focus loss', () => { fire('blur'); fire('focus'); }],
     ['the help overlay', () => { api.press('help'); api.press('help'); }],
-  ])('a pinch scaling interrupted by %s stays frozen until a real release and regrip', (_label, interrupt) => {
+  ])('a Space grab scaling interrupted by %s stays frozen until a real release and regrip', (_label, interrupt) => {
     const entity = addBox();
-    setHand(v2(500, 400));
+    setKeycap(v2(500, 400));
     api.press('toggleGrid');
     api.press('scale');
-    emitHands(handAt(500, 400, { pinching: true }));
-    emitHands(handAt(700, 550, { pinching: true }));
+    emitKeycap(keycapAt(500, 400, { spaceHeld: true }));
+    emitKeycap(keycapAt(700, 550, { spaceHeld: true }));
     const frozen = previewCorner(entity.id, 2);
     expect(frozen.x).toBeCloseTo(700, 0);
     interrupt();
-    emitHands(handAt(700, 600, { pinching: true }));
+    emitKeycap(keycapAt(700, 600, { spaceHeld: true }));
     expect(previewCorner(entity.id, 2)).toEqual(frozen);
-    emitHands(handAt(700, 600));
-    emitHands(handAt(700, 600, { pinching: true }));
-    emitHands(handAt(710, 615, { pinching: true }));
+    emitKeycap(keycapAt(700, 600, { spaceHeld: false }));
+    emitKeycap(keycapAt(700, 600, { spaceHeld: true }));
+    emitKeycap(keycapAt(710, 615, { spaceHeld: true }));
     const moved = previewCorner(entity.id, 2);
     expect(moved.x - frozen.x).toBeCloseTo(13.6, 0);
     expect(moved.y - frozen.y).toBeCloseTo(10.2, 0);
@@ -1900,15 +1838,16 @@ describe('corner scaling', () => {
     api.press('cancel');
   });
 
-  it('switches from a pinch to a mouse drag without losing the locked corner', () => {
+  it('switches from a Space grab to a mouse drag without losing the locked corner', () => {
     const entity = addBox();
-    setHand(v2(500, 400));
+    setKeycap(v2(500, 400));
     api.press('toggleGrid');
     api.press('scale');
-    emitHands(handAt(500, 400, { pinching: true }));
-    emitHands(handAt(700, 550, { pinching: true }));
+    emitKeycap(keycapAt(500, 400, { spaceHeld: true }));
+    emitKeycap(keycapAt(700, 550, { spaceHeld: true }));
     const frozen = previewCorner(entity.id, 2);
-    emitEmptyHands();
+    emitEmptyKeycaps();
+    api.hold('draw', false);
     h.mouse.onMove?.(v2(700, 600));
     expect(previewCorner(entity.id, 2)).toEqual(frozen);
     h.mouse.onHold?.('draw', true);
@@ -1921,21 +1860,21 @@ describe('corner scaling', () => {
 
   it('keeps a hard release requirement through a soft navigation pause', () => {
     const entity = addBox();
-    setHand(v2(500, 400));
+    setKeycap(v2(500, 400));
     api.press('toggleGrid');
     api.press('scale');
-    emitHands(handAt(500, 400, { pinching: true }));
-    emitHands(handAt(700, 550, { pinching: true }));
+    emitKeycap(keycapAt(500, 400, { spaceHeld: true }));
+    emitKeycap(keycapAt(700, 550, { spaceHeld: true }));
     const frozen = previewCorner(entity.id, 2);
-    emitEmptyHands();
+    emitEmptyKeycaps();
     api.hold('orbit', true);
-    emitHands(handAt(700, 600, { pinching: true }));
+    emitKeycap(keycapAt(700, 600, { spaceHeld: true }));
     api.hold('orbit', false);
-    emitHands(handAt(710, 600, { pinching: true }));
+    emitKeycap(keycapAt(710, 600, { spaceHeld: true }));
     expect(previewCorner(entity.id, 2)).toEqual(frozen);
-    emitHands(handAt(710, 600));
-    emitHands(handAt(710, 600, { pinching: true }));
-    emitHands(handAt(720, 615, { pinching: true }));
+    emitKeycap(keycapAt(710, 600, { spaceHeld: false }));
+    emitKeycap(keycapAt(710, 600, { spaceHeld: true }));
+    emitKeycap(keycapAt(720, 615, { spaceHeld: true }));
     expect(previewCorner(entity.id, 2).x).toBeGreaterThan(frozen.x);
     api.press('cancel');
   });
@@ -2009,18 +1948,6 @@ describe('corner scaling', () => {
     api.setCursor(v2(720, 580));
     api.hold('draw', false);
     expect(previewCorner(entity.id, 2).x).toBeCloseTo(713.6, 6);
-    api.press('cancel');
-  });
-
-  it('keeps automatic palm navigation disabled while scaling', () => {
-    api.press('toggleNavAssist');
-    addBox();
-    setHand(v2(500, 400));
-    api.press('scale');
-    emitHands(handAt(400, 300, { open: true, openArmed: true }, { mode: 'two', pan: [40, 30], zoom: 1.3, rotation: 0 }));
-    expect(h.orbit.orbit).not.toHaveBeenCalled();
-    expect(h.orbit.pan).not.toHaveBeenCalled();
-    expect(h.orbit.zoom).not.toHaveBeenCalled();
     api.press('cancel');
   });
 
@@ -2377,18 +2304,18 @@ describe('triangle and prism workflows', () => {
   it.each([
     { kind: 'triangle', input: 'mouse', finish: 'confirm' },
     { kind: 'triangle', input: 'mouse', finish: 'cancel' },
-    { kind: 'triangle', input: 'pinch', finish: 'confirm' },
-    { kind: 'triangle', input: 'pinch', finish: 'cancel' },
+    { kind: 'triangle', input: 'Space grab', finish: 'confirm' },
+    { kind: 'triangle', input: 'Space grab', finish: 'cancel' },
     { kind: 'prism', input: 'mouse', finish: 'confirm' },
     { kind: 'prism', input: 'mouse', finish: 'cancel' },
-    { kind: 'prism', input: 'pinch', finish: 'confirm' },
-    { kind: 'prism', input: 'pinch', finish: 'cancel' },
+    { kind: 'prism', input: 'Space grab', finish: 'confirm' },
+    { kind: 'prism', input: 'Space grab', finish: 'cancel' },
   ] as const)('moves a $kind via $input with $finish', ({ kind, input, finish }) => {
     const entity = addShape(kind);
     api.press('toggleGrid');
     const serialized = api.sketch.serialize();
     if (input === 'mouse') api.setCursor(v2(50, 50));
-    else setHand(v2(50, 50));
+    else setKeycap(v2(50, 50));
     api.press('select');
     api.press('move');
     const grip = (point: Vec2, down: boolean): void => {
@@ -2396,7 +2323,7 @@ describe('triangle and prism workflows', () => {
         api.hold('draw', down);
         api.setCursor(point);
       } else {
-        emitHands(handAt(point.x, point.y, { pinching: down }));
+        emitKeycap(keycapAt(point.x, point.y, { spaceHeld: down }));
       }
     };
     grip(v2(50, 50), true);
@@ -2452,7 +2379,7 @@ describe('triangle and prism workflows', () => {
     expect(h.measure.isOpen).toBe(true);
   });
 
-  it('commits a jittered triangle after One-Euro-smoothed hand samples', () => {
+  it('commits a jittered triangle after One-Euro-smoothed keycap samples', () => {
     const points = triangleStroke([v2(0, 0), v2(1000, 0), v2(350, 800)], { pointsPerSide: 12, jitter: 40 });
     const scale = 0.6;
     const ox = 80;
@@ -2468,12 +2395,12 @@ describe('triangle and prism workflows', () => {
       runFrame();
       const screenFor = (point: Vec2): Vec2 => v2(ox + point.x * scale, oy + point.y * scale);
       const first = screenFor(points[0]);
-      emitHands(handAt(first.x, first.y));
+      emitKeycap(keycapAt(first.x, first.y));
       api.hold('draw', true);
       for (const point of points.slice(1)) {
         h.nowMs += 33;
         const screen = screenFor(point);
-        emitHands(handAt(screen.x, screen.y));
+        emitKeycap(keycapAt(screen.x, screen.y));
       }
       api.hold('draw', false);
     } finally {

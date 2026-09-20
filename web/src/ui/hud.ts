@@ -27,7 +27,6 @@ export interface HudState {
   calibrationSamples?: number;
   calibrationGoal?: number;
   projection: 'Persp' | 'Ortho';
-  navAssist: boolean;
   edgeOn: boolean;
   entityCount: number;
   selected: string | null;
@@ -38,6 +37,8 @@ export interface HudState {
   voice?: string | null;
   /** Read-only presentation view: quiet copy, real tracking health only. */
   presentation?: boolean;
+  /** Pen remote mode label, or null until a remote button has been seen. */
+  remoteMode?: string | null;
 }
 
 export interface KeyHint {
@@ -80,8 +81,8 @@ const INSTRUCTIONS: Record<Mode, string> = {
   READY: 'Ready — left-drag to draw, click to select',
   DRAWING: 'Drawing — release to commit',
   EXTRUDING: 'Push/Pull — drag or hold Space to pull',
-  MOVING: 'Move — pinch or drag on the work plane · Enter / M applies',
-  SCALING: 'Scale — pinch or drag a corner · Enter / R applies',
+  MOVING: 'Move — hold Space or drag on the work plane · Enter / M applies',
+  SCALING: 'Scale — hold Space or drag a corner · Enter / R applies',
   ORBIT: 'Orbiting — release to stop',
   PAN: 'Panning — release to stop',
 };
@@ -94,13 +95,13 @@ function instructionFor(state: HudState): string {
     return `Selected ${state.selected} — L size · Q push/pull · Del delete`;
   }
   if (state.mode === 'READY') {
-    return state.tracking === 'hand'
-      ? 'Ready — hold Space to draw, pinch to select'
+    return state.tracking === 'keycap'
+      ? 'Ready — hold Space to draw, S to select'
       : 'Ready — left-drag to draw, click to select';
   }
   if (state.mode === 'EXTRUDING') {
-    return state.tracking === 'hand'
-      ? 'Push/Pull — pinch and move to pull'
+    return state.tracking === 'keycap'
+      ? 'Push/Pull — hold Space and move to pull'
       : 'Push/Pull — drag or hold Space to pull';
   }
   return INSTRUCTIONS[state.mode];
@@ -195,6 +196,7 @@ export class Hud {
           ...(!compact ? [`Snap: ${snapText}`] : []),
           `${state.plane.label} · ${state.planeMode}${state.planeReason ? ` (${state.planeReason})` : ''}`,
           state.gridEnabled ? `Grid ${formatGridStep(state.gridStep)}` : 'Grid snap off',
+          ...(state.remoteMode ? [`Pen: ${state.remoteMode}`] : []),
           tracking.text,
         ].join('  ·  ');
     if (right !== this.lastRight && now - this.lastRightAt >= 100) {
@@ -231,33 +233,31 @@ export class Hud {
     }
     if (state.extrusion) {
       if (state.tracking === 'lost') {
-        return 'Tracking lost — show your hand to resume pulling.';
+        return 'Tracking lost — show the green keycap, release Space, then hold it again to resume pulling.';
       }
       if (state.mode === 'ORBIT' || state.mode === 'PAN') {
         return 'Push/Pull paused while you move the view — release to continue.';
       }
-      return state.tracking === 'hand'
-        ? 'Push/Pull — pinch the highlighted face · Enter applies · Esc cancels'
-        : 'Push/Pull — drag the highlighted face · Enter applies · Esc cancels';
+      return 'Push/Pull — drag the highlighted face · Enter applies · Esc cancels';
     }
     if (state.edgeOn) {
       return `Work plane ${state.plane.label} is edge-on. Press A for auto, Tab or 1 / 2 / 3, or orbit with Shift.`;
     }
     if (state.mode === 'SCALING') {
       return state.tracking === 'lost'
-        ? 'Tracking lost — scaling paused. Show your hand, release the pinch, then pinch again to continue.'
-        : 'Pinch or drag a corner to scale proportionally. The opposite corner stays fixed. Enter / R applies · Esc cancels.';
+        ? 'Tracking lost — scaling paused. Show the green keycap, release Space, then hold it again to continue.'
+        : 'Hold Space and move the keycap, or drag a corner to scale proportionally. The opposite corner stays fixed. Enter / R applies · Esc cancels.';
     }
     if (state.mode === 'MOVING') {
       return state.tracking === 'lost'
-        ? 'Tracking lost — move paused. Show your hand, release the pinch, then pinch again to continue.'
-        : 'Pinch or left-drag (or hold Space) to move on the work plane. Tab changes plane. Enter / M applies · Esc cancels.';
+        ? 'Tracking lost — move paused. Show the green keycap, release Space, then hold it again to continue.'
+        : 'Hold Space or left-drag to move on the work plane. Tab changes plane. Enter / M applies · Esc cancels.';
     }
     if (state.inputSource === 'oak' && state.spatialState === 'origin') {
-      return 'Depth camera needs an origin — press O and hold the tracked tip still.';
+      return 'Depth camera needs an origin — press O and hold the keycap center still.';
     }
     if (state.tracking === 'lost' && state.inputSource !== 'oak') {
-      return 'Tracking paused — show your hand to resume, or keep using the mouse.';
+      return 'Tracking paused — show the green keycap to resume, or keep using the mouse.';
     }
     return '';
   }
