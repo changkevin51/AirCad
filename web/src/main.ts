@@ -10,6 +10,7 @@ import {
   type PressAction,
 } from './input/keymap';
 import { MouseSource } from './input/mouse-source';
+import { remoteButtonForCode, remoteCodeForButton, RemoteSource, type RemoteButton, type RemoteMode } from './input/remote';
 import { CALIBRATION_MIN_SAMPLES, SCALE_PRESETS, SpatialCursorSource, type ScalePreset } from './input/spatial-cursor';
 import {
   ClockSync,
@@ -18,8 +19,7 @@ import {
   TrackerClient,
   type CameraState,
   type ConnectionState,
-  type HandsMessage,
-  type NavMessage,
+  type KeycapMessage,
   type SpatialMessage,
   type TrackerConfigJson,
   type TrackerSource,
@@ -119,6 +119,8 @@ import { VoiceControl } from './voice/control';
 
 const SNAP_TOLERANCE_PX = DEFAULT_SNAP_TOLERANCE_PX;
 const MIN_STROKE_PX = 6;
+/** Hold-source key for the grab the remote takes while button 4 moves a shape. */
+const REMOTE_MOVE_GRAB = 'remote:move';
 const WORKSPACE_CUBE_MM = 400;
 const DEPTH_SCALE_STORAGE_KEY = 'aircad.depthScale';
 const DEFAULT_DEPTH_SCALE = 10;
@@ -147,7 +149,6 @@ const isSpatialObjectSnap = (snap: SpatialSnapResult): boolean =>
   snap.type === 'vertex' || snap.type === 'midpoint' || snap.type === 'edge';
 /** Smallest on-screen grid cell before the grid coarsens to the next step (1 / 10 / 100 / 1000 mm). */
 const GRID_MIN_PX = 8;
-const PALM_ORBIT_GAIN = 1.0;
 const LOCK_AXES: Partial<Record<HoldAction, Axis>> = { lockX: 'x', lockY: 'y', lockZ: 'z' };
 const PLANE_FOR_VIEW: Record<Exclude<ViewPreset, 'iso'>, PlaneKind> = { top: 'XY', front: 'XZ', right: 'YZ' };
 const BLOCKED_WHILE_DRAWING = new Set<PressAction>([
@@ -245,6 +246,10 @@ class App {
   private readonly spatial: SpatialCursorSource;
   private readonly inference = new PlaneInference();
   private readonly voice: VoiceControl;
+  private readonly remote: RemoteSource;
+  /** The pen remote stays invisible in the UI until one of its buttons arrives. */
+  private remoteSeen = false;
+  private remoteLastCode: string | null = null;
 
   private plane = new WorkPlane('XY');
   private planeMode: PlaneMode = 'auto';
@@ -253,14 +258,13 @@ class App {
   private readonly holdSources = new Map<string, HoldAction>();
   private navMode: 'orbit' | 'pan' | null = null;
   private orbitGesture = false;
-  private palmNavMode: 'one' | 'two' | null = null;
   private stroke: StrokeSession | null = null;
   private depthBuffer: DepthStrokeBuffer | null = null;
   private spatialPreview: SpatialSnapResult | null = null;
   private trackerConfig: TrackerConfigJson = {
     source: 'webcam',
     cameraIndex: 0,
-    target: 'finger',
+    target: 'keycap',
     colorPreset: 'green',
     colorTolerance: 1,
   };
@@ -280,15 +284,15 @@ class App {
   } | null = null;
   private sketchRevision = 0;
   private cameraRevision = 0;
-  private cursorSourceTag: 'hand' | 'mouse' | null = null;
-  private lastHandId: number | null = null;
+  private cursorSourceTag: 'keycap' | 'mouse' | null = null;
+  private lastKeycapId: number | null = null;
   private previousCursor: Vec2 | null = null;
   private extrusion: ExtrusionSession | null = null;
   private movement: MoveSession | null = null;
   private scaling: ScaleSession | null = null;
   private selectedId: string | null = null;
-  private lastPinching = false;
-  private lastHandMessageAt = 0;
+  private lastKeycapMessageAt = 0;
+  private panelTracking: CursorSource['tracking'] = 'none';
   private focused = true;
   private planeBeforeStroke: WorkPlane | null = null;
   private hover: Entity | null = null;
@@ -296,7 +300,6 @@ class App {
   private gridEnabled = true;
   private depthGridEnabled = false;
   private gridStep = 100;
-  private navAssist = false;
   private connection: ConnectionState = 'closed';
   private cameraState: CameraState | null = null;
   private reportedCameraError = false;
@@ -350,7 +353,6 @@ class App {
       onRecenter: () => this.beginCalibration('recenter'),
       onFitWorkspace: () => this.fitWorkspace(),
       onRetry: () => void this.retryTracker(),
-      onToggleNavAssist: () => this.doPress('toggleNavAssist'),
       onTogglePip: () => this.doPress('togglePip'),
       onCancelInteraction: () => this.cancelInteraction(),
       onReleaseFocus: () => this.focusViewport(),
@@ -405,9 +407,42 @@ class App {
       isCurrent: (target) => this.isVoiceOperationCurrent(target),
       execute: (command, target) => this.executeVoiceCommand(command, target),
       notify: (message, error) => {
-        if (error) this.toasts.show(message, 'error');
-        else this.hud.flash(message, 'success', 6000);
+        // A failed attempt must not leave the draft frozen: the rough gesture
+        // takes over again and the normal release commits it.
+        if (error) {
+          this.clearVoiceDraft();
+          this.toasts.show(message, 'error');
+        } else this.hud.flash(message, 'success', 6000);
       },
+    });
+
+    // Every gesture logs what it resolved to, so a button that "does nothing"
+    // can be told apart from a button whose event never arrived.
+    this.remote = new RemoteSource({
+      hold: (action, down) => {
+        console.info('[remote] hold', action, down ? 'down' : 'up');
+        this.setHold(action, down, `remote:${action}`);
+      },
+      press: (action) => {
+        console.info('[remote] press', action);
+        this.doPress(action);
+      },
+      voice: (down) => {
+        console.info('[remote] voice', down ? 'start' : 'finalize');
+        this.setVoiceHold(down);
+      },
+      move: (down) => {
+        console.info('[remote] move', down ? 'start' : 'apply');
+        this.setMoveHold(down);
+      },
+      discardStroke: () => {
+        if (this.stroke) this.cancelStroke(false);
+      },
+      releaseAll: () => {
+        console.info('[remote] release everything');
+        this.releaseAllInput();
+      },
+      modeChanged: (mode) => this.onRemoteModeChanged(mode),
     });
 
     this.sketch.onChange(() => {
@@ -436,7 +471,10 @@ class App {
 
     this.mouse = new MouseSource(viewportElement, {
       onMove: (point) => {
+        if (this.stroke && this.cursor.canRecoverKeycap(performance.now() / 1000)) return;
+        const wasLost = this.cursor.isLost;
         if (this.cursor.updateMouse(point, performance.now() / 1000)) {
+          if (wasLost && this.stroke && !this.voiceCapture) this.endStroke();
           this.noteCursorSource('mouse');
           this.onCursorMoved();
         }
@@ -453,7 +491,7 @@ class App {
     });
 
     this.tracker = new TrackerClient(defaultTrackerUrl(), {
-      onHands: (message) => this.onHands(message),
+      onKeycap: (message) => this.onKeycap(message),
       onThumb: (message) => this.pip.setThumb(message),
       onSpatial: (message) => this.onSpatial(message),
       onStatus: (message) => {
@@ -470,6 +508,7 @@ class App {
       },
       onSessionReset: (streamId, sourceRunId) => {
         this.cancelUnfinished();
+        this.cursor.dropKeycap();
         this.spatial.resetContinuity();
         this.spatial.mapping.invalidateRun(sourceRunId);
         this.spatialSnapper.reset();
@@ -480,8 +519,7 @@ class App {
       onConnection: (state) => {
         this.connection = state;
         if (state !== 'open') {
-          this.cursor.dropHand();
-          this.endPalmNav(false);
+          this.cursor.dropKeycap();
           this.synchronizeNavigation(false);
           if (this.stroke) this.cancelStroke();
           if (this.extrusion) this.cancelExtrusion();
@@ -511,6 +549,8 @@ class App {
     window.addEventListener('keyup', (event) => this.onKeyUp(event));
     window.addEventListener('blur', () => {
       this.focused = false;
+      // A remote button held across a focus change never delivers its keyup.
+      this.remote.reset();
       this.cancelInteraction();
     });
     window.addEventListener('focus', () => {
@@ -519,6 +559,7 @@ class App {
     globalThis.document?.addEventListener?.('visibilitychange', () => {
       if (globalThis.document.hidden) {
         this.focused = false;
+        this.remote.reset();
         this.cancelInteraction();
       }
     });
@@ -572,6 +613,15 @@ class App {
   }
 
   private onKeyDown(event: KeyboardEvent): void {
+    // The remote is handled before the chrome check so a stray click in a panel
+    // cannot leave it dead, and before the keymap so its codes stay private.
+    // onRemoteKey yields to the measure dialog itself.
+    const button = remoteButtonForCode(event.code);
+    if (button !== null) {
+      event.preventDefault();
+      this.onRemoteKey(button, true);
+      return;
+    }
     if (this.measure.isOpen) return;
     const inChrome = this.isChromeTarget(event);
     if (inChrome && !this.presenting) return;
@@ -591,14 +641,95 @@ class App {
       if (!event.repeat) this.setHold(hold, true, event.code);
       return;
     }
-    if (!press) return;
+    if (!press) {
+      // Diagnostic for pairing a new remote: report function keys nothing claims.
+      if (/^F\d+$/.test(event.code) && !event.repeat) this.hud.flash(`Unmapped key ${event.code}`);
+      return;
+    }
     event.preventDefault();
     if (!event.repeat || press === 'zoomIn' || press === 'zoomOut') this.doPress(press);
   }
 
   private onKeyUp(event: KeyboardEvent): void {
+    const button = remoteButtonForCode(event.code);
+    if (button !== null) {
+      event.preventDefault();
+      this.onRemoteKey(button, false);
+      return;
+    }
     const hold = holdActionForCode(event.code);
     if (hold) this.setHold(hold, false, event.code);
+  }
+
+  /**
+   * Pen remote buttons.  A press pulls focus back to the viewport, because the
+   * remote has no way to click the canvas, but the measure dialog keeps input
+   * so a button cannot interrupt typing.
+   */
+  private onRemoteKey(button: RemoteButton, down: boolean): void {
+    this.remoteLastCode = remoteCodeForButton(button);
+    if (this.measure.isOpen) return;
+    this.focused = true;
+    if (!this.remoteSeen) {
+      this.remoteSeen = true;
+      this.hud.flash(`Pen remote connected · ${this.remote.modeLabel} mode`);
+    }
+    if (down) {
+      this.focusViewport();
+      this.remote.down(button, performance.now());
+    } else {
+      this.remote.up(button, performance.now());
+    }
+  }
+
+  private onRemoteModeChanged(mode: RemoteMode): void {
+    const what = mode === 'draw' ? 'draw' : mode === 'orbit' ? 'orbit' : 'pan';
+    this.hud.flash(`Pen mode: ${this.remote.modeLabel} · hold button 1 to ${what}`);
+  }
+
+  /** Hold to talk: the recognizer runs for exactly as long as button 3 is down. */
+  private setVoiceHold(down: boolean): void {
+    if (this.help.visible || this.measure.isOpen) return;
+    if (down) void this.voice.start();
+    else this.voice.stop();
+  }
+
+  /**
+   * Hold to move: the press opens the move and takes the drag grab so the
+   * tracked tip repositions the shape, and the release applies it.  If nothing
+   * can be moved the press reports it and the release has nothing to commit.
+   */
+  private setMoveHold(down: boolean): void {
+    if (down) {
+      this.doPress('move');
+      if (this.movement) this.setHold('draw', true, REMOTE_MOVE_GRAB);
+      return;
+    }
+    this.setHold('draw', false, REMOTE_MOVE_GRAB);
+    if (this.movement) this.doPress('confirm');
+  }
+
+  /**
+   * Buttons 2+3.  Drops every hold, unwinds anything in progress and clears a
+   * pending voice draft, which is otherwise the one state the remote cannot
+   * leave: a failed draft blocks every action except voice and cancel.
+   */
+  private releaseAllInput(): void {
+    this.holdSources.clear();
+    this.held.clear();
+    this.mouse.releaseAll();
+    this.clearVoiceDraft();
+    this.voice.cancel();
+    this.cancelUnfinished();
+    this.synchronizeNavigation(false);
+    this.hud.flash('Released everything');
+  }
+
+  /** Unfreeze a voice draft without touching the geometry it was measuring. */
+  private clearVoiceDraft(): void {
+    if (!this.voiceCapture) return;
+    this.voiceCapture = null;
+    this.sketchRenderer.setLineGuide(null, null);
   }
 
   private setHold(action: HoldAction, down: boolean, source = `api:${action}`): void {
@@ -631,7 +762,6 @@ class App {
 
   private beginHold(action: HoldAction, source = `api:${action}`): void {
     if (action === 'draw') {
-      this.endPalmNav(false);
       if (this.navMode === 'orbit') this.endOrbitGesture(false);
       this.navMode = null;
       this.previousCursor = null;
@@ -702,7 +832,6 @@ class App {
     const changed = desired !== this.navMode || (desired === 'orbit' && !this.orbitGesture);
     if (!changed) return;
     if (this.navMode === 'orbit') this.endOrbitGesture(allowSettle && desired === null);
-    if (desired) this.endPalmNav(false);
     this.navMode = desired;
     this.previousCursor = null;
     if (desired === 'orbit' && !this.orbitGesture) {
@@ -721,14 +850,6 @@ class App {
       this.orbit.endOrbit(settle, this.nowMs);
       this.orbitGesture = false;
     }
-  }
-
-  private endPalmNav(settle: boolean): void {
-    if (this.palmNavMode === 'one' && this.orbitGesture) {
-      this.orbit.endOrbit(settle, this.nowMs);
-      this.orbitGesture = false;
-    }
-    this.palmNavMode = null;
   }
 
   private voiceReady(): boolean {
@@ -807,8 +928,8 @@ class App {
 
   private get cursorSource(): string | null {
     if (this.cursor.isLost) return null;
-    const hand = this.cursor.hand;
-    return hand ? `hand:${hand.id}` : this.cursor.tracking === 'mouse' ? 'mouse' : null;
+    const keycap = this.cursor.keycap;
+    return keycap ? `keycap:${keycap.id}` : this.cursor.tracking === 'mouse' ? 'mouse' : null;
   }
 
   private get navigationMode(): 'ORBIT' | 'PAN' | null {
@@ -825,13 +946,12 @@ class App {
     return 'READY';
   }
 
-  private noteCursorSource(tag: 'hand' | 'mouse'): void {
-    const handChanged = tag === 'hand' && (this.cursorSourceTag !== 'hand' || this.cursor.handId !== this.lastHandId);
+  private noteCursorSource(tag: 'keycap' | 'mouse'): void {
+    const keycapChanged = tag === 'keycap' && (this.cursorSourceTag !== 'keycap' || this.cursor.keycapId !== this.lastKeycapId);
     const mouseTakeover = tag === 'mouse' && this.cursorSourceTag !== 'mouse';
     this.cursorSourceTag = tag;
-    this.lastHandId = this.cursor.handId;
-    if (handChanged || mouseTakeover) {
-      this.endPalmNav(false);
+    this.lastKeycapId = this.cursor.keycapId;
+    if (keycapChanged || mouseTakeover) {
       this.endOrbitGesture(false);
       this.navMode = null;
       this.previousCursor = null;
@@ -839,66 +959,32 @@ class App {
     }
   }
 
-  private onHands(message: HandsMessage): void {
+  private onKeycap(message: KeycapMessage): void {
     const now = performance.now() / 1000;
-    this.lastHandMessageAt = now;
-    const trackingBefore = this.cursor.tracking;
-    this.cursor.updateHands(message, { w: this.viewport.width, h: this.viewport.height }, now);
-    // Tracking transitions are rare; keep the Input tab's status line honest.
-    if (this.cursor.tracking !== trackingBefore) this.refreshPanel();
-    const hasHand = this.cursor.tracking === 'hand' && !!this.cursor.hand;
-    if (hasHand) {
-      this.noteCursorSource('hand');
+    this.lastKeycapMessageAt = now;
+    const nextId = message.keycaps[0]?.id;
+    // The latest-frame broadcaster may skip the loss frame. A new identity
+    // still ends the old stroke before its cursor is moved to the new target.
+    const brokenRecovery = this.cursor.isLost && !this.cursor.continuesKeycap(message, now);
+    if (nextId !== undefined && this.stroke && !this.voiceCapture &&
+        (brokenRecovery || (this.cursor.keycapId !== null && nextId !== this.cursor.keycapId))) {
+      this.endStroke();
+    }
+    this.cursor.updateKeycap(message, { w: this.viewport.width, h: this.viewport.height }, now);
+    if (this.trackingFeedback !== this.panelTracking) this.refreshPanel();
+    const hasKeycap = this.cursor.tracking === 'keycap' && !!this.cursor.keycap;
+    if (hasKeycap) {
+      this.noteCursorSource('keycap');
       this.onCursorMoved();
     } else if (this.cursor.isLost) {
+      if (this.stroke && !this.voiceCapture && !this.cursor.canRecoverKeycap(now)) this.endStroke();
       this.synchronizeNavigation(false);
       this.extrusion?.pause();
       this.pauseMove();
       this.pauseScale();
+      this.previousCursor = null;
     }
-    const pinching = this.cursor.hand?.pinching ?? false;
-    if (this.focused && this.cursor.hand && pinching && !this.lastPinching && this.mode === 'READY' && !this.measure.isOpen && !this.help.visible && !this.presenting && !this.fileBusy) {
-      this.selectAtCursor();
-    }
-    if (this.cursor.hand) this.lastPinching = pinching;
-    this.pip.setHands(message, this.cursor.handId);
-    const navAllowed =
-      this.navAssist &&
-      hasHand &&
-      this.focused &&
-      !this.held.has('draw') &&
-      !this.held.has('orbit') &&
-      !this.held.has('pan') &&
-      !this.isDrawing() &&
-      !this.extrusion &&
-      !this.movement &&
-      !this.scaling &&
-      !pinching &&
-      !this.help.visible &&
-      !this.measure.isOpen;
-    if (navAllowed && message.nav) this.applyPalmNav(message.nav, message.frame);
-    else if (this.palmNavMode) this.endPalmNav(navAllowed && !message.nav && this.palmNavMode === 'one');
-  }
-
-  private applyPalmNav(nav: NavMessage, frame: { w: number; h: number }): void {
-    if (this.navMode || this.help.visible || this.measure.isOpen) return;
-    const scale = this.viewport.width / Math.max(1, frame.w);
-    const dx = nav.pan[0] * scale;
-    const dy = nav.pan[1] * scale;
-    if (nav.mode === 'one') {
-      if (this.palmNavMode !== 'one') {
-        this.endPalmNav(false);
-        this.orbit.beginOrbit(this.sketch.center());
-        this.orbitGesture = true;
-        this.palmNavMode = 'one';
-      }
-      this.orbit.orbit(dx * PALM_ORBIT_GAIN, dy * PALM_ORBIT_GAIN, this.sketch.center());
-    } else {
-      if (this.palmNavMode === 'one') this.endPalmNav(false);
-      this.palmNavMode = 'two';
-      this.orbit.pan(dx, dy);
-      if (nav.zoom !== 1) this.orbit.zoom(nav.zoom);
-    }
+    this.pip.setKeycap(message, this.cursor.keycapId);
   }
 
   // ---------------------------------------------------------------- actions
@@ -1032,16 +1118,6 @@ class App {
           this.sampleStroke();
           this.hud.flash(`Grid snap ${this.gridEnabled ? 'on' : 'off'}`);
         }
-        break;
-      case 'toggleNavAssist':
-        if (this.isDepthSource()) {
-          this.toasts.show('Palm navigation is not available with the depth camera');
-          break;
-        }
-        this.navAssist = !this.navAssist;
-        if (!this.navAssist) this.endPalmNav(false);
-        this.hud.flash(`Palm navigation ${this.navAssist ? 'on: one open palm orbits, two palms pan/zoom' : 'off'}`);
-        this.publishUi();
         break;
       case 'setOrigin':
         this.beginCalibration('origin');
@@ -1381,7 +1457,6 @@ class App {
       ortho: this.viewport.ortho,
       inputLabel: this.inputLabel(),
       pipVisible: this.pip.visible,
-      navAssist: this.navAssist,
       browserVisible: layout.browserVisible,
       inspectorVisible: layout.inspectorVisible,
       inspectorTab: layout.inspectorTab,
@@ -1446,7 +1521,6 @@ class App {
       snapshot.inspectorVisible,
       snapshot.inspectorTab,
       snapshot.pipVisible,
-      snapshot.navAssist,
       snapshot.displayStyle,
       snapshot.presenting,
       snapshot.sessionBlockReason,
@@ -1628,7 +1702,7 @@ class App {
     }
     const entity = this.selected ?? this.entityAtCursor();
     if (!entity) {
-      this.toasts.show('Select a shape with a click, pinch, or S, then press M to move it', 'error');
+      this.toasts.show('Select a shape with a click or S, then press M to move it', 'error');
       return;
     }
     this.selectEntity(entity);
@@ -1637,7 +1711,7 @@ class App {
     this.sketchRenderer.setHover(null);
     this.renderMove();
     this.updateMove();
-    this.toasts.show(`Moving on ${this.plane.label} · pinch or drag to reposition · Enter / M applies · Esc cancels`, 'info', 6000);
+    this.toasts.show(`Moving on ${this.plane.label} · hold Space or drag to reposition · Enter / M applies · Esc cancels`, 'info', 6000);
   }
 
   private pauseMove(requireRelease = true): void {
@@ -1669,7 +1743,7 @@ class App {
     }
     if (session.source !== null && session.source !== source) this.pauseMove();
     session.source = source;
-    const gripping = this.held.has('draw') || !!this.cursor.hand?.pinching;
+    const gripping = this.held.has('draw');
     if (!gripping) {
       session.grab = null;
       session.needsRelease = false;
@@ -1737,7 +1811,7 @@ class App {
     }
     const entity = this.selected ?? this.entityAtCursor();
     if (!entity) {
-      this.toasts.show('Select a shape with a click, pinch, or S, then press R to scale it', 'error');
+      this.toasts.show('Select a shape with a click or S, then press R to scale it', 'error');
       return;
     }
     this.selectEntity(entity);
@@ -1746,7 +1820,7 @@ class App {
     this.sketchRenderer.setHover(null);
     this.renderScale();
     this.updateScale();
-    this.toasts.show('Pinch or drag a corner to scale · opposite corner stays fixed · Enter / R applies · Esc cancels', 'info', 6000);
+    this.toasts.show('Hold Space and move the keycap, or drag a corner to scale · opposite corner stays fixed · Enter / R applies · Esc cancels', 'info', 6000);
   }
 
   private pauseScale(requireRelease = true): void {
@@ -1782,7 +1856,7 @@ class App {
     }
     if (session.source !== null && session.source !== source) this.pauseScale();
     session.source = source;
-    const gripping = this.held.has('draw') || !!this.cursor.hand?.pinching;
+    const gripping = this.held.has('draw');
     if (!gripping) {
       session.grab = null;
       session.needsRelease = false;
@@ -1873,7 +1947,7 @@ class App {
     const selected = this.selected ?? this.entityAtCursor();
     const target = selected ? this.sketch.getProfile(selected.id) : null;
     if (!target) {
-      this.toasts.show('Select a closed planar outline: point inside it and pinch, click, or press S.', 'error', 5000);
+      this.toasts.show('Select a closed planar outline: point inside it and click or press S.', 'error', 5000);
       return;
     }
     if (!isExtrudableProfile(target.corners)) {
@@ -1919,9 +1993,8 @@ class App {
       return;
     }
     const projector = this.viewport.projector();
-    const hand = this.cursor.hand;
     const source = this.cursorSource;
-    const gripping = this.held.has('draw') || !!hand?.pinching;
+    const gripping = this.held.has('draw');
     const before = { preview: session.preview, faceIndex: session.faceIndex };
     if (!session.dragging && !gripping && this.cursor.position && source) {
       const hovered = pickProfileFace(session.currentFaces(), this.cursor.position, projector);
@@ -1947,7 +2020,7 @@ class App {
     const session = this.extrusion;
     if (!session) return;
     if (Math.abs(session.depth) < 1e-6) {
-      this.toasts.show('Set a non-zero depth: pinch and move up/down, or press L to type one.', 'error');
+      this.toasts.show('Set a non-zero depth: hold Space and move up/down, or press L to type one.', 'error');
       return;
     }
     const preview = session.preview;
@@ -2050,7 +2123,7 @@ class App {
         return;
       }
       this.spatial.calibration.cancel();
-      this.toasts.show('Origin capture timed out. Keep the tracked tip still and try again.', 'error');
+      this.toasts.show('Origin capture timed out. Keep the keycap center still and try again.', 'error');
     }
     if (this.mode === 'ORBIT' || this.mode === 'PAN') this.applyNavigationDelta(this.cursor.position ?? { x: 0, y: 0 });
     if (this.stroke) this.samplePlanarDepthStroke();
@@ -2338,7 +2411,7 @@ class App {
     void this.tracker.syncClock?.();
     this.spatial.calibration.start(this.nowMs || performance.now());
     this.focusViewport();
-    this.hud.flash(kind === 'origin' ? 'Hold the tracked tip still to set the origin…' : 'Hold still to recenter…');
+    this.hud.flash(kind === 'origin' ? 'Hold the keycap center still to set the origin…' : 'Hold still to recenter…');
     (this as { calibrationKind?: 'origin' | 'recenter' }).calibrationKind = kind;
     this.refreshPanel();
   }
@@ -2427,8 +2500,19 @@ class App {
     this.refreshPanel();
   }
 
+  private get trackingFeedback(): CursorSource['tracking'] {
+    if (this.stroke && this.cursor.canRecoverKeycap(performance.now() / 1000)) return 'keycap';
+    // Active edits need immediate recovery instructions; idle camera noise
+    // should not flash a viewport warning on every missed frame.
+    if (this.stroke || this.extrusion || this.movement || this.scaling || this.held.has('draw')) {
+      return this.cursor.tracking;
+    }
+    return this.cursor.statusTracking(performance.now() / 1000);
+  }
+
   private refreshPanel(): void {
     const now = this.nowMs || performance.now();
+    this.panelTracking = this.trackingFeedback;
     this.pip.setSource(this.trackerConfig.source);
     this.panel.update({
       source: this.trackerConfig.source,
@@ -2441,7 +2525,7 @@ class App {
       connection: this.connection,
       camera: this.cameraState,
       cameraMessage: this.tracker?.lastStatus?.message ?? null,
-      tracking: this.cursor.tracking,
+      tracking: this.panelTracking,
       spatialState: this.isDepthSource() ? this.spatial.hudState(now) : null,
       spatialReason: this.spatial.reason,
       collecting: this.spatial.calibration.phase === 'collecting',
@@ -2449,7 +2533,6 @@ class App {
       calibrationGoal: CALIBRATION_MIN_SAMPLES,
       streamId: this.tracker?.lastSnapshot?.streamId ?? this.spatial.streamId,
       trackingAgeMs: this.spatial.last?.ageMs ?? null,
-      navAssist: this.navAssist,
       pipVisible: this.pip.visible,
       applying: this.applyingTracker,
     });
@@ -2524,8 +2607,7 @@ class App {
       this.help.visible ||
       this.measure.isOpen ||
       this.cursor.isLost ||
-      !this.cursor.position ||
-      this.palmNavMode
+      !this.cursor.position
     ) {
       return;
     }
@@ -2576,7 +2658,7 @@ class App {
   }
 
   /**
-   * React to a cursor update (hand frame or mouse move) immediately, so pen
+   * React to a cursor update (keycap frame or mouse move) immediately, so pen
    * deltas and stroke sampling do not depend on the render frame rate.
    */
   private onCursorMoved(): void {
@@ -2763,7 +2845,8 @@ class App {
     }
   }
 
-  private cancelStroke(): void {
+  /** `announce` is off for a remote tap, where the discarded stroke is an implementation detail. */
+  private cancelStroke(announce = true): void {
     this.voiceCapture = null;
     this.voice.cancel();
     this.stroke = null;
@@ -2775,7 +2858,7 @@ class App {
     this.sketchRenderer.setEdgeGuide(null);
     this.sketchRenderer.setInk(null);
     this.sketchRenderer.setLineGuide(null, null);
-    this.hud.flash('Stroke cancelled');
+    if (announce) this.hud.flash('Stroke cancelled');
     this.synchronizeNavigation(false);
   }
 
@@ -2808,7 +2891,6 @@ class App {
     this.previousCursor = null;
     this.endOrbitGesture(false);
     this.orbit.cancelTransition(false);
-    this.endPalmNav(false);
     this.inference.reset();
   }
 
@@ -2883,15 +2965,23 @@ class App {
   private frame(time: number): void {
     requestAnimationFrame((next) => this.frame(next));
     this.nowMs = time;
+    // Resolves the remote's hold thresholds and expires its tap window.  Read
+    // from the same clock its key stamps use, not the frame timestamp.
+    this.remote.tick(performance.now());
     this.orbit.update(time);
-    if (this.cursor.tracking === 'hand' && performance.now() / 1000 - this.lastHandMessageAt > 0.6) {
-      this.cursor.dropHand();
+    if (this.cursor.isLost && this.stroke && !this.voiceCapture && !this.cursor.canRecoverKeycap(performance.now() / 1000)) {
+      this.endStroke();
+    }
+    if (this.cursor.tracking === 'keycap' && performance.now() / 1000 - this.lastKeycapMessageAt > 0.6) {
+      this.cursor.dropKeycap();
+      if (this.stroke && !this.voiceCapture) this.endStroke();
       this.extrusion?.pause();
       this.pauseMove();
       this.pauseScale();
       this.previousCursor = null;
     }
     const cursorPx = this.voiceCapture ? this.voiceCapture.cursor : this.cursor.position;
+    if (this.trackingFeedback !== this.panelTracking) this.refreshPanel();
     const projector = this.viewport.projector();
     const viewDirection = this.viewport.viewDirection();
     const mode = this.mode;
@@ -2969,7 +3059,7 @@ class App {
       snapAxis: this.isDepthSource() ? this.spatialPreview?.axis ?? null : snap?.axis ?? null,
       gridStep: this.isDepthSource() ? this.spatial.mapping.scale * 5 : this.gridStep,
       gridEnabled: this.isDepthSource() ? this.depthGridEnabled : this.gridEnabled,
-      tracking: this.cursor.tracking,
+      tracking: this.trackingFeedback,
       connection: this.connection,
       camera: this.cameraState,
       cameraMessage: this.tracker?.lastStatus?.message ?? null,
@@ -2980,7 +3070,6 @@ class App {
       calibrationSamples: this.spatial.calibration.samples.length,
       calibrationGoal: CALIBRATION_MIN_SAMPLES,
       projection: this.viewport.ortho ? 'Ortho' : 'Persp',
-      navAssist: this.navAssist,
       edgeOn: displayedPlane.isEdgeOn(viewDirection),
       entityCount: this.sketch.size,
       selected: this.scaling ? describeEntity(this.scaling.preview) : this.selected ? describeEntity(this.selected) : null,
@@ -2988,6 +3077,7 @@ class App {
       dialogOpen: this.measure.isOpen || this.help.visible,
       voice: this.voiceCapture?.target.description ?? null,
       presentation: this.presenting,
+      remoteMode: this.remoteSeen ? this.remote.modeLabel : null,
     });
     this.hud.setKeys(this.keyHints(mode));
     this.publishUiIfChanged();
@@ -3030,14 +3120,14 @@ class App {
     switch (mode) {
       case 'EXTRUDING':
         return [
-          { key: this.cursor.hand ? 'Pinch' : 'Drag / Space', label: 'pull face' },
+          { key: this.cursor.keycap ? 'Space' : 'Drag / Space', label: 'pull face' },
           { key: 'Enter / Q', label: 'apply' },
           { key: key('voice'), label: 'voice distance' },
           { key: key('cancel'), label: 'cancel' },
         ];
       case 'MOVING':
         return [
-          { key: this.cursor.hand ? 'Pinch' : 'Drag / Space', label: 'move shape' },
+          { key: this.cursor.keycap ? 'Space' : 'Drag / Space', label: 'move shape' },
           { key: key('cyclePlane'), label: 'move plane' },
           { key: key('toggleGrid'), label: 'grid snap' },
           { key: key('orbit'), label: 'orbit' },
@@ -3047,7 +3137,7 @@ class App {
         ];
       case 'SCALING':
         return [
-          { key: this.cursor.hand ? 'Pinch' : 'Drag / Space', label: this.scaling?.handle ? 'scale shape' : 'lock corner & scale' },
+          { key: this.cursor.keycap ? 'Space' : 'Drag / Space', label: this.scaling?.handle ? 'scale shape' : 'lock corner & scale' },
           { key: key('toggleGrid'), label: 'grid snap' },
           { key: key('orbit'), label: 'orbit' },
           { key: key('pan'), label: 'pan' },
@@ -3112,6 +3202,15 @@ class App {
       mappingScale: () => this.spatial.mapping.scale,
       pushSpatial: (message) => this.onSpatial(message),
       selected: () => this.selected,
+      remote: () => ({
+        seen: this.remoteSeen,
+        mode: this.remote.mode,
+        lastCode: this.remoteLastCode,
+        gesturing: this.remote.gesturing,
+        voiceHeld: this.remote.voiceHeld,
+        moveHeld: this.remote.moveHeld,
+      }),
+      remoteButton: (button, down) => this.onRemoteKey(button, down),
       extrusion: () => this.extrusion ? {
         depth: this.extrusion.depth,
         dragging: this.extrusion.dragging,
@@ -3135,6 +3234,17 @@ export interface AirCadApi {
   setCursor(point: Vec2): void;
   /** Reason and plane points of the most recent pen-up, for diagnostics. */
   lastRecognition(): { reason: string; points: Vec2[]; screenExtent: number } | null;
+  /** Pen remote state; `lastCode` confirms which key the firmware actually sent. */
+  remote(): {
+    seen: boolean;
+    mode: RemoteMode;
+    lastCode: string | null;
+    gesturing: boolean;
+    voiceHeld: boolean;
+    moveHeld: boolean;
+  };
+  /** Drive a remote button without hardware, for tests and demos. */
+  remoteButton(button: RemoteButton, down: boolean): void;
   setDrawingSpace(space: string): void;
   setTrackerSource(source: TrackerSource): void;
   setSpatialOrigin(cameraMm: Vec3): void;

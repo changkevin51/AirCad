@@ -38,8 +38,6 @@ Z_MEDIAN_LEN = 3
 LED_MIN_AREA = 12.0
 LED_BGR_MIN, LED_BGR_MARGIN = 160, 40
 
-INDEX_TIP, INDEX_DIP, INDEX_PIP = 8, 7, 6
-FINGER_INWARD_T = 0.4
 ASSOC_GATE_PX = 70.0
 ASSOC_AMBIGUITY_PX = 10.0
 ASSOC_FORGET_MS = 300.0
@@ -79,17 +77,6 @@ def validate_intrinsics(intrinsics: Sequence[float]) -> tuple[float, float, floa
     if not (math.isfinite(cx) and math.isfinite(cy)):
         raise ValueError("camera intrinsics cx/cy must be finite")
     return fx, fy, cx, cy
-
-
-def finger_sample_points(landmarks: Sequence[Sequence[float]]) -> list[tuple[float, float]]:
-    """Depth sample spots: inward of the tip, then DIP and PIP joints."""
-
-    tip, dip, pip = landmarks[INDEX_TIP], landmarks[INDEX_DIP], landmarks[INDEX_PIP]
-    inward = (
-        tip[0] + (dip[0] - tip[0]) * FINGER_INWARD_T,
-        tip[1] + (dip[1] - tip[1]) * FINGER_INWARD_T,
-    )
-    return [inward, (dip[0], dip[1]), (pip[0], pip[1])]
 
 
 def led_sample_points(u: float, v: float) -> list[tuple[float, float]]:
@@ -332,7 +319,6 @@ class TargetCandidate:
 
     centroid: tuple[float, float]
     size: float
-    handedness: Optional[str] = None
     payload: Any = None
 
 
@@ -396,12 +382,6 @@ class TargetAssociator:
         for candidate in candidates:
             if candidate.size <= 0.0 or previous.size <= 0.0:
                 continue
-            if (
-                previous.handedness is not None
-                and candidate.handedness is not None
-                and candidate.handedness != previous.handedness
-            ):
-                continue
             ratio = (candidate.size / previous.size) ** 2
             if not (self.min_size_ratio <= ratio <= self.max_size_ratio):
                 continue
@@ -415,9 +395,7 @@ class TargetAssociator:
             return Association(None)
         scored.sort(key=lambda item: (item[0], item[1].centroid[0], item[1].centroid[1]))
         if len(scored) >= 2 and scored[1][0] - scored[0][0] < self.ambiguity_px:
-            chosen = self._disambiguate(scored[0][1], scored[1][1], previous)
-            if chosen is None:
-                return Association(None, ambiguous=True)
+            return Association(None, ambiguous=True)
         else:
             chosen = scored[0][1]
         self._previous = chosen
@@ -435,21 +413,6 @@ class TargetAssociator:
             pool,
             key=lambda item: (-item.size, item.centroid[0], item.centroid[1]),
         )
-
-    @staticmethod
-    def _disambiguate(
-        first: TargetCandidate,
-        second: TargetCandidate,
-        previous: TargetCandidate,
-    ) -> Optional[TargetCandidate]:
-        if previous.handedness is None:
-            return None
-        matches = [
-            candidate
-            for candidate in (first, second)
-            if candidate.handedness == previous.handedness
-        ]
-        return matches[0] if len(matches) == 1 else None
 
 
 class OneEuro:
@@ -827,7 +790,6 @@ __all__ = [
     "FilterOutput",
     "FPS",
     "HOLD_TIMEOUT_S",
-    "INDEX_TIP",
     "LED_BGR_MARGIN",
     "LED_BGR_MIN",
     "LED_MIN_AREA",
@@ -853,7 +815,6 @@ __all__ = [
     "color_hue_ranges",
     "estimate_depth",
     "find_color_candidates",
-    "finger_sample_points",
     "led_sample_points",
     "pixel_to_xyz",
     "roi_bounds",

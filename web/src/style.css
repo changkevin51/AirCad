@@ -924,7 +924,7 @@ input:focus-visible,
 .pip__image {
   display: block;
   width: 100%;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: var(--pip-aspect, 4 / 3);
   object-fit: cover;
   background: var(--cad-canvas);
 }
@@ -934,7 +934,7 @@ input:focus-visible,
   top: 0;
   left: 0;
   width: 100%;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: var(--pip-aspect, 4 / 3);
 }
 
 .pip__caption {

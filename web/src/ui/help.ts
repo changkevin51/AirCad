@@ -103,9 +103,10 @@ export class HelpOverlay {
         return `<h3>Camera setup</h3>
           ${paragraph('The mouse always works. Tracking is configured in the Input tab of the inspector.')}
           <ul>
-            <li>Webcam tracking follows your index fingertip; pinch thumb and index to select or pull a face. Hold <kbd>Space</kbd> to draw. <kbd>P</kbd> toggles the camera preview; <kbd>N</kbd> toggles palm navigation.</li>
+            <li>Camera tracking follows the green keycap center. Hold <kbd>Space</kbd> to draw or grab; release to finish the grab. Press <kbd>S</kbd> to select. Hold <kbd>Shift</kbd> to orbit or <kbd>Ctrl</kbd> to pan; <kbd>+</kbd>/<kbd>−</kbd> zoom. <kbd>P</kbd> toggles the camera preview.</li>
             <li>An OAK-D depth camera draws on the work plane after <kbd>O</kbd> sets the origin; <kbd>Shift+R</kbd> recenters on the last endpoint.</li>
-            <li>If tracking pauses, show your hand again to resume — holds always release on focus loss, so nothing stays latched.</li>
+            <li>If tracking pauses, show the green keycap again to resume — holds always release on focus loss, so nothing stays latched.</li>
+            <li>The four-button pen remote sends <kbd>F17</kbd>-<kbd>F20</kbd>: button 1 holds to draw / orbit / pan by mode, taps to select, double-taps to undo; button 2 cycles the mode; button 3 taps for <kbd>Tab</kbd> and holds for voice; button 4 taps for push/pull and holds to move. Buttons 2+4 fit the view, 2+3 release everything.</li>
           </ul>`;
       case 'keys': {
         const groups: BindingGroup[] = ['pen', 'view', 'plane', 'edit', 'tools'];

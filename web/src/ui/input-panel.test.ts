@@ -29,7 +29,7 @@ describe('inputStatus precedence', () => {
   });
 
   it('camera starting outranks tracking states', () => {
-    expect(inputStatus({ ...base, camera: 'starting', tracking: 'hand' }).text).toBe('Camera starting…');
+    expect(inputStatus({ ...base, camera: 'starting', tracking: 'keycap' }).text).toBe('Camera starting…');
   });
 
   it('collecting shows calibration progress on the depth source', () => {
@@ -54,11 +54,11 @@ describe('inputStatus precedence', () => {
     expect(inputStatus({ ...oak, spatialState: 'acquiring' }).text).toBe('Acquiring…');
   });
 
-  it('webcam tracking states map to tracking, lost, mouse, show-a-hand', () => {
-    expect(inputStatus({ ...base, tracking: 'hand' })).toMatchObject({ text: 'Tracking', tone: 'ok' });
+  it('webcam tracking states map to tracking, lost, mouse, show-a-keycap', () => {
+    expect(inputStatus({ ...base, tracking: 'keycap' })).toMatchObject({ text: 'Tracking', tone: 'ok' });
     expect(inputStatus({ ...base, tracking: 'lost' }).tone).toBe('warn');
     expect(inputStatus({ ...base, tracking: 'mouse' }).text).toBe('Camera ready — mouse active');
-    expect(inputStatus({ ...base, tracking: 'none' }).text).toBe('Show a hand to track');
+    expect(inputStatus({ ...base, tracking: 'none' }).text).toBe('Show the green keycap to track');
   });
 });
 
@@ -66,16 +66,16 @@ describe('buildInputPanelState', () => {
   const config: TrackerConfigJson = {
     source: 'oak',
     cameraIndex: 0,
-    target: 'color',
-    colorPreset: 'blue',
+    target: 'keycap',
+    colorPreset: 'green',
     colorTolerance: 1.4,
   };
 
   it('copies the config and defaults extras', () => {
     const state = buildInputPanelState(config);
     expect(state.source).toBe('oak');
-    expect(state.target).toBe('color');
-    expect(state.colorPreset).toBe('blue');
+    expect(state.target).toBe('keycap');
+    expect(state.colorPreset).toBe('green');
     expect(state.colorTolerance).toBe(1.4);
     expect(state.applying).toBe(false);
     expect(state.connection).toBe('closed');

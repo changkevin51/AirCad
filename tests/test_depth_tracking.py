@@ -152,8 +152,8 @@ class ColorDetectionTests(unittest.TestCase):
 
 
 class AssociationTests(unittest.TestCase):
-    def _candidate(self, x, y, size=50.0, handedness=None):
-        return dt.TargetCandidate(centroid=(x, y), size=size, handedness=handedness)
+    def _candidate(self, x, y, size=50.0):
+        return dt.TargetCandidate(centroid=(x, y), size=size)
 
     def test_initial_acquisition_prefers_largest(self) -> None:
         assoc = dt.TargetAssociator()
@@ -174,18 +174,6 @@ class AssociationTests(unittest.TestCase):
         self.assertTrue(result.ambiguous)
         self.assertIsNone(result.candidate)
 
-    def test_handedness_breaks_near_tie(self) -> None:
-        assoc = dt.TargetAssociator()
-        assoc.update([self._candidate(50, 50, 50, handedness="right")], 0.0)
-        result = assoc.update(
-            [
-                self._candidate(60, 50, 50, handedness="left"),
-                self._candidate(65, 50, 50, handedness="right"),
-            ],
-            33.0,
-        )
-        self.assertFalse(result.ambiguous)
-        self.assertEqual(result.candidate.centroid, (65, 50))
 
     def test_forget_after_loss_reacquires_as_new(self) -> None:
         assoc = dt.TargetAssociator()
@@ -194,16 +182,6 @@ class AssociationTests(unittest.TestCase):
         result = assoc.update([self._candidate(200, 200, 50)], 400.0)
         self.assertTrue(result.acquired)
 
-    def test_opposite_handedness_cannot_replace_known_hand(self) -> None:
-        assoc = dt.TargetAssociator()
-        assoc.update([self._candidate(50, 50, 50, handedness="right")], 0.0)
-        result = assoc.update([self._candidate(50, 50, 50, handedness="left")], 50.0)
-        self.assertIsNone(result.candidate)
-        self.assertFalse(result.acquired)
-        self.assertEqual(assoc.current.handedness, "right")
-        result = assoc.update([self._candidate(50, 50, 50, handedness="left")], 400.0)
-        self.assertTrue(result.acquired)
-        self.assertEqual(result.candidate.handedness, "left")
 
     def test_size_ratio_compares_squared_area(self) -> None:
         assoc = dt.TargetAssociator()
