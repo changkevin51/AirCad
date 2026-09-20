@@ -1,5 +1,14 @@
 import { profileFaces, pushPull, sameProfileFace, type ProfileFace } from './faces';
-import { isExtrudableProfile, isRectangleProfile, type ExtrusionEntity, type ProfileEntity, type RectEntity } from './sketch';
+import {
+  isExtrudableProfile,
+  isRectangleProfile,
+  type ExtrusionEntity,
+  type PrismEntity,
+  type ProfileEntity,
+  type RectEntity,
+  type TriangleEntity,
+  type TriangleProfileEntity,
+} from './sketch';
 import { clone, dot2, nearlyEqual, roundTo, sub2, type Vec2, type Vec3 } from './vec';
 
 export interface FacePullMeasurement {
@@ -10,12 +19,15 @@ export interface FacePullMeasurement {
   direction: 1 | -1;
 }
 
+type PreviewFor<P extends ProfileEntity> = P extends TriangleProfileEntity ? PrismEntity : ExtrusionEntity;
+type CornersFor<P extends ProfileEntity> = P extends TriangleProfileEntity ? TriangleEntity['corners'] : Vec3[];
+
 /** A preview transaction: no model/history writes until the user confirms. */
-export class ExtrusionSession {
+export class ExtrusionSession<P extends ProfileEntity = ProfileEntity> {
   /** Faces of the original profile, refreshed to track the preview geometry. */
   readonly faces: ProfileFace[];
   faceIndex: number;
-  corners: Vec3[];
+  corners: CornersFor<P>;
   /** Signed depth along the extrusion normal of the original profile. */
   depth: number;
   error: string | null = null;
@@ -28,7 +40,7 @@ export class ExtrusionSession {
   private needsRelease = false;
 
   constructor(
-    readonly profile: ProfileEntity,
+    readonly profile: P,
     readonly mmPerPixel: number,
     readonly step: number,
     faceIndex: number,
@@ -36,8 +48,8 @@ export class ExtrusionSession {
     this.faces = profileFaces(profile);
     this.faceIndex = Math.min(Math.max(0, faceIndex), this.faces.length - 1);
     this.base = profile;
-    this.depth = profile.type === 'extrusion' ? profile.depth : 0;
-    this.corners = profile.corners.map(clone);
+    this.depth = profile.type === 'extrusion' || profile.type === 'prism' ? profile.depth : 0;
+    this.corners = profile.corners.map(clone) as CornersFor<P>;
   }
 
   private get minSize(): number {
@@ -52,13 +64,16 @@ export class ExtrusionSession {
 
   get changed(): boolean {
     const profile = this.profile;
-    const depth = profile.type === 'extrusion' ? profile.depth : 0;
+    const depth = profile.type === 'extrusion' || profile.type === 'prism' ? profile.depth : 0;
     if (this.depth !== depth) return true;
     return !this.corners.every((corner, index) => nearlyEqual(corner, profile.corners[index], 1e-6));
   }
 
-  get preview(): ExtrusionEntity {
-    return { id: this.profile.id, type: 'extrusion', corners: this.corners, depth: this.depth };
+  get preview(): PreviewFor<P> {
+    if (this.profile.type === 'triangle' || this.profile.type === 'prism') {
+      return { id: this.profile.id, type: 'prism', corners: this.corners, depth: this.depth } as PreviewFor<P>;
+    }
+    return { id: this.profile.id, type: 'extrusion', corners: this.corners, depth: this.depth } as PreviewFor<P>;
   }
 
   /** Total outward distance the active face has been pulled so far (mm). */
@@ -84,6 +99,9 @@ export class ExtrusionSession {
 
   private flatBase(): ProfileEntity {
     const corners = structuredClone(this.corners);
+    if (this.profile.type === 'triangle' || this.profile.type === 'prism') {
+      return { id: this.profile.id, type: 'triangle', corners: corners as TriangleEntity['corners'] };
+    }
     if (corners.length === 4 && isRectangleProfile(corners)) {
       return { id: this.profile.id, type: 'rect', corners: corners as RectEntity['corners'] };
     }
@@ -97,7 +115,7 @@ export class ExtrusionSession {
         throw new Error('That pull would create invalid geometry');
       }
       this.pull = pull;
-      this.corners = result.corners;
+      this.corners = result.corners as CornersFor<P>;
       this.depth = result.depth;
       this.error = null;
       this.refreshFaces();

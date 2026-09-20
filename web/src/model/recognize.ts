@@ -1,5 +1,5 @@
 import { isSimplePolygon } from './polygon';
-import { cross2, distance2, dot2, length2, sub2, v2, type Vec2 } from './vec';
+import { closestPointOnSegment2, cross2, distance2, dot2, length2, sub2, v2, type Vec2 } from './vec';
 
 export interface RecognizedLine {
   kind: 'line';
@@ -26,7 +26,12 @@ export interface RecognizedPolygon {
   corners: Vec2[];
 }
 
-export type RecognizedShape = RecognizedLine | RecognizedRect | RecognizedPolygon;
+export interface RecognizedTriangle {
+  kind: 'triangle';
+  corners: [Vec2, Vec2, Vec2];
+}
+
+export type RecognizedShape = RecognizedLine | RecognizedRect | RecognizedPolygon | RecognizedTriangle;
 
 export interface RecognizeResult {
   shape: RecognizedShape | null;
@@ -341,10 +346,42 @@ function recognizeRectangle(points: readonly Vec2[], diagonal: number, opts: Rec
   };
 }
 
+function fitTriangle(points: readonly Vec2[], size: number, opts: RecognizeOptions): RecognizedTriangle | null {
+  if (points.length < 4 || !Number.isFinite(size) || size <= 0) return null;
+  const origin = points[0];
+  const local = points.map((point) => v2((point.x - origin.x) / size, (point.y - origin.y) / size));
+  if (distance2(local[0], local[local.length - 1]) > opts.closureFrac) return null;
+  let ring = simplifyRdp(local, opts.rdpFrac);
+  if (ring.length > 1 && distance2(ring[0], ring[ring.length - 1]) <= opts.closureFrac) ring = ring.slice(0, -1);
+  ring = removeShallowCorners(ring, opts.collinearDeg * DEG);
+  if (ring.length !== 3) return null;
+  const sides = ring.map((point, index) => distance2(point, ring[(index + 1) % 3]));
+  const area = Math.abs(polygonArea(ring));
+  if (sides.some((side) => side < Math.max(0.04, opts.minSize / size)) || area < 0.005) return null;
+  const outlineArea = Math.abs(polygonArea(local));
+  if (outlineArea < area * 0.7 || outlineArea > area * 1.3) return null;
+  const smoothed = simplifyRdp(local, opts.smoothFrac);
+  const travel = pathLength(smoothed) + distance2(smoothed[0], smoothed[smoothed.length - 1]);
+  const perimeter = sides.reduce((sum, side) => sum + side, 0);
+  if (travel < perimeter * 0.75 || travel > perimeter * 1.3) return null;
+  const errors = local.map((point) => Math.min(...ring.map((a, index) =>
+    distance2(point, closestPointOnSegment2(point, a, ring[(index + 1) % 3]).point))));
+  if (percentile(errors, 0.85) > 0.05 || errors.some((error) => error > 0.12)) return null;
+  let start = 0;
+  for (let index = 1; index < 3; index++) {
+    if (distance2(ring[index], local[0]) < distance2(ring[start], local[0])) start = index;
+  }
+  const ordered = ring.slice(start).concat(ring.slice(0, start));
+  return {
+    kind: 'triangle',
+    corners: ordered.map((point) => v2(origin.x + point.x * size, origin.y + point.y * size)) as [Vec2, Vec2, Vec2],
+  };
+}
+
 /**
  * Recognise a pen stroke (2D plane coordinates, mm) as a straight line, a
- * rectangle, or any other simple closed outline (a polygon whose corners are
- * stroke samples).  Open strokes return `shape: null` with a reason.
+ * fitted triangle or rectangle, or any other simple closed outline (a polygon
+ * whose corners are stroke samples).  Open strokes return `shape: null`.
  */
 export function recognizeStroke(input: readonly Vec2[], options: Partial<RecognizeOptions> = {}): RecognizeResult {
   const opts = { ...DEFAULT_RECOGNIZE_OPTIONS, ...options };
@@ -368,6 +405,9 @@ export function recognizeStroke(input: readonly Vec2[], options: Partial<Recogni
       return { shape: alignLineToAxis(first, last, opts.axisSnapDeg), reason: 'line' };
     }
   }
+
+  const triangle = fitTriangle(points, box.diagonal, opts);
+  if (triangle) return { shape: triangle, reason: 'triangle' };
 
   if (chord <= opts.closureFrac * box.diagonal) {
     const rect = recognizeRectangle(points, box.diagonal, opts, first);

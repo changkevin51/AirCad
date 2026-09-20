@@ -26,7 +26,7 @@ from typing import Any, Iterable
 SCALE = 1.0
 SNAPSHOT_ENV = "AIRCAD_FREECAD_SNAPSHOT"
 DEFAULT_SNAPSHOT = Path(__file__).resolve().parent / ".runtime" / "freecad_drawing.json"
-SUPPORTED_TYPES = {"line", "rect", "polyline", "extrusion"}
+SUPPORTED_TYPES = {"line", "rect", "polyline", "extrusion", "triangle", "prism"}
 LINE_COLOR = (1.0, 0.8, 0.1)
 FACE_COLOR = (0.55, 0.7, 0.95)
 
@@ -90,6 +90,44 @@ def validated_extrusion_vector(points, vector) -> tuple[float, float, float]:
     return direction
 
 
+def validated_triangle_points(points):
+    if len(points) != 3:
+        raise ValueError("a triangle needs exactly three profile points")
+    a, b, c = (_point(point) for point in points)
+    edges = (
+        tuple(b[i] - a[i] for i in range(3)),
+        tuple(c[i] - a[i] for i in range(3)),
+        tuple(c[i] - b[i] for i in range(3)),
+    )
+    sizes = tuple(math.hypot(*edge) for edge in edges)
+    if any(not math.isfinite(size) or size <= 1e-6 for size in sizes):
+        raise ValueError("a triangle needs three finite, distinct corners")
+    u = tuple(edges[0][i] / sizes[0] for i in range(3))
+    v = tuple(edges[1][i] / sizes[1] for i in range(3))
+    normal = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+    if math.hypot(*normal) <= 1e-6:
+        raise ValueError("a triangle needs non-collinear corners")
+    return a, b, c
+
+
+def validated_prism_vector(points, vector) -> tuple[float, float, float]:
+    a, b, c = validated_triangle_points(points)
+    if not isinstance(vector, (list, tuple)) or len(vector) != 3:
+        raise ValueError("a prism needs a three-coordinate vector")
+    direction = _point(vector)
+    depth = math.hypot(*direction)
+    if not math.isfinite(depth) or depth < 1e-6:
+        raise ValueError("prism depth must be finite and non-zero")
+    for corner in (b, c):
+        edge = tuple(corner[i] - a[i] for i in range(3))
+        size = math.hypot(*edge)
+        if abs(sum((edge[i] / size) * (direction[i] / depth) for i in range(3))) > 1e-6:
+            raise ValueError("prism vector must be perpendicular to its profile")
+    if any(not math.isfinite(point[i] + direction[i]) for point in (a, b, c) for i in range(3)):
+        raise ValueError("prism coordinates must be finite")
+    return direction
+
+
 def read_snapshot(path: Path) -> list[dict[str, Any]]:
     """Read and validate the bridge's JSON snapshot into entity dicts."""
 
@@ -116,21 +154,27 @@ def read_snapshot(path: Path) -> list[dict[str, Any]]:
             raise ValueError("a line needs exactly two points")
         if kind in {"rect", "extrusion"} and len(points) != 4:
             raise ValueError(f"a {kind} needs exactly four points")
+        if kind in {"triangle", "prism"} and len(points) != 3:
+            raise ValueError(f"a {kind} needs exactly three points")
         if len(converted) < 2:
             raise ValueError("an entity needs at least two distinct points")
         normalized = {"type": kind, "points": [list(point) for point in points]}
-        if kind == "extrusion":
-            normalized["vector"] = validated_extrusion_vector(converted, entity.get("vector"))
+        if kind == "triangle":
+            validated_triangle_points(converted)
+        if kind in {"extrusion", "prism"}:
+            validator = validated_prism_vector if kind == "prism" else validated_extrusion_vector
+            normalized["vector"] = validator(converted, entity.get("vector"))
         entities.append(normalized)
     return entities
 
 
 def _make_shape(part, app, kind: str, points, vector=None):
     vectors = [app.Vector(x, y, z) for x, y, z in points]
-    if kind in {"rect", "extrusion"} and len(vectors) == 4:
+    profile_size = {"rect": 4, "extrusion": 4, "triangle": 3, "prism": 3}.get(kind)
+    if len(vectors) == profile_size:
         wire = part.makePolygon(vectors + [vectors[0]])
         face = part.Face(wire)
-        return face.extrude(app.Vector(*vector)) if kind == "extrusion" else face
+        return face.extrude(app.Vector(*vector)) if kind in {"extrusion", "prism"} else face
     return part.makePolygon(vectors)
 
 
@@ -144,8 +188,8 @@ def import_drawing(snapshot_path: Path):
 
     entities = read_snapshot(snapshot_path)
     document = app.newDocument("AirCADSketch")
-    counters = {"line": 0, "rect": 0, "polyline": 0, "extrusion": 0}
-    labels = {"line": "Line", "rect": "Rectangle", "polyline": "Polyline", "extrusion": "Extrusion"}
+    counters = {kind: 0 for kind in SUPPORTED_TYPES}
+    labels = {"line": "Line", "rect": "Rectangle", "polyline": "Polyline", "extrusion": "Extrusion", "triangle": "Triangle", "prism": "Prism"}
     for entity in entities:
         kind = entity["type"]
         points = converted_points(entity["points"])
@@ -162,11 +206,11 @@ def import_drawing(snapshot_path: Path):
                 view_object.LineColor = LINE_COLOR
             if hasattr(view_object, "LineWidth"):
                 view_object.LineWidth = 3.0
-            if kind in {"rect", "extrusion"}:
+            if kind in {"rect", "extrusion", "triangle", "prism"}:
                 if hasattr(view_object, "ShapeColor"):
                     view_object.ShapeColor = FACE_COLOR
                 if hasattr(view_object, "Transparency"):
-                    view_object.Transparency = 15 if kind == "extrusion" else 40
+                    view_object.Transparency = 15 if kind in {"extrusion", "prism"} else 40
 
     document.recompute()
     show_main_window = getattr(gui, "showMainWindow", None)
@@ -180,6 +224,13 @@ def import_drawing(snapshot_path: Path):
     else:
         view.viewTop()
     view.fitAll()
+    get_main_window = getattr(gui, "getMainWindow", None)
+    if callable(get_main_window):
+        main_window = get_main_window()
+        if main_window.isMinimized():
+            main_window.showNormal()
+        main_window.raise_()
+        main_window.activateWindow()
     return document
 
 

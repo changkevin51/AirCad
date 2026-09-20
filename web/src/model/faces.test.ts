@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { ExtrusionSession } from './extrusion';
-import { defaultFaceIndex, labelForNormal, pickProfileFace, profileFaces, pushPull } from './faces';
-import { entityCenter, makeRect, type ExtrusionEntity, type RectEntity } from './sketch';
-import { topViewProjector } from './test-helpers';
-import { add, dot, normalize, scale, sub, v2, v3 } from './vec';
+import { defaultFaceIndex, labelForNormal, pickExtrusionTarget, pickProfileFace, profileFaces, pushPull } from './faces';
+import { entityCenter, extrusionNormal, isTriangleProfile, makeRect, type ExtrusionEntity, type PrismEntity, type RectEntity, type TriangleEntity } from './sketch';
+import type { Projector } from './snap';
+import { frontViewProjector, topViewProjector } from './test-helpers';
+import { add, dot, normalize, scale, sub, v2, v3, type Vec2, type Vec3 } from './vec';
 
 const rect: RectEntity = { id: 'r', type: 'rect', corners: makeRect(v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0), 400, 300) };
 const solid: ExtrusionEntity = { ...rect, id: 's', type: 'extrusion', depth: 300 };
@@ -311,5 +312,161 @@ describe('labelForNormal', () => {
     expect(labelForNormal(v3(0, 1, 0))).toBe('back');
     expect(labelForNormal(v3(1, 0, 0))).toBe('right');
     expect(labelForNormal(v3(-1, 0, 0))).toBe('left');
+  });
+});
+
+describe('pickExtrusionTarget', () => {
+  const top: Projector = {
+    project: (point: Vec3): Vec2 => v2(point.x, point.y),
+    ray: (point: Vec2) => ({ origin: v3(point.x, point.y, 1000), dir: v3(0, 0, -1) }),
+  };
+  const oblique: Projector = {
+    project: (point: Vec3): Vec2 => v2(point.x - point.z, point.y),
+    ray: (point: Vec2) => ({ origin: v3(point.x + 1000, point.y, 1000), dir: v3(-Math.SQRT1_2, 0, -Math.SQRT1_2) }),
+  };
+
+  it('picks the nearest shape and its exact face regardless of entity order', () => {
+    const near: RectEntity = { ...rect, id: 'near', corners: rect.corners.map((point) => ({ ...point, z: 100 })) as RectEntity['corners'] };
+    for (const entities of [[rect, near], [near, rect]]) {
+      expect(pickExtrusionTarget(entities, v2(200, 150), top)).toEqual({ entity: near, faceIndex: 0 });
+    }
+    expect(pickExtrusionTarget([rect, solid], v2(250, 150), oblique)).toEqual({ entity: solid, faceIndex: 2 });
+    expect(pickExtrusionTarget([rect], v2(900, 900), top)).toBeNull();
+  });
+});
+
+describe('triangular profiles', () => {
+  const tri = (): TriangleEntity => ({ id: 't', type: 'triangle', corners: [v3(0, 0, 0), v3(300, 0, 0), v3(0, 300, 0)] });
+  const prism = (depth: number): PrismEntity => ({ id: 'p', type: 'prism', corners: tri().corners, depth });
+
+  it('points the extrusion normal along the positive dominant axis for either winding', () => {
+    const cases: [TriangleEntity['corners'], Vec3][] = [
+      [[v3(0, 0, 0), v3(300, 0, 0), v3(0, 300, 0)], v3(0, 0, 1)],
+      [[v3(0, 0, 0), v3(300, 0, 0), v3(0, 0, 300)], v3(0, 1, 0)],
+      [[v3(0, 0, 0), v3(0, 300, 0), v3(0, 0, 300)], v3(1, 0, 0)],
+    ];
+    for (const [corners, expected] of cases) {
+      for (const wound of [corners, [corners[0], corners[2], corners[1]]] as TriangleEntity['corners'][]) {
+        const actual = extrusionNormal({ id: 't', type: 'triangle', corners: wound });
+        expect(actual.x).toBeCloseTo(expected.x);
+        expect(actual.y).toBeCloseTo(expected.y);
+        expect(actual.z).toBeCloseTo(expected.z);
+      }
+    }
+  });
+
+  it('returns two coincident triangular caps for a flat triangle, never a fake quad', () => {
+    const faces = profileFaces(tri());
+    expect(faces).toHaveLength(2);
+    for (const face of faces) {
+      expect(face.quad).toHaveLength(3);
+      expect(face.axis).toBe('n');
+      expect(face.edgeIndex).toBeUndefined();
+    }
+    expect(faces[0].normal.z).toBeCloseTo(1);
+    expect(faces[1].normal.z).toBeCloseTo(-1);
+    for (let index = 0; index < 3; index++) expect(faces[0].quad[index]).toEqual(faces[1].quad[index]);
+  });
+
+  it.each([100, -100])('returns five outward faces with three distinct sides for depth %s', (depth) => {
+    const solid = prism(depth);
+    const faces = profileFaces(solid);
+    expect(faces).toHaveLength(5);
+    const center = entityCenter(solid);
+    for (const face of faces) {
+      expect(dot(face.normal, sub(face.center, center))).toBeGreaterThan(0);
+    }
+    const caps = faces.filter((face) => face.axis === 'n');
+    expect(caps.map((face) => face.sign)).toEqual([1, -1]);
+    for (const cap of caps) expect(cap.quad).toHaveLength(3);
+    const sides = faces.filter((face) => face.axis === 'edge');
+    expect(sides.map((face) => face.edgeIndex).sort()).toEqual([0, 1, 2]);
+    for (const side of sides) expect(side.quad).toHaveLength(4);
+    for (const cap of caps) {
+      const z = cap.sign === 1 ? Math.max(0, depth) : Math.min(0, depth);
+      expect(cap.quad.every((point) => Math.abs(point.z - z) < 1e-9)).toBe(true);
+    }
+  });
+
+  it('pulls flat triangle caps to signed depths with the corners fixed', () => {
+    const flat = tri();
+    const faces = profileFaces(flat);
+    expect(pushPull(flat, faces[0], 250, 10)).toEqual({ corners: flat.corners, depth: 250 });
+    expect(pushPull(flat, faces[1], 250, 10)).toEqual({ corners: flat.corners, depth: -250 });
+    expect(pushPull(flat, faces[0], -100, 10).depth).toBe(-100);
+  });
+
+  it.each([100, -100])('pulls prism caps by editing signed depth for depth %s', (depth) => {
+    const solid = prism(depth);
+    const faces = profileFaces(solid);
+    const positive = faces.find((face) => face.axis === 'n' && face.sign === 1)!;
+    const negative = faces.find((face) => face.axis === 'n' && face.sign === -1)!;
+    const outward = depth > 0 ? positive : negative;
+    const inward = depth > 0 ? negative : positive;
+    const far = pushPull(solid, outward, 50, 10);
+    expect(far.depth).toBe(depth + Math.sign(depth) * 50);
+    expect(far.corners).toEqual(solid.corners);
+    const near = pushPull(solid, inward, 50, 10);
+    expect(near.depth).toBe(depth + Math.sign(depth) * 50);
+    for (let index = 0; index < 3; index++) {
+      expect(near.corners[index].x).toBeCloseTo(solid.corners[index].x);
+      expect(near.corners[index].y).toBeCloseTo(solid.corners[index].y);
+      expect(near.corners[index].z).toBeCloseTo(solid.corners[index].z - Math.sign(depth) * 50);
+    }
+    expect(isTriangleProfile(near.corners)).toBe(true);
+    expect(solid.corners[0].z).toBe(0);
+  });
+
+  it('clamps a prism cap pushed through itself without collapsing', () => {
+    const solid = prism(100);
+    const faces = profileFaces(solid);
+    expect(pushPull(solid, faces[0], -1000, 10).depth).toBe(10);
+    const base = pushPull(solid, faces[1], -1000, 10);
+    expect(base.depth).toBe(10);
+    expect(base.corners[0].z).toBeCloseTo(90);
+    expect(isTriangleProfile(base.corners)).toBe(true);
+  });
+
+  it('pulls a prism side outward while keeping the opposite vertex fixed', () => {
+    const solid = prism(100);
+    const side = profileFaces(solid).find((face) => face.edgeIndex === 0)!;
+    const result = pushPull(solid, side, 100, 10);
+    expect(result.depth).toBe(100);
+    expect(result.corners[0].x).toBeCloseTo(0);
+    expect(result.corners[0].y).toBeCloseTo(-100);
+    expect(result.corners[1].x).toBeCloseTo(400);
+    expect(result.corners[1].y).toBeCloseTo(-100);
+    expect(result.corners[2]).toEqual(v3(0, 300, 0));
+    expect(solid.corners[0]).toEqual(v3(0, 0, 0));
+    expect(solid.corners[1]).toEqual(v3(300, 0, 0));
+    expect(isTriangleProfile(result.corners)).toBe(true);
+  });
+
+  it('clamps a side pushed past collapse to minSize', () => {
+    const solid = prism(100);
+    const side = profileFaces(solid).find((face) => face.edgeIndex === 0)!;
+    const result = pushPull(solid, side, -1000, 10);
+    expect(result.depth).toBe(100);
+    expect(result.corners[2]).toEqual(v3(0, 300, 0));
+    expect(result.corners[0].y).toBeCloseTo(290);
+    expect(result.corners[1].x).toBeCloseTo(10);
+    expect(result.corners[1].y).toBeCloseTo(290);
+    expect(isTriangleProfile(result.corners)).toBe(true);
+  });
+
+  it('picks a triangle cap and prism side faces without assuming quads', () => {
+    const top = topViewProjector(1, 0, 0);
+    const triangle = tri();
+    expect(pickProfileFace(profileFaces(triangle), v2(50, -50), top)).toBe(0);
+    expect(pickExtrusionTarget([triangle], v2(50, -50), top)).toEqual({ entity: triangle, faceIndex: 0 });
+    expect(pickExtrusionTarget([triangle], v2(250, -250), top)).toBeNull();
+
+    const solid = prism(100);
+    expect(pickExtrusionTarget([solid], v2(50, -50), top)).toEqual({ entity: solid, faceIndex: 0 });
+    const front = frontViewProjector(1, 0, 0);
+    const sidePick = pickExtrusionTarget([solid], v2(150, -50), front);
+    expect(sidePick?.entity).toBe(solid);
+    expect(sidePick?.faceIndex).toBe(2);
+    expect(profileFaces(solid)[2].edgeIndex).toBe(0);
   });
 });

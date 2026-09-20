@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { makeRect, type Entity, type ExtrusionEntity, type LineEntity, type PolygonEntity, type RectEntity } from '../model/sketch';
+import { makeRect, type Entity, type ExtrusionEntity, type LineEntity, type PolygonEntity, type PrismEntity, type RectEntity, type TriangleEntity } from '../model/sketch';
 import { v3 } from '../model/vec';
 import {
   clearAvailability,
@@ -26,6 +26,8 @@ const rect: RectEntity = {
 const box: ExtrusionEntity = { id: 'e3', type: 'extrusion', corners: rect.corners, depth: 2500 };
 const outline: PolygonEntity = { id: 'e4', type: 'polygon', corners: [v3(0, 0, 0), v3(400, 0, 0), v3(100, 300, 0)] };
 const circle: Entity = { id: 'e5', type: 'circle', center: v3(0, 0, 0), normal: v3(0, 0, 1), radius: 50 };
+const triangle: TriangleEntity = { id: 'e6', type: 'triangle', corners: [v3(0, 0, 0), v3(300, 0, 0), v3(0, 300, 0)] };
+const prism: PrismEntity = { id: 'e7', type: 'prism', corners: triangle.corners, depth: 200 };
 
 const idle = { drawing: false, extruding: false };
 const drawing = { drawing: true, extruding: false };
@@ -39,6 +41,8 @@ describe('entityLabel', () => {
     expect(entityLabel(box)).toBe('Box e3');
     expect(entityLabel(outline)).toBe('Outline e4');
     expect(entityLabel(circle)).toBe('Circle e5');
+    expect(entityLabel(triangle)).toBe('Triangle e6');
+    expect(entityLabel(prism)).toBe('Prism e7');
   });
 });
 
@@ -72,6 +76,15 @@ describe('command availability', () => {
     const circleSize = dimensionsAvailability(circle, idle);
     expect(circleSize.enabled).toBe(false);
     expect(circleSize.reason).toBe(CIRCLE_READONLY);
+  });
+
+  it('offers Push/Pull for a triangle but not typed dimensions', () => {
+    expect(pushPullAvailability(triangle, idle).enabled).toBe(true);
+    expect(pushPullAvailability(prism, idle).enabled).toBe(true);
+    const triangleSize = dimensionsAvailability(triangle, idle);
+    expect(triangleSize.enabled).toBe(false);
+    expect(triangleSize.reason).toMatch(/Q to extrude/);
+    expect(dimensionsAvailability(prism, idle).enabled).toBe(true);
   });
 
   it('offers dimensions, delete and Push/Pull for a rectangle and a box', () => {

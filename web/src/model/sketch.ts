@@ -48,6 +48,19 @@ export interface ExtrusionEntity {
   depth: number;
 }
 
+export interface TriangleEntity {
+  id: string;
+  type: 'triangle';
+  corners: [Vec3, Vec3, Vec3];
+}
+
+export interface PrismEntity {
+  id: string;
+  type: 'prism';
+  corners: TriangleEntity['corners'];
+  depth: number;
+}
+
 export interface CircleEntity {
   id: string;
   type: 'circle';
@@ -58,14 +71,18 @@ export interface CircleEntity {
 
 export type CircleGeometry = Pick<CircleEntity, 'center' | 'normal' | 'radius'>;
 
-export type ProfileEntity = RectEntity | PolygonEntity | ExtrusionEntity;
-export type SolidEntity = ExtrusionEntity;
+export type RectProfileEntity = RectEntity | ExtrusionEntity;
+export type TriangleProfileEntity = TriangleEntity | PrismEntity;
+export type ProfileEntity = RectEntity | PolygonEntity | ExtrusionEntity | TriangleEntity | PrismEntity;
+export type SolidEntity = ExtrusionEntity | PrismEntity;
 export type Entity = LineEntity | ProfileEntity | CircleEntity;
 export type EntityInput =
   | { type: 'line'; a: Vec3; b: Vec3 }
   | { type: 'rect'; corners: RectEntity['corners'] }
   | { type: 'polygon'; corners: Vec3[] }
   | { type: 'extrusion'; corners: Vec3[]; depth: number }
+  | { type: 'triangle'; corners: TriangleEntity['corners'] }
+  | { type: 'prism'; corners: TriangleEntity['corners']; depth: number }
   | { type: 'circle'; center: Vec3; normal: Vec3; radius: number };
 
 export interface Vertex {
@@ -104,7 +121,7 @@ export type SketchListener = (reason: string) => void;
 
 export const lineLength = (line: LineEntity): number => distance(line.a, line.b);
 
-export function rectFrame(rect: ProfileEntity): { origin: Vec3; uDir: Vec3; vDir: Vec3; width: number; height: number } {
+export function rectFrame(rect: { corners: readonly Vec3[] }): { origin: Vec3; uDir: Vec3; vDir: Vec3; width: number; height: number } {
   const [c0, c1, , c3] = rect.corners;
   const uEdge = sub(c1, c0);
   const vEdge = sub(c3, c0);
@@ -123,7 +140,7 @@ export function makeRect(origin: Vec3, uDir: Vec3, vDir: Vec3, width: number, he
   return [clone(origin), add(origin, u), add(add(origin, u), v), add(origin, v)];
 }
 
-export function rectNormal(rect: ProfileEntity): Vec3 {
+export function rectNormal(rect: { corners: readonly Vec3[] }): Vec3 {
   const { uDir, vDir } = rectFrame(rect);
   return normalize(v3(
     uDir.y * vDir.z - uDir.z * vDir.y,
@@ -143,7 +160,7 @@ export function extrusionNormal(profile: ProfileEntity): Vec3 {
   return dominant < 0 ? scale(normal, -1) : normal;
 }
 
-export const extrusionOffset = (entity: ExtrusionEntity): Vec3 => scale(extrusionNormal(entity), entity.depth);
+export const extrusionOffset = (entity: ExtrusionEntity | PrismEntity): Vec3 => scale(extrusionNormal(entity), entity.depth);
 
 export function isRectangleProfile(corners: readonly Vec3[]): boolean {
   if (corners.length !== 4 || !corners.every(isFinite3)) return false;
@@ -160,6 +177,15 @@ export function isRectangleProfile(corners: readonly Vec3[]): boolean {
 /** Reject collapsed, skewed, self-crossing or non-planar profiles before making a solid. */
 export function isExtrudableProfile(corners: readonly Vec3[]): boolean {
   return polygonFrame(corners) !== null;
+}
+
+export function isTriangleProfile(corners: readonly Vec3[]): corners is TriangleEntity['corners'] {
+  if (corners.length !== 3 || !corners.every((point) => point && isFinite3(point))) return false;
+  const [a, b, c] = corners;
+  const ab = sub(b, a);
+  const ac = sub(c, a);
+  if (![length(ab), length(ac), distance(b, c)].every((side) => Number.isFinite(side) && side > 1e-6)) return false;
+  return length(cross(normalize(ab), normalize(ac))) > 1e-6;
 }
 
 export function isValidCircle(circle: CircleGeometry): boolean {
@@ -203,7 +229,7 @@ export function entitySegments(entity: Entity): Segment[] {
     b: entity.corners[(index + 1) % n],
     index,
   }));
-  if (entity.type === 'rect' || entity.type === 'polygon') return base;
+  if (entity.type === 'rect' || entity.type === 'polygon' || entity.type === 'triangle') return base;
   const offset = extrusionOffset(entity);
   return [
     ...base,
@@ -215,15 +241,21 @@ export function entitySegments(entity: Entity): Segment[] {
 /** Faces used by both the renderer and face picking. */
 export function entityFaces(entity: Entity): Vec3[][] {
   if (entity.type === 'line' || entity.type === 'circle') return [];
-  if (entity.type === 'rect' || entity.type === 'polygon') return [[...entity.corners]];
+  if (entity.type === 'rect' || entity.type === 'polygon' || entity.type === 'triangle') return [[...entity.corners]];
   const offset = extrusionOffset(entity);
   const base = entity.corners;
   const n = base.length;
   const top = base.map((corner) => add(corner, offset));
-  return [
+  const faces = [
     [...base], top,
     ...base.map((a, i) => [a, base[(i + 1) % n], top[(i + 1) % n], top[i]]),
   ];
+  if (entity.type !== 'prism') return faces;
+  const center = entityCenter(entity);
+  return faces.map((face) => {
+    const normal = cross(normalize(sub(face[1], face[0])), normalize(sub(face[2], face[0])));
+    return dot(normal, sub(face[0], center)) < 0 ? face.slice().reverse() : face;
+  });
 }
 
 export function entityMidpoints(entity: Entity): Vertex[] {
@@ -247,12 +279,12 @@ export function entityCenter(entity: Entity): Vec3 {
     z += corner.z;
   }
   const center = v3(x / entity.corners.length, y / entity.corners.length, z / entity.corners.length);
-  return entity.type === 'extrusion' ? add(center, scale(extrusionOffset(entity), 0.5)) : center;
+  return entity.type === 'extrusion' || entity.type === 'prism' ? add(center, scale(extrusionOffset(entity), 0.5)) : center;
 }
 
 export function entityPoints(entity: Entity): Vec3[] {
   if (entity.type === 'line') return [entity.a, entity.b];
-  if (entity.type === 'rect' || entity.type === 'polygon') return [...entity.corners];
+  if (entity.type === 'rect' || entity.type === 'polygon' || entity.type === 'triangle') return [...entity.corners];
   if (entity.type === 'circle') {
     const normal = normalize(entity.normal);
     return (['x', 'y', 'z'] as const).flatMap((axis) => {
@@ -266,6 +298,61 @@ export function entityPoints(entity: Entity): Vec3[] {
   return [...entity.corners, ...entity.corners.map((corner) => add(corner, offset))];
 }
 
+export function translateEntity(entity: Entity, offset: Vec3): Entity {
+  if (entity.type === 'line') return { ...entity, a: add(entity.a, offset), b: add(entity.b, offset) };
+  if (entity.type === 'circle') return { ...entity, center: add(entity.center, offset) };
+  if (entity.type === 'triangle' || entity.type === 'prism') {
+    return { ...entity, corners: entity.corners.map((corner) => add(corner, offset)) as TriangleEntity['corners'] };
+  }
+  if (entity.type === 'rect') {
+    return { ...entity, corners: entity.corners.map((corner) => add(corner, offset)) as RectEntity['corners'] };
+  }
+  return { ...entity, corners: entity.corners.map((corner) => add(corner, offset)) };
+}
+
+export interface ScaleHandle {
+  point: Vec3;
+  anchor: Vec3;
+}
+
+export function entityScaleHandles(entity: Entity): ScaleHandle[] {
+  const points = entityPoints(entity);
+  return points.map((point) => ({
+    point: clone(point),
+    anchor: clone(points.reduce((opposite, candidate) => distance(point, candidate) > distance(point, opposite) ? candidate : opposite)),
+  }));
+}
+
+export function scaleEntity(entity: Entity, anchor: Vec3, factor: number): Entity | null {
+  if (!isFinite3(anchor) || !Number.isFinite(factor) || factor <= 0) return null;
+  if (factor === 1) return entity;
+  const transform = (point: Vec3): Vec3 => add(anchor, scale(sub(point, anchor), factor));
+  let scaled: Entity;
+  if (entity.type === 'line') scaled = { ...entity, a: transform(entity.a), b: transform(entity.b) };
+  else if (entity.type === 'circle') scaled = { ...entity, center: transform(entity.center), radius: entity.radius * factor };
+  else if (entity.type === 'triangle' || entity.type === 'prism') {
+    const corners = entity.corners.map(transform) as TriangleEntity['corners'];
+    scaled = entity.type === 'prism' ? { ...entity, corners, depth: entity.depth * factor } : { ...entity, corners };
+  } else if (entity.type === 'rect') {
+    scaled = { ...entity, corners: entity.corners.map(transform) as RectEntity['corners'] };
+  } else if (entity.type === 'polygon') {
+    scaled = { ...entity, corners: entity.corners.map(transform) };
+  } else {
+    scaled = { ...entity, corners: entity.corners.map(transform), depth: entity.depth * factor };
+  }
+  if (!entityPoints(scaled).every(isFinite3)) return null;
+  if (scaled.type === 'line') return Number.isFinite(lineLength(scaled)) && lineLength(scaled) >= 1e-6 ? scaled : null;
+  if (scaled.type === 'circle') return isValidCircle(scaled) ? scaled : null;
+  if (scaled.type === 'triangle' || scaled.type === 'prism') {
+    if (!isTriangleProfile(scaled.corners)) return null;
+    if (scaled.type === 'prism' && (!Number.isFinite(scaled.depth) || Math.abs(scaled.depth) < 1e-6)) return null;
+    return scaled;
+  }
+  if (!isExtrudableProfile(scaled.corners)) return null;
+  if (scaled.type === 'extrusion' && (!Number.isFinite(scaled.depth) || Math.abs(scaled.depth) < 1e-6)) return null;
+  return scaled;
+}
+
 export function entityTriangles(entity: Entity): [Vec3, Vec3, Vec3][] {
   if (entity.type === 'circle') {
     const points = circlePoints(entity);
@@ -277,6 +364,8 @@ export function entityTriangles(entity: Entity): [Vec3, Vec3, Vec3][] {
 export function describeEntity(entity: Entity): string {
   if (entity.type === 'line') return `line ${formatMm(lineLength(entity))}`;
   if (entity.type === 'circle') return `circle diameter ${formatMm(entity.radius * 2)}`;
+  if (entity.type === 'triangle') return 'triangle';
+  if (entity.type === 'prism') return `triangular prism depth ${formatMm(entity.depth)}`;
   if (!isRectangleProfile(entity.corners)) {
     return entity.type === 'extrusion'
       ? `extrusion (${entity.corners.length} edges), depth ${formatMm(entity.depth)}`
@@ -293,9 +382,20 @@ export function formatMm(value: number): string {
 }
 
 function validateInput(input: EntityInput): void {
-  if (!['line', 'rect', 'extrusion', 'polygon', 'circle'].includes(input.type)) throw new Error('unsupported entity type');
+  if (!['line', 'rect', 'extrusion', 'polygon', 'circle', 'triangle', 'prism'].includes(input.type)) {
+    throw new Error('unsupported entity type');
+  }
   if (input.type === 'circle') {
     if (!isValidCircle(input)) throw new Error('a circle needs a finite center, a non-zero normal, and a positive radius');
+    return;
+  }
+  if (input.type === 'triangle' || input.type === 'prism') {
+    if (!input.corners || !isTriangleProfile(input.corners)) throw new Error('a triangle needs three finite, non-collinear corners');
+    if (input.type === 'prism') {
+      if (!Number.isFinite(input.depth) || Math.abs(input.depth) < 1e-6) throw new Error('extrusion depth must be finite and non-zero');
+      const offset = extrusionOffset({ ...input, id: '' });
+      if (!input.corners.every((corner) => isFinite3(add(corner, offset)))) throw new Error('extrusion is outside the supported coordinate range');
+    }
     return;
   }
   const points = input.type === 'line' ? [input.a, input.b] : input.corners;
@@ -352,7 +452,11 @@ export class Sketch {
 
   getProfile(id: string): ProfileEntity | null {
     const entity = this.entities.find((candidate) => candidate.id === id);
-    if (entity && (entity.type === 'rect' || entity.type === 'polygon' || entity.type === 'extrusion')) return entity;
+    if (
+      entity &&
+      (entity.type === 'rect' || entity.type === 'polygon' || entity.type === 'extrusion'
+        || entity.type === 'triangle' || entity.type === 'prism')
+    ) return entity;
     const loops = this.closedLineProfiles;
     const direct = loops.find((profile) => profile.id === id);
     if (direct) return direct;
@@ -423,6 +527,8 @@ export class Sketch {
     if (input.type === 'extrusion') return { id, type: 'extrusion', corners: input.corners.map(clone), depth: input.depth };
     if (input.type === 'polygon') return { id, type: 'polygon', corners: input.corners.map(clone) };
     if (input.type === 'circle') return { id, type: 'circle', center: clone(input.center), normal: normalize(input.normal), radius: input.radius };
+    if (input.type === 'triangle') return { id, type: 'triangle', corners: input.corners.map(clone) as TriangleEntity['corners'] };
+    if (input.type === 'prism') return { id, type: 'prism', corners: input.corners.map(clone) as TriangleEntity['corners'], depth: input.depth };
     return { id, type: 'rect', corners: input.corners.map(clone) as [Vec3, Vec3, Vec3, Vec3] };
   }
 

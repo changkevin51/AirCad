@@ -1,7 +1,6 @@
-import { entityFaces, type Entity } from './sketch';
-import { triangulatePolygon } from './polygon';
+import { entityTriangles, type Entity } from './sketch';
 import type { Projector } from './snap';
-import { add, cross, distance, dot, sub, scale, type Vec2, type Vec3 } from './vec';
+import { add, cross, dot, sub, scale, type Vec2, type Vec3 } from './vec';
 
 /** Ray/triangle intersection, two-sided because sketch profiles can face either way. */
 export function triangleHit(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3): number | null {
@@ -26,24 +25,11 @@ export function pickFace(entities: readonly Entity[], cursor: Vec2, projector: P
   let best: Entity | null = null;
   let nearest = Infinity;
   for (const entity of entities) {
-    if (entity.type === 'circle') {
-      const denominator = dot(ray.dir, entity.normal);
-      if (Math.abs(denominator) < 1e-9) continue;
-      const t = dot(sub(entity.center, ray.origin), entity.normal) / denominator;
-      const hit = add(ray.origin, scale(ray.dir, t));
-      if (t >= 0 && t <= nearest && distance(hit, entity.center) <= entity.radius + 1e-8 && projector.project(hit)) {
+    for (const [a, b, c] of entityTriangles(entity)) {
+      const t = triangleHit(ray.origin, ray.dir, a, b, c);
+      if (t !== null && t <= nearest && projector.project(add(ray.origin, scale(ray.dir, t)))) {
         nearest = t;
         best = entity;
-      }
-      continue;
-    }
-    for (const face of entityFaces(entity)) {
-      for (const triangle of triangulatePolygon(face)) {
-        const t = triangleHit(ray.origin, ray.dir, triangle[0], triangle[1], triangle[2]);
-        if (t !== null && t <= nearest && projector.project(add(ray.origin, scale(ray.dir, t)))) {
-          nearest = t;
-          best = entity;
-        }
       }
     }
   }

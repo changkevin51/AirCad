@@ -45,8 +45,40 @@ describe('keymap', () => {
     expect(resolvePress(key('Enter'), 'other')).toBe('confirm');
     expect(resolvePress(key('NumpadEnter'), 'other')).toBe('confirm');
     expect(resolvePress(key('KeyE'), 'other')).toBe('export');
+    expect(resolvePress(key('KeyR'), 'other')).toBe('scale');
     expect(resolvePress(key('KeyO'), 'other')).toBe('setOrigin');
-    expect(resolvePress(key('KeyR'), 'other')).toBe('recenter');
+  });
+
+  it('resolves R as scale only without modifiers', () => {
+    expect(resolvePress(key('KeyR'), 'mac')).toBe('scale');
+    expect(resolvePress(key('KeyR'), 'other')).toBe('scale');
+    expect(resolvePress(key('KeyR', { metaKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyR', { ctrlKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyR', { ctrlKey: true }), 'other')).toBeNull();
+    expect(resolvePress(key('KeyR', { altKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyR', { altKey: true }), 'other')).toBeNull();
+    expect(resolveHold(key('KeyR'), 'mac')).toBeNull();
+    expect(resolveHold(key('KeyR'), 'other')).toBeNull();
+    expect(resolvePress(key('KeyS'), 'other')).toBe('select');
+  });
+
+  it('resolves Shift+R as depth recenter without shadowing scale', () => {
+    for (const platform of ['mac', 'other'] as const) {
+      expect(resolvePress(key('KeyR', { shiftKey: true }), platform)).toBe('recenter');
+      expect(resolvePress(key('KeyR', { shiftKey: true, altKey: true }), platform)).toBeNull();
+    }
+  });
+
+  it('resolves M as move only without modifiers', () => {
+    expect(resolvePress(key('KeyM'), 'mac')).toBe('move');
+    expect(resolvePress(key('KeyM'), 'other')).toBe('move');
+    expect(resolvePress(key('KeyM', { metaKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyM', { ctrlKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyM', { ctrlKey: true }), 'other')).toBeNull();
+    expect(resolvePress(key('KeyM', { altKey: true }), 'mac')).toBeNull();
+    expect(resolvePress(key('KeyM', { altKey: true }), 'other')).toBeNull();
+    expect(resolveHold(key('KeyM'), 'mac')).toBeNull();
+    expect(resolveHold(key('KeyM'), 'other')).toBeNull();
   });
 
   it('keeps plain Z as an axis lock but not with the primary modifier', () => {

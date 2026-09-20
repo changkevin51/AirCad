@@ -13,6 +13,7 @@ export const icons = {
   rectangle: svg('<rect x="2.5" y="4" width="11" height="8"/><circle cx="2.5" cy="4" r="1.1" fill="currentColor" stroke="none"/><circle cx="13.5" cy="12" r="1.1" fill="currentColor" stroke="none"/>'),
   box: svg('<path d="M8 1.8 14 4.6v6.8L8 14.2 2 11.4V4.6Z"/><path d="M2 4.6 8 7.4l6-2.8M8 7.4v6.8"/>'),
   polygon: svg('<path d="M8 2.2 13.6 6.1 11.8 12.8H4.2L2.4 6.1Z"/>'),
+  triangle: svg('<path d="M8 2.4 14 13.2H2Z"/>'),
   circle: svg('<circle cx="8" cy="8" r="5.2"/>'),
   plane: svg('<path d="M2 10.5 8 7l6 3.5-6 3.5Z"/><path d="M8 7V2.5"/><path d="M6 3.6 8 2.5l2 1.1"/>'),
   grid: svg('<path d="M2 5.5h12M2 10.5h12M5.5 2v12M10.5 2v12"/>'),

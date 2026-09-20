@@ -72,9 +72,9 @@ export class HelpOverlay {
         return `<h3>Getting started</h3>
           ${paragraph('AirCAD is a sketch-first modeler: you draw on a work plane, then push or pull shapes into solids. Everything is in millimetres; typed values also accept cm and m.')}
           <ol>
-            <li>Left-drag on the canvas — or hold <kbd>Space</kbd> and move — to draw. A straight stroke becomes a line; a closed loop becomes a rectangle, polygon, or outline assembled from snapped lines.</li>
+            <li>Left-drag on the canvas — or hold <kbd>Space</kbd> and move — to draw. A straight stroke becomes a line; a closed loop becomes a rectangle, fitted triangle, polygon, or outline assembled from snapped lines.</li>
             <li>Click a shape (or press <kbd>S</kbd> under the cursor) to select it. The Model panel and the Properties inspector follow the same selection.</li>
-            <li>Type exact dimensions with <kbd>L</kbd>, or edit Width/Height/Depth in the Properties inspector.</li>
+            <li>Type exact dimensions with <kbd>L</kbd>, or edit Width/Height/Depth in the Properties inspector. <kbd>M</kbd> moves a selected shape; <kbd>R</kbd> scales from a corner.</li>
             <li><kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> undo and redo; <kbd>Delete</kbd> removes the selected object.</li>
             <li>Clear sketch in the Edit menu asks for confirmation. The shortcut <kbd>Ctrl+Backspace</kbd> clears immediately — both are undoable.</li>
           </ol>`;
@@ -86,7 +86,7 @@ export class HelpOverlay {
             <li>The canvas keeps <kbd>Tab</kbd> for plane cycling. Use <kbd>F6</kbd> / <kbd>Shift+F6</kbd> to move focus between the app bar, panels, and the viewport.</li>
             <li><kbd>Space</kbd> and <kbd>Enter</kbd> on buttons and fields activate the control — they never draw. Drawing keys only work while the canvas has focus.</li>
             <li><kbd>G</kbd> toggles grid snapping; while drawing, <kbd>X</kbd>/<kbd>Y</kbd>/<kbd>Z</kbd> lock the stroke to an axis.</li>
-            <li>Snapping finds vertices, midpoints, edges, and shared borders: draw a closed loop against an existing rectangle to complete a wall.</li>
+            <li>Snapping finds vertices, midpoints, edges, and shared borders: draw a closed loop against an existing rectangle to complete a wall. A nearly parallel stroke can pick up an existing edge's direction and length.</li>
           </ul>`;
       case 'push-pull':
         return `<h3>Push/Pull</h3>

@@ -13,6 +13,7 @@ import freecad_bridge
 
 LINE = {"type": "line", "points": [[0, 0, 0], [4000, 0, 0]]}
 RECT = {"type": "rect", "points": [[0, 0, 0], [4000, 0, 0], [4000, 0, 2500], [0, 0, 2500]]}
+TRIANGLE = {"type": "triangle", "points": [[10, 20, 30], [110, 20, 30], [40, 100, 90]]}
 
 
 class FreeCADBridgeTests(unittest.TestCase):
@@ -62,14 +63,25 @@ class FreeCADBridgeTests(unittest.TestCase):
             child_snapshots: list[Path] = []
             with patches, mock.patch.object(freecad_bridge, "_launch_freecad", child_snapshots.append):
                 freecad_bridge.send_to_freecad([LINE])
-                freecad_bridge.send_to_freecad([RECT])
+                freecad_bridge.send_to_freecad([
+                    {"type": "extrusion", "points": RECT["points"], "vector": [0, -750, 0]},
+                    {"type": "prism", "points": TRIANGLE["points"], "vector": [0, 30, -40]},
+                ])
 
             self.assertEqual(len(child_snapshots), 2)
             self.assertNotEqual(child_snapshots[0], child_snapshots[1])
-            self.assertEqual(json.loads(child_snapshots[0].read_text())["entities"][0]["type"], "line")
-            self.assertEqual(json.loads(child_snapshots[1].read_text())["entities"][0]["type"], "rect")
+            first_payload = json.loads(child_snapshots[0].read_text())
+            self.assertEqual(first_payload["entities"], [LINE])
+            second_payload = json.loads(child_snapshots[1].read_text())
+            self.assertEqual(
+                second_payload["entities"],
+                [
+                    {"type": "extrusion", "points": RECT["points"], "vector": [0, -750, 0]},
+                    {"type": "prism", "points": TRIANGLE["points"], "vector": [0, 30, -40]},
+                ],
+            )
             latest = Path(temporary_directory.name, ".runtime", "freecad_drawing.json")
-            self.assertEqual(json.loads(latest.read_text())["entities"][0]["type"], "rect")
+            self.assertEqual(json.loads(latest.read_text()), second_payload)
         finally:
             temporary_directory.cleanup()
 
@@ -104,6 +116,27 @@ class FreeCADBridgeTests(unittest.TestCase):
     def test_extrusions_preserve_their_signed_vector(self) -> None:
         solid = {"type": "extrusion", "points": RECT["points"], "vector": [0, -750, 0]}
         self.assertEqual(freecad_bridge.normalize_entity(solid), solid)
+
+    def test_triangle_and_prism_xyz_geometry_is_preserved(self) -> None:
+        self.assertEqual(freecad_bridge.normalize_entity(TRIANGLE), TRIANGLE)
+        for vector in ([0, -30, 40], [0, 30, -40]):
+            prism = {"type": "prism", "points": TRIANGLE["points"], "vector": vector}
+            self.assertEqual(freecad_bridge.normalize_entity(prism), prism)
+
+    def test_invalid_triangles_and_prisms_fail_before_launch(self) -> None:
+        bad_points = [[], [[0, 0, 0], [1, 0, 0]], [[0, 0, 0]] * 3,
+                      [[0, 0, 0], [10, 10, 10], [20, 20, 20]],
+                      [[0, 0, 0], [1e-7, 0, 0], [0, 10, 0]],
+                      [[0, 0, 0], [float('nan'), 0, 0], [0, 10, 0]]]
+        invalid = [{"type": kind, "points": points, "vector": [0, 0, 50]}
+                   for kind in ("triangle", "prism") for points in bad_points]
+        invalid.extend({"type": "prism", "points": TRIANGLE["points"], "vector": vector}
+                       for vector in (None, [0, 0], [0, 0, 0], [1, 0, 0], [0, True, 0], [0, '30', -40], [0, float('inf'), 0]))
+        with mock.patch.object(freecad_bridge, "_launch_freecad") as launch:
+            for entity in invalid:
+                with self.subTest(entity=entity), self.assertRaises(ValueError):
+                    freecad_bridge.send_to_freecad([entity])
+        launch.assert_not_called()
 
     def test_invalid_extrusions_fail_before_launch(self) -> None:
         solid = {"type": "extrusion", "points": RECT["points"], "vector": [0, 750, 0]}

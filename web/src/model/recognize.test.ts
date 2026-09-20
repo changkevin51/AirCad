@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { recognizeStroke, simplifyRdp, type RecognizedRect } from './recognize';
-import { circleStroke, lineStroke, rectStroke, rotatePoints, scribbleStroke, seededRandom } from './test-helpers';
+import { circleStroke, lineStroke, rectStroke, rotatePoints, scribbleStroke, seededRandom, triangleStroke } from './test-helpers';
 import { v2, type Vec2 } from './vec';
 
 function expectRectClose(rect: RecognizedRect, x0: number, y0: number, w: number, h: number, tolerance: number): void {
@@ -116,6 +116,93 @@ describe('recognizeStroke: rectangles', () => {
   });
 });
 
+describe('recognizeStroke: triangles', () => {
+  const windingOf = (corners: readonly Vec2[]): number =>
+    Math.sign((corners[1].x - corners[0].x) * (corners[2].y - corners[0].y) - (corners[1].y - corners[0].y) * (corners[2].x - corners[0].x));
+
+  const expectTriangle = (points: Vec2[], winding: number): [Vec2, Vec2, Vec2] => {
+    const result = recognizeStroke(points);
+    expect(result.reason).toBe('triangle');
+    expect(result.shape?.kind).toBe('triangle');
+    if (result.shape?.kind !== 'triangle') throw new Error(`expected a triangle, got ${result.reason}`);
+    expect(result.shape.corners).toHaveLength(3);
+    for (const corner of result.shape.corners) {
+      expect(Number.isFinite(corner.x)).toBe(true);
+      expect(Number.isFinite(corner.y)).toBe(true);
+    }
+    expect(windingOf(result.shape.corners)).toBe(winding);
+    const start = points[0];
+    const distances = result.shape.corners.map((corner) => Math.hypot(corner.x - start.x, corner.y - start.y));
+    expect(distances[0]).toBe(Math.min(...distances));
+    return result.shape.corners;
+  };
+
+  it('recognises a clean triangle', () => {
+    const result = recognizeStroke([v2(0, 0), v2(1000, 0), v2(350, 800), v2(0, 0)]);
+    expect(result.reason).toBe('triangle');
+    expect(result.shape?.kind).toBe('triangle');
+    if (result.shape?.kind !== 'triangle') return;
+    expect(result.shape.corners).toHaveLength(3);
+    const expected = [v2(0, 0), v2(1000, 0), v2(350, 800)];
+    for (const [index, corner] of result.shape.corners.entries()) {
+      expect(corner.x).toBeCloseTo(expected[index].x, 6);
+      expect(corner.y).toBeCloseTo(expected[index].y, 6);
+    }
+  });
+
+  it.each([
+    [[v2(0, 0), v2(1000, 0), v2(500, 866)]],
+    [[v2(0, 0), v2(1000, 0), v2(0, 800)]],
+    [[v2(0, 0), v2(1000, 0), v2(350, 800)]],
+  ] as const)('recognises a dense triangle %j in either winding', (corners) => {
+    for (const clockwise of [false, true]) {
+      const corners3 = triangleStroke([...corners], { clockwise });
+      expectTriangle(corners3, clockwise ? -1 : 1);
+    }
+  });
+
+  it('keeps arbitrary orientation and follows the pen from an edge start', () => {
+    const corners: [Vec2, Vec2, Vec2] = [v2(0, 0), v2(1000, 0), v2(350, 800)];
+    for (const startFraction of [0.17, 0.55]) {
+      const points = rotatePoints(triangleStroke(corners, { startFraction }), 0.6, v2(500, 400));
+      const fitted = expectTriangle(points, 1);
+      const rotated = rotatePoints(corners, 0.6, v2(500, 400));
+      for (const corner of fitted) {
+        expect(rotated.some((candidate) => Math.hypot(candidate.x - corner.x, candidate.y - corner.y) < 80)).toBe(true);
+      }
+    }
+  });
+
+  it('accepts a small closing gap', () => {
+    const points = triangleStroke([v2(0, 0), v2(1000, 0), v2(350, 800)], { gapFraction: 0.02 });
+    expectTriangle(points, 1);
+  });
+
+  it('autocorrects deterministic jitter 40 on a 1000mm triangle', () => {
+    const points = triangleStroke([v2(0, 0), v2(1000, 0), v2(350, 800)], { jitter: 40 });
+    expectTriangle(points, 1);
+  });
+
+  it('autocorrects deterministic jitter 70 on a 1000mm triangle', () => {
+    const points = triangleStroke([v2(0, 0), v2(1000, 0), v2(350, 800)], { jitter: 70 });
+    expectTriangle(points, 1);
+  });
+
+  it('classifies triangles at tiny scale and far-off coordinates', () => {
+    expectTriangle(triangleStroke([v2(0, 0), v2(0.01, 0), v2(0.0035, 0.008)]), 1);
+    expectTriangle(triangleStroke([v2(1e9, -1e9), v2(1e9 + 1000, -1e9), v2(1e9 + 350, -1e9 + 800)]), 1);
+  });
+
+  it('does not recognise open, collinear, retraced, or scribbled strokes as triangles', () => {
+    const corners: [Vec2, Vec2, Vec2] = [v2(0, 0), v2(1000, 0), v2(350, 800)];
+    expect(recognizeStroke(triangleStroke(corners, { gapFraction: 0.3 })).shape?.kind).not.toBe('triangle');
+    expect(recognizeStroke([v2(0, 0), v2(500, 0), v2(1000, 0), v2(0, 0)]).shape?.kind).not.toBe('triangle');
+    const closed = triangleStroke(corners);
+    expect(recognizeStroke([...closed, ...closed.slice(1)]).shape?.kind).not.toBe('triangle');
+    expect(recognizeStroke(scribbleStroke()).shape?.kind).not.toBe('triangle');
+  });
+});
+
 describe('recognizeStroke: closed outlines', () => {
   const polyStroke = (corners: Vec2[], pointsPerSide = 20, jitter = 0, seed = 5): Vec2[] => {
     const rand = seededRandom(seed);
@@ -132,9 +219,8 @@ describe('recognizeStroke: closed outlines', () => {
     return points;
   };
 
-  it('recognises triangles, trapezoids, pentagons and concave outlines as polygons with vertices preserved', () => {
+  it('recognises trapezoids, pentagons and concave outlines as polygons with vertices preserved', () => {
     const cases: Vec2[][] = [
-      [v2(0, 0), v2(400, 0), v2(100, 300)],
       [v2(0, 0), v2(400, 0), v2(300, 200), v2(100, 200)],
       [v2(0, 0), v2(300, 0), v2(400, 200), v2(200, 350), v2(-50, 200)],
       [v2(0, 0), v2(400, 0), v2(400, 100), v2(100, 100), v2(100, 300), v2(0, 300)],
@@ -205,12 +291,17 @@ describe('recognizeStroke: closed outlines', () => {
     expect(recognizeStroke([v2(0, 0), v2(500, 0), v2(0, 0)]).shape).toBeNull();
   });
 
-  it('simplifies dense collinear samples down to the real corners', () => {
-    const triangle = polyStroke([v2(0, 0), v2(400, 0), v2(100, 300)], 120, 0);
-    const result = recognizeStroke(triangle);
+  it('simplifies a dense pentagon down to the real corners', () => {
+    const pentagon = polyStroke([v2(0, 0), v2(300, 0), v2(400, 200), v2(200, 350), v2(-50, 200)], 120, 0);
+    const result = recognizeStroke(pentagon);
     expect(result.shape?.kind).toBe('polygon');
     if (result.shape?.kind !== 'polygon') return;
-    expect(result.shape.corners.length).toBe(3);
+    expect(result.shape.corners.length).toBe(5);
+  });
+
+  it('fits a clean three-corner stroke as a triangle rather than a sampled polygon', () => {
+    const result = recognizeStroke(polyStroke([v2(0, 0), v2(400, 0), v2(100, 300)], 120, 0));
+    expect(result.shape?.kind).toBe('triangle');
   });
 
   it('does not box arbitrary quadrilaterals into rectangles', () => {

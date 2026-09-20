@@ -1,7 +1,28 @@
-import { PLANES, type PlaneKind } from './plane';
+import { PLANES, type PlaneKind, type WorkPlane } from './plane';
+import type { Projector } from './snap';
 import { closestPointOnSegment } from './spatial-snap';
 import type { EntityInput, Vertex } from './sketch';
-import { add, clone, cross, distance, dot, length, normalize, scale, sub, type Vec3 } from './vec';
+import {
+  add,
+  add2,
+  clone,
+  cross,
+  cross2,
+  distance,
+  distance2,
+  dot,
+  dot2,
+  length,
+  length2,
+  normalize,
+  scale,
+  scale2,
+  sub,
+  sub2,
+  v2,
+  type Vec2,
+  type Vec3,
+} from './vec';
 
 export const PARALLEL_SNAP_DEG = 10;
 
@@ -213,6 +234,203 @@ export function snapLineToSegments(
   });
   const best = candidates[0];
   return { a: best.a, b: best.b, mode: best.mode, entityId: best.entityId };
+}
+
+export interface ProtectedTriangleAnchor {
+  /** World point that an explicit object snap deliberately placed. */
+  point: Vec3;
+  /** Triangle corner that should remain at `point`. */
+  cornerIndex: number;
+}
+
+export interface TriangleEdgeSnapOptions {
+  plane: WorkPlane;
+  projector: Projector;
+  tolerancePx: number;
+  /** Maximum angle between the two finite edges, in degrees. */
+  orientationDeg?: number;
+  /** Preserve this explicit object-snap corner when fitting an edge. */
+  protectedAnchor?: ProtectedTriangleAnchor;
+}
+
+export interface TriangleEdgeSnapResult {
+  corners: [Vec3, Vec3, Vec3];
+  mode: 'parallel' | 'contact';
+  edgeIndex: number;
+  entityId?: string;
+  segmentIndex?: number;
+  distance: number;
+  angleDeg: number;
+}
+
+interface TriangleEdgeCandidate {
+  edgeIndex: number;
+  segment: JoinSegment;
+  angleDeg: number;
+  distance: number;
+  overlap: number;
+}
+
+function rotate2(point: Vec2, pivot: Vec2, angle: number): Vec2 {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const rel = sub2(point, pivot);
+  return v2(pivot.x + rel.x * c - rel.y * s, pivot.y + rel.x * s + rel.y * c);
+}
+
+function screenDistance(a: Vec2, b: Vec2): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+/** Estimate the world length represented by one screen pixel for simple test projectors. */
+function worldPerPixelAt(projector: Projector, plane: WorkPlane, reference: Vec3): number {
+  const direct = projector.worldPerPixel?.(reference);
+  if (direct != null && Number.isFinite(direct) && direct > 0) return direct;
+  const screen = projector.project(reference);
+  const alongU = projector.project(add(reference, plane.u));
+  const alongV = projector.project(add(reference, plane.v));
+  if (!screen || (!alongU && !alongV)) return 1;
+  const pixelsPerWorld = Math.max(
+    alongU ? screenDistance(screen, alongU) : 0,
+    alongV ? screenDistance(screen, alongV) : 0,
+  );
+  return pixelsPerWorld > 1e-9 ? 1 / pixelsPerWorld : 1;
+}
+
+function triangleEdgeCandidate(
+  edgeIndex: number,
+  triangle: readonly Vec2[],
+  segment: JoinSegment,
+  plane: WorkPlane,
+  orientationDeg: number,
+  distanceLimit: number,
+): TriangleEdgeCandidate | null {
+  const edgeA = triangle[edgeIndex];
+  const edgeB = triangle[(edgeIndex + 1) % 3];
+  if (!edgeA || !edgeB || !plane.contains(segment.a, 1e-6) || !plane.contains(segment.b, 1e-6)) return null;
+  const edge = sub2(edgeB, edgeA);
+  const target = sub2(plane.toPlane(segment.b), plane.toPlane(segment.a));
+  const edgeLength = length2(edge);
+  const targetLength = length2(target);
+  if (edgeLength < 1e-9 || targetLength < 1e-9) return null;
+  const cosine = Math.min(1, Math.abs(dot2(edge, target)) / (edgeLength * targetLength));
+  const angleDeg = (Math.acos(cosine) * 180) / Math.PI;
+  if (angleDeg > orientationDeg + 1e-9) return null;
+
+  const axis = v2(target.x / targetLength, target.y / targetLength);
+  const targetStart = plane.toPlane(segment.a);
+  const edgeStartAlong = dot2(sub2(edgeA, targetStart), axis);
+  const edgeEndAlong = dot2(sub2(edgeB, targetStart), axis);
+  const edgeLo = Math.min(edgeStartAlong, edgeEndAlong);
+  const edgeHi = Math.max(edgeStartAlong, edgeEndAlong);
+  const overlap = Math.min(targetLength, edgeHi) - Math.max(0, edgeLo);
+  // A nearby infinite line is not enough. The finite target edge must cover part
+  // of the triangle edge before it can influence the completed triangle.
+  if (overlap <= 1e-6) return null;
+
+  const normal = v2(-axis.y, axis.x);
+  const edgeOffset = Math.max(
+    Math.abs(dot2(sub2(edgeA, targetStart), normal)),
+    Math.abs(dot2(sub2(edgeB, targetStart), normal)),
+  );
+  if (edgeOffset > distanceLimit) return null;
+  return { edgeIndex, segment, angleDeg, distance: edgeOffset, overlap };
+}
+
+/**
+ * Align a recognised triangle edge to the nearest compatible finite shape edge.
+ * The candidate fit is rigid: side lengths, angles, and winding are preserved.
+ * A fit within one snap radius is translated onto the target line; a fit in the
+ * wider alignment band is only rotated so the original gap remains visible.
+ */
+export function snapTriangleToSegments(
+  corners: readonly Vec3[],
+  segments: readonly JoinSegment[],
+  options: TriangleEdgeSnapOptions,
+): TriangleEdgeSnapResult | null {
+  if (
+    corners.length !== 3 ||
+    !corners.every((point) => options.plane.contains(point, 1e-6)) ||
+    !corners.every((point) => options.projector.project(point) !== null) ||
+    !(options.tolerancePx > 0) ||
+    !Number.isFinite(options.tolerancePx)
+  ) {
+    return null;
+  }
+  const triangle = corners.map((point) => options.plane.toPlane(point));
+  const orientationDeg = options.orientationDeg ?? PARALLEL_SNAP_DEG;
+  if (!(orientationDeg >= 0) || !Number.isFinite(orientationDeg)) return null;
+  const reference = options.plane.toWorld(v2(
+    triangle.reduce((sum, point) => sum + point.x, 0) / 3,
+    triangle.reduce((sum, point) => sum + point.y, 0) / 3,
+  ));
+  const snapRadius = options.tolerancePx * worldPerPixelAt(options.projector, options.plane, reference);
+  if (!(snapRadius > 0) || !Number.isFinite(snapRadius)) return null;
+  const alignmentRadius = snapRadius * 3;
+  const candidates: TriangleEdgeCandidate[] = [];
+  for (let edgeIndex = 0; edgeIndex < 3; edgeIndex++) {
+    for (const segment of segments) {
+      if (!options.projector.project(segment.a) || !options.projector.project(segment.b)) continue;
+      const candidate = triangleEdgeCandidate(edgeIndex, triangle, segment, options.plane, orientationDeg, alignmentRadius);
+      if (candidate) candidates.push(candidate);
+    }
+  }
+  if (!candidates.length) return null;
+  candidates.sort((left, right) => {
+    if (left.distance !== right.distance) return left.distance - right.distance;
+    if (left.angleDeg !== right.angleDeg) return left.angleDeg - right.angleDeg;
+    const byId = (left.segment.entityId ?? '').localeCompare(right.segment.entityId ?? '');
+    if (byId !== 0) return byId;
+    const bySegment = (left.segment.index ?? 0) - (right.segment.index ?? 0);
+    return bySegment || left.edgeIndex - right.edgeIndex;
+  });
+
+  const protectedPlane = options.protectedAnchor ? options.plane.toPlane(options.protectedAnchor.point) : null;
+  for (const candidate of candidates) {
+    const edgeA = triangle[candidate.edgeIndex];
+    const edgeB = triangle[(candidate.edgeIndex + 1) % 3];
+    if (!edgeA || !edgeB) continue;
+    const targetA = options.plane.toPlane(candidate.segment.a);
+    const targetB = options.plane.toPlane(candidate.segment.b);
+    const edgeDir = sub2(edgeB, edgeA);
+    let targetDir = sub2(targetB, targetA);
+    if (dot2(edgeDir, targetDir) < 0) targetDir = v2(-targetDir.x, -targetDir.y);
+    const edgeLength = length2(edgeDir);
+    const targetLength = length2(targetDir);
+    if (edgeLength < 1e-9 || targetLength < 1e-9) continue;
+    const edgeUnit = v2(edgeDir.x / edgeLength, edgeDir.y / edgeLength);
+    const targetUnit = v2(targetDir.x / targetLength, targetDir.y / targetLength);
+    const angle = Math.atan2(cross2(edgeUnit, targetUnit), dot2(edgeUnit, targetUnit));
+    const pivot = protectedPlane ?? v2((edgeA.x + edgeB.x) / 2, (edgeA.y + edgeB.y) / 2);
+    let transformed = triangle.map((point) => rotate2(point, pivot, angle));
+    let mode: 'parallel' | 'contact' = 'parallel';
+    if (candidate.distance <= snapRadius) {
+      const normal = v2(-targetUnit.y, targetUnit.x);
+      const transformedEdgeMid = v2(
+        (transformed[candidate.edgeIndex].x + transformed[(candidate.edgeIndex + 1) % 3].x) / 2,
+        (transformed[candidate.edgeIndex].y + transformed[(candidate.edgeIndex + 1) % 3].y) / 2,
+      );
+      const shift = dot2(sub2(targetA, transformedEdgeMid), normal);
+      if (protectedPlane && Math.abs(shift) > 1e-6) return null;
+      transformed = transformed.map((point) => add2(point, scale2(normal, shift)));
+      mode = 'contact';
+    }
+    if (protectedPlane) {
+      const protectedIndex = options.protectedAnchor?.cornerIndex ?? -1;
+      if (protectedIndex >= 0 && protectedIndex < 3 && distance2(transformed[protectedIndex], protectedPlane) > 1e-5) return null;
+    }
+    const next = transformed.map((point) => options.plane.toWorld(point)) as [Vec3, Vec3, Vec3];
+    return {
+      corners: next,
+      mode,
+      edgeIndex: candidate.edgeIndex,
+      entityId: candidate.segment.entityId,
+      segmentIndex: candidate.segment.index,
+      distance: candidate.distance,
+      angleDeg: candidate.angleDeg,
+    };
+  }
+  return null;
 }
 
 /** Move whole rectangle edges so corners land on nearby vertices and the result stays a rectangle. */

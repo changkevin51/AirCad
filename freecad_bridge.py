@@ -27,7 +27,7 @@ import threading
 import uuid
 from typing import Any, Iterable, Mapping
 
-from freecad_import import validated_extrusion_vector
+from freecad_import import validated_extrusion_vector, validated_prism_vector, validated_triangle_points
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -42,7 +42,7 @@ SNAPSHOT_ENV = "AIRCAD_FREECAD_SNAPSHOT"
 FREECAD_EXECUTABLE_ENV = "FREECAD_EXECUTABLE"
 _SNAPSHOT_LOCK = threading.Lock()
 
-ENTITY_POINT_COUNTS = {"line": (2, 2), "rect": (4, 4), "polyline": (2, None), "extrusion": (4, 4)}
+ENTITY_POINT_COUNTS = {"line": (2, 2), "rect": (4, 4), "triangle": (3, 3), "polyline": (2, None), "extrusion": (4, 4), "prism": (3, 3)}
 
 
 def _numeric(value: object) -> int | float:
@@ -92,11 +92,15 @@ def normalize_entity(entity: object) -> dict[str, Any]:
         raise ValueError("a {} needs {} points".format(kind, minimum if maximum == minimum else f"at least {minimum}"))
     points = [_point(point) for point in raw_points]
     normalized: dict[str, Any] = {"type": kind, "points": points}
-    if kind == "extrusion":
+    if kind == "triangle":
+        validated_triangle_points(points)
+    if kind in {"extrusion", "prism"}:
         vector = entity.get("vector")
         if not isinstance(vector, (list, tuple)) or len(vector) != 3:
-            raise ValueError("an extrusion needs a three-coordinate vector")
-        normalized["vector"] = list(validated_extrusion_vector(points, [_numeric(value) for value in vector]))
+            name = "an extrusion" if kind == "extrusion" else "a prism"
+            raise ValueError(f"{name} needs a three-coordinate vector")
+        validator = validated_prism_vector if kind == "prism" else validated_extrusion_vector
+        normalized["vector"] = list(validator(points, [_numeric(value) for value in vector]))
     if entity.get("id") is not None:
         normalized["id"] = str(entity["id"])
     return normalized

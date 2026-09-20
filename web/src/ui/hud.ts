@@ -5,7 +5,7 @@ import type { PlaneInfo } from '../model/plane';
 import type { SnapType } from '../model/snap';
 import { inputStatus } from './input-panel';
 
-export type Mode = 'READY' | 'DRAWING' | 'EXTRUDING' | 'ORBIT' | 'PAN';
+export type Mode = 'READY' | 'DRAWING' | 'EXTRUDING' | 'MOVING' | 'SCALING' | 'ORBIT' | 'PAN';
 
 export interface HudState {
   mode: Mode;
@@ -78,6 +78,8 @@ const INSTRUCTIONS: Record<Mode, string> = {
   READY: 'Ready — left-drag to draw, click to select',
   DRAWING: 'Drawing — release to commit',
   EXTRUDING: 'Push/Pull — drag or hold Space to pull',
+  MOVING: 'Move — pinch or drag on the work plane · Enter / M applies',
+  SCALING: 'Scale — pinch or drag a corner · Enter / R applies',
   ORBIT: 'Orbiting — release to stop',
   PAN: 'Panning — release to stop',
 };
@@ -210,6 +212,16 @@ export class Hud {
     }
     if (state.edgeOn) {
       return `Work plane ${state.plane.label} is edge-on. Press A for auto, Tab or 1 / 2 / 3, or orbit with Shift.`;
+    }
+    if (state.mode === 'SCALING') {
+      return state.tracking === 'lost'
+        ? 'Tracking lost — scaling paused. Show your hand, release the pinch, then pinch again to continue.'
+        : 'Pinch or drag a corner to scale proportionally. The opposite corner stays fixed. Enter / R applies · Esc cancels.';
+    }
+    if (state.mode === 'MOVING') {
+      return state.tracking === 'lost'
+        ? 'Tracking lost — move paused. Show your hand, release the pinch, then pinch again to continue.'
+        : 'Pinch or left-drag (or hold Space) to move on the work plane. Tab changes plane. Enter / M applies · Esc cancels.';
     }
     if (state.inputSource === 'oak' && state.spatialState === 'origin') {
       return 'Depth camera needs an origin — press O and hold the tracked tip still.';

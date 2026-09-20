@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import * as THREE from 'three';
 import type { AirCadApi } from './main';
 import type { HandsMessage, NavMessage, SpatialMessage, TrackedHandMessage } from './input/tracker-client';
+import type { EdgeGuide } from './model/edge-inference';
 import { adaptiveGridStep } from './model/snap';
 import { makeRect, rectFrame, type ExtrusionEntity, type RectEntity } from './model/sketch';
 import { add, distance, normalize, scale, sub, v2, v3, type Vec2, type Vec3 } from './model/vec';
@@ -152,6 +153,7 @@ vi.mock('./render/sketch-renderer', async (importOriginal) => {
     lastLabel: unknown = null;
     ink: unknown = null;
     ghost: { points: Vec3[]; closed: boolean; label: { text: string; at: Vec3 } | null } | null = null;
+    guide: EdgeGuide | null = null;
     constructor() {
       state.renderer = this;
     }
@@ -166,6 +168,9 @@ vi.mock('./render/sketch-renderer', async (importOriginal) => {
     }
     setInk(points: unknown) {
       this.ink = points;
+    }
+    setEdgeGuide(guide: EdgeGuide | null) {
+      this.guide = guide;
     }
     setGhost(points: Vec3[] | null, closed: boolean, label: { text: string; at: Vec3 } | null = null) {
       this.ghost = points ? { points, closed, label } : null;
@@ -1404,6 +1409,27 @@ function strokeThroughSpatial(worldPoints: Vec3[]): void {
 }
 
 describe('depth planar strokes', () => {
+  it('previews and commits a depth-drawn triangle through the shared stroke pipeline', () => {
+    enablePlanarDepth();
+    const corners = [v3(0, 0, 0), v3(4000, 0, 0), v3(1200, 3000, 0)];
+    api.pushSpatial(spatialAt(corners[0]));
+    api.hold('draw', true);
+    for (const point of [...corners.slice(1), corners[0]]) {
+      tick();
+      api.pushSpatial(spatialAt(point));
+    }
+    tick();
+    expect(state.renderer.ghost?.points).toHaveLength(3);
+    api.hold('draw', false);
+    expect(api.lastRecognition()?.reason).toBe('triangle');
+    expect(api.sketch.last).toMatchObject({ type: 'triangle', corners });
+    const committed = api.sketch.serialize();
+    api.press('undo');
+    expect(api.sketch.size).toBe(0);
+    api.press('redo');
+    expect(api.sketch.serialize()).toBe(committed);
+  });
+
   it('projects measured points onto the work plane and completes a rectangle', () => {
     enablePlanarDepth();
     strokeThroughSpatial([
@@ -1876,15 +1902,15 @@ describe('closed outlines and line loops', () => {
 
   it('draws a triangle, then Q + drag + typed depth + Enter commits it exactly once', () => {
     drawStroke([v2(100, 100), v2(500, 100), v2(200, 400), v2(100, 100)]);
-    const polygon = api.sketch.last;
-    expect(polygon?.type).toBe('polygon');
-    if (polygon?.type !== 'polygon') throw new Error('expected polygon');
-    expect(polygon.corners).toHaveLength(3);
+    const triangle = api.sketch.last;
+    expect(triangle?.type).toBe('triangle');
+    if (triangle?.type !== 'triangle') throw new Error('expected triangle');
+    expect(triangle.corners).toHaveLength(3);
     const saved = api.sketch.serialize();
 
     api.setCursor(v2(250, 200));
     api.press('select');
-    expect(api.selected()?.id).toBe(polygon.id);
+    expect(api.selected()?.id).toBe(triangle.id);
     api.press('extrude');
     expect(api.extrusion()).toMatchObject({ depth: 0 });
     api.hold('draw', true);
@@ -1899,8 +1925,8 @@ describe('closed outlines and line loops', () => {
     expect(api.extrusion()!.depth).toBeCloseTo(12.345);
     api.press('confirm');
     expect(api.extrusion()).toBeNull();
-    expect(api.sketch.get(polygon.id)).toMatchObject({ type: 'extrusion', depth: 12.345, corners: polygon.corners });
-    expect(api.commands.undo()).toBe('extrude 12.3 mm');
+    expect(api.sketch.get(triangle.id)).toMatchObject({ type: 'prism', depth: 12.345, corners: triangle.corners });
+    expect(api.commands.undo()).toBe('extrude prism 12.3 mm');
     expect(api.sketch.serialize()).toBe(saved);
   });
 
@@ -1916,8 +1942,8 @@ describe('closed outlines and line loops', () => {
     emitHands(handAt(250, 170, { pinching: false }));
     expect(api.extrusion()).not.toBeNull();
     api.press('confirm');
-    expect(api.sketch.last).toMatchObject({ type: 'extrusion' });
-    expect((api.sketch.last as ExtrusionEntity).depth).toBeCloseTo(30);
+    expect(api.sketch.last).toMatchObject({ type: 'prism' });
+    expect((api.sketch.last as { depth: number }).depth).toBeCloseTo(30);
   });
 
   it('selects and extrudes a loop of separately drawn lines, then cancels and commits cleanly', () => {
@@ -2369,5 +2395,147 @@ describe('voice distance', () => {
     api.hold('draw', false);
     expect(api.sketch.last?.type).toBe('rect');
     expect(h.guide).toHaveBeenLastCalledWith(null, null);
+  });
+});
+describe('parallel edge guides', () => {
+  function setupParallelScene(): { refId: string; px: number; gap: number } {
+    const added = api.commands.addLine(v3(0, 0, 0), v3(4000, 0, 0));
+    if (!added.ok) throw new Error(added.error);
+    api.press('viewTop');
+    api.press('fitAll');
+    finishTransitions();
+    setGrid(false);
+    const px = Math.abs(api.project(v3(1, 0, 0))!.x - api.project(v3(0, 0, 0))!.x);
+    return { refId: added.entity.id, px, gap: 70 / px };
+  }
+
+  it('previews and commits an equal-length line parallel to a nearby side', () => {
+    const { refId, px, gap } = setupParallelScene();
+    setCursorWorld(v3(0, gap, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(2000, gap, 0));
+    setCursorWorld(v3(4000 - 5 / px, gap + 2 / px, 0));
+    tick();
+    const guide = state.renderer.guide;
+    expect(guide?.matchedLength).toBe(true);
+    expect(guide?.reference.entityId).toBe(refId);
+    const ghost = state.renderer.ghost;
+    expect(ghost).not.toBeNull();
+    const previewEnd = ghost!.points[ghost!.points.length - 1];
+    expect(previewEnd.x).toBeCloseTo(4000, 5);
+    expect(previewEnd.y).toBeCloseTo(gap, 5);
+    expect(previewEnd.z).toBeCloseTo(0, 5);
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(2);
+    expect(state.renderer.guide).toBeNull();
+    const line = api.sketch.all[1];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.a).toEqual(ghost!.points[0]);
+      expect(line.b).toEqual(previewEnd);
+    }
+    const ref = api.sketch.all[0];
+    expect(ref.id).toBe(refId);
+    if (ref.type === 'line') {
+      expect(ref.a).toEqual(v3(0, 0, 0));
+      expect(ref.b).toEqual(v3(4000, 0, 0));
+    }
+    api.commands.undo();
+    expect(api.sketch.size).toBe(1);
+    api.commands.redo();
+    expect(api.sketch.size).toBe(2);
+    expect(api.sketch.all[1]).toEqual(line);
+  });
+
+  it('previews and commits the same correction for a depth-drawn stroke', () => {
+    const { refId, px, gap } = setupParallelScene();
+    enablePlanarDepth();
+    api.pushSpatial(spatialAt(v3(0, gap, 0)));
+    api.hold('draw', true);
+    tick();
+    api.pushSpatial(spatialAt(v3(2000, gap, 0)));
+    tick();
+    api.pushSpatial(spatialAt(v3(4000 - 5 / px, gap + 2 / px, 0)));
+    tick();
+    const guide = state.renderer.guide;
+    expect(guide?.matchedLength).toBe(true);
+    expect(guide?.reference.entityId).toBe(refId);
+    const ghost = state.renderer.ghost;
+    expect(ghost).not.toBeNull();
+    const previewEnd = ghost!.points[ghost!.points.length - 1];
+    expect(previewEnd.x).toBeCloseTo(4000, 3);
+    expect(previewEnd.y).toBeCloseTo(gap, 3);
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(2);
+    const line = api.sketch.all[1];
+    expect(line.type).toBe('line');
+    if (line.type === 'line') {
+      expect(line.b.x).toBeCloseTo(4000, 3);
+      expect(line.b.y).toBeCloseTo(gap, 3);
+    }
+    expect(state.renderer.guide).toBeNull();
+    expect(state.measure.isOpen).toBe(false);
+  });
+
+  it('shows a length-only suggestion for a shorter side and clears it on cancel', () => {
+    const { refId, px, gap } = setupParallelScene();
+    setCursorWorld(v3(0, gap, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(1200, gap, 0));
+    setCursorWorld(v3(2400 - 5 / px, gap + 2 / px, 0));
+    tick();
+    const guide = state.renderer.guide;
+    expect(guide).not.toBeNull();
+    expect(guide!.matchedLength).toBe(false);
+    expect(guide!.reference.entityId).toBe(refId);
+    expect(guide!.target.x).toBeCloseTo(4000, 3);
+    const size = api.sketch.size;
+    api.press('cancel');
+    expect(state.renderer.guide).toBeNull();
+    expect(state.renderer.ghost).toBeNull();
+    expect(api.sketch.size).toBe(size);
+  });
+
+  it('drops the guide when the endpoint leaves the guide band', () => {
+    const { px, gap } = setupParallelScene();
+    setCursorWorld(v3(0, gap, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(2000, gap, 0));
+    tick();
+    expect(state.renderer.guide).not.toBeNull();
+    setCursorWorld(v3(2000, gap + 90 / px, 0));
+    tick();
+    expect(state.renderer.guide).toBeNull();
+    api.hold('draw', false);
+    expect(api.sketch.size).toBe(1);
+  });
+
+  it('guides the last leg of an unfinished outline without touching its raw first side', () => {
+    const added = api.commands.addLine(v3(0, 0, 0), v3(0, 4000, 0));
+    if (!added.ok) throw new Error(added.error);
+    api.press('viewTop');
+    api.press('fitAll');
+    finishTransitions();
+    setGrid(false);
+    const px = Math.abs(api.project(v3(1, 0, 0))!.x - api.project(v3(0, 0, 0))!.x);
+    const gap = 70 / px;
+    setCursorWorld(v3(gap + 2000, -400, 0));
+    api.hold('draw', true);
+    setCursorWorld(v3(gap, -400, 0));
+    tick();
+    expect(state.renderer.guide).toBeNull();
+    setCursorWorld(v3(gap, 3600 - 5 / px, 0));
+    tick();
+    const guide = state.renderer.guide;
+    expect(guide).not.toBeNull();
+    expect(guide!.matchedLength).toBe(true);
+    expect(guide!.reference.entityId).toBe(added.entity.id);
+    expect(guide!.start.x).toBeCloseTo(gap, 3);
+    expect(guide!.start.y).toBeCloseTo(-400, 3);
+    expect(guide!.target.x).toBeCloseTo(gap, 3);
+    expect(guide!.target.y).toBeCloseTo(3600, 3);
+    api.press('cancel');
+    expect(state.renderer.guide).toBeNull();
+    expect(api.sketch.size).toBe(1);
   });
 });

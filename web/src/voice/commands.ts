@@ -152,7 +152,7 @@ function dispatchFacePull(command: VoiceCommand, operation: Extract<VoiceOperati
 
   if (isRectangleProfile(base.corners)) {
     const frame = rectFrame(base);
-    const resultFrame = rectFrame({ id: base.id, type: 'rect', corners: pulled.corners as [Vec3, Vec3, Vec3, Vec3] });
+    const resultFrame = rectFrame({ corners: pulled.corners as [Vec3, Vec3, Vec3, Vec3] });
     if (solid || measurement.axis !== 'n') {
       const oldSize = measurement.axis === 'u' ? frame.width : measurement.axis === 'v' ? frame.height : Math.abs(baseDepth);
       if (!validDistance(oldSize + signed)) throw new Error('That distance would collapse, invert or exceed a size limit');

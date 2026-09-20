@@ -13,6 +13,8 @@ const ICONS: Record<Entity['type'], string> = {
   rect: icons.rectangle,
   polygon: icons.polygon,
   extrusion: icons.box,
+  triangle: icons.triangle,
+  prism: icons.box,
   circle: icons.circle,
 };
 

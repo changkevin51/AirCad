@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { pickFace } from './pick';
-import { makeRect, type CircleEntity, type Entity, type RectEntity, type ExtrusionEntity } from './sketch';
+import { makeRect, type CircleEntity, type Entity, type ExtrusionEntity, type PrismEntity, type RectEntity, type TriangleEntity } from './sketch';
 import { frontViewProjector, topViewProjector } from './test-helpers';
 import { v2, v3 } from './vec';
 
@@ -72,6 +72,31 @@ describe('face selection', () => {
     const projector = topViewProjector(1, 0, 0);
     for (const entities of [[circle, rect], [rect, circle]]) {
       expect(pickFace(entities, v2(0, 0), projector)?.id).toBe('c');
+    }
+  });
+
+  it('selects triangle interiors, prism caps and sides, and rejects behind-camera hits', () => {
+    const triangle: TriangleEntity = { id: 't', type: 'triangle', corners: [v3(0, 0, 0), v3(300, 0, 0), v3(0, 300, 0)] };
+    const top = topViewProjector(1, 0, 0);
+    expect(pickFace([triangle], v2(50, -50), top)?.id).toBe('t');
+    expect(pickFace([triangle], v2(250, -250), top)).toBeNull();
+    expect(pickFace([triangle], v2(50, -50), { ...top, ray: () => ({ origin: v3(50, 50, -100), dir: v3(0, 0, -1) }) })).toBeNull();
+
+    const prism: PrismEntity = { id: 'p', type: 'prism', corners: triangle.corners.map((point) => ({ ...point })) as TriangleEntity['corners'], depth: 100 };
+    expect(pickFace([prism], v2(50, -50), top)?.id).toBe('p');
+    expect(pickFace([prism], v2(150, -50), frontViewProjector(1, 0, 0))?.id).toBe('p');
+    expect(pickFace([triangle], v2(150, -50), frontViewProjector(1, 0, 0))).toBeNull();
+  });
+
+  it('prefers the nearer of an overlapping triangle or prism and a rectangle', () => {
+    const near: TriangleEntity = { id: 'near', type: 'triangle', corners: [v3(0, 0, 100), v3(300, 0, 100), v3(0, 300, 100)] };
+    const top = topViewProjector(1, 0, 0);
+    for (const entities of [[near, rect], [rect, near]]) {
+      expect(pickFace(entities, v2(50, -50), top)?.id).toBe('near');
+    }
+    const prism: PrismEntity = { id: 'p', type: 'prism', corners: [v3(0, 0, 0), v3(300, 0, 0), v3(0, 300, 0)], depth: 50 };
+    for (const entities of [[prism, rect], [rect, prism]]) {
+      expect(pickFace(entities, v2(50, -50), top)?.id).toBe('p');
     }
   });
 });

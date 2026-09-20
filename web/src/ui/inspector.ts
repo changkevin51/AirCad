@@ -26,6 +26,8 @@ const ICONS: Record<Entity['type'], string> = {
   rect: icons.rectangle,
   polygon: icons.polygon,
   extrusion: icons.box,
+  triangle: icons.triangle,
+  prism: icons.box,
   circle: icons.circle,
 };
 
@@ -391,7 +393,7 @@ export class Inspector {
       this.widthInput.value = trimNumber(width);
       this.heightInput.value = trimNumber(height);
       if (entity.type === 'extrusion') this.depthInput.value = trimNumber(entity.depth);
-    } else if (entity.type === 'extrusion') {
+    } else if (entity.type === 'extrusion' || entity.type === 'prism') {
       this.depthInput.value = trimNumber(entity.depth);
     }
   }
@@ -450,7 +452,7 @@ export class Inspector {
     const rectangular = !!profile && isRectangleProfile(profile.corners);
     this.lengthForm.classList.toggle('hidden', entity.type !== 'line');
     this.sizeForm.classList.toggle('hidden', !rectangular);
-    this.depthForm.classList.toggle('hidden', entity.type !== 'extrusion');
+    this.depthForm.classList.toggle('hidden', entity.type !== 'extrusion' && entity.type !== 'prism');
     this.pushPullButton.classList.toggle('hidden', !profile || !isExtrudableProfile(profile.corners));
 
     if (entity.type === 'line' && !this.dirty(this.lengthInput)) this.fill(this.lengthInput, trimNumber(lineLength(entity)));
@@ -459,7 +461,7 @@ export class Inspector {
       if (!this.dirty(this.widthInput)) this.fill(this.widthInput, trimNumber(width));
       if (!this.dirty(this.heightInput)) this.fill(this.heightInput, trimNumber(height));
     }
-    if (entity.type === 'extrusion' && !this.dirty(this.depthInput)) this.fill(this.depthInput, trimNumber(entity.depth));
+    if ((entity.type === 'extrusion' || entity.type === 'prism') && !this.dirty(this.depthInput)) this.fill(this.depthInput, trimNumber(entity.depth));
 
     if (entity.type === 'line') {
       const point = (p: { x: number; y: number; z: number }) => `(${trimNumber(p.x)}, ${trimNumber(p.y)}, ${trimNumber(p.z)}) mm`;
@@ -469,7 +471,7 @@ export class Inspector {
       this.detailsBody.textContent = `Diameter ${trimNumber(entity.radius * 2)} mm · read-only`;
       this.details.classList.remove('hidden');
     } else if (!rectangular) {
-      this.detailsBody.textContent = entity.type === 'extrusion'
+      this.detailsBody.textContent = entity.type === 'extrusion' || entity.type === 'prism'
         ? `${entity.corners.length} edges · depth ${trimNumber(entity.depth)} mm`
         : `${entity.corners.length} edges`;
       this.details.classList.remove('hidden');

@@ -85,6 +85,18 @@ export function scribbleStroke(count = 120, seed = 11): Vec2[] {
   return points;
 }
 
+export function triangleStroke(corners: [Vec2, Vec2, Vec2], options: { pointsPerSide?: number; jitter?: number; startFraction?: number; clockwise?: boolean; gapFraction?: number; seed?: number } = {}): Vec2[] {
+  const { pointsPerSide = 30, jitter = 0, startFraction = 0, clockwise = false, gapFraction = 0, seed = 3 } = options;
+  const rand = seededRandom(seed);
+  const ordered = clockwise ? [...corners].reverse() : corners;
+  const perimeter = ordered.flatMap((a, index) => lineStroke(a, ordered[(index + 1) % 3], pointsPerSide + 1, jitter, rand).slice(0, -1));
+  const start = Math.floor(startFraction * perimeter.length);
+  const rotated = perimeter.slice(start).concat(perimeter.slice(0, start));
+  const points = rotated.slice(0, Math.max(2, Math.round(rotated.length * (1 - gapFraction))));
+  if (gapFraction === 0) points.push({ ...points[0] });
+  return points;
+}
+
 /**
  * Orthographic top-view projector: screen x = ox + world.x * scale,
  * screen y = oy - world.y * scale; rays travel straight down -Z.

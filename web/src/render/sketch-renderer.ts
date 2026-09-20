@@ -6,9 +6,10 @@ import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { entityCenter, entitySegments, entityTriangles, entityVertices, extrusionOffset, formatMm, isRectangleProfile, lineLength, rectFrame, type Entity, type SolidEntity } from '../model/sketch';
+import type { EdgeGuide } from '../model/edge-inference';
 import type { ProfileFace } from '../model/faces';
 import { triangulatePolygon } from '../model/polygon';
-import { add, scale } from '../model/vec';
+import { add, cross, normalize, scale, sub } from '../model/vec';
 import type { Vec3 } from '../model/vec';
 import type { Viewport } from '../scene/viewport';
 import { THREE_COLORS } from '../ui/theme';
@@ -70,6 +71,8 @@ class Label {
 export function entityLabel(entity: Entity): string {
   if (entity.type === 'line') return formatMm(lineLength(entity));
   if (entity.type === 'circle') return `Ø ${formatMm(entity.radius * 2)}`;
+  if (entity.type === 'triangle') return 'Triangle';
+  if (entity.type === 'prism') return `Depth ${formatMm(entity.depth)}`;
   if (!isRectangleProfile(entity.corners)) {
     return entity.type === 'extrusion'
       ? `${entity.corners.length} edges × ${formatMm(entity.depth)}`
@@ -113,6 +116,12 @@ export class SketchRenderer {
   private readonly hoverLabel = new Label('dim-label--hover');
   private readonly lastLabel = new Label('dim-label--last');
   private readonly extrusionLabel = new Label('dim-label--ghost');
+  private readonly edgeGuideMaterial: LineMaterial;
+  private readonly guideReferenceMaterial: LineMaterial;
+  private readonly guideLines: LineSegments2;
+  private readonly guideReference: LineSegments2;
+  private readonly edgeGuideLabel = new Label('dim-label--ghost');
+  private currentGuide: EdgeGuide | null = null;
 
   constructor(private readonly viewport: Viewport) {
     this.group.name = 'sketch';
@@ -169,6 +178,18 @@ export class SketchRenderer {
     this.hover.renderOrder = 5;
     this.ghost.renderOrder = 6;
 
+    this.edgeGuideMaterial = new LineMaterial({ color: COLORS.ghost, linewidth: 1.5, resolution: this.resolution, dashed: true, dashSize: 40, gapSize: 25, transparent: true, opacity: 0.75, depthTest: false, depthWrite: false });
+    this.guideReferenceMaterial = new LineMaterial({ color: COLORS.hover, linewidth: 2.5, resolution: this.resolution, depthTest: false, depthWrite: false });
+    this.guideLines = new LineSegments2(new LineSegmentsGeometry(), this.edgeGuideMaterial);
+    this.guideReference = new LineSegments2(new LineSegmentsGeometry(), this.guideReferenceMaterial);
+    this.guideLines.name = 'edge-guide';
+    this.guideReference.name = 'edge-reference';
+    this.edgeGuideLabel.object.name = 'edge-guide-label';
+    this.guideLines.visible = false;
+    this.guideReference.visible = false;
+    this.guideLines.renderOrder = 5;
+    this.guideReference.renderOrder = 5;
+
     this.ink = new THREE.Line(
       new THREE.BufferGeometry(),
       new THREE.LineBasicMaterial({ color: COLORS.ink, transparent: true, opacity: 0.7, depthTest: false }),
@@ -189,8 +210,8 @@ export class SketchRenderer {
     this.vertices.visible = false;
     this.vertices.renderOrder = 7;
 
-    this.group.add(this.faces, this.lines, this.hover, this.selected, this.ink, this.fadeLine, this.ghost, this.lineGuide, this.vertices, this.extrusionFaces, this.extrusionLines, this.activeFace, this.activeFaceOutline);
-    this.group.add(this.ghostLabel.object, this.guideLabel.object, this.hoverLabel.object, this.lastLabel.object, this.extrusionLabel.object);
+    this.group.add(this.faces, this.lines, this.hover, this.selected, this.ink, this.fadeLine, this.ghost, this.lineGuide, this.vertices, this.extrusionFaces, this.extrusionLines, this.activeFace, this.activeFaceOutline, this.guideLines, this.guideReference);
+    this.group.add(this.ghostLabel.object, this.guideLabel.object, this.hoverLabel.object, this.lastLabel.object, this.extrusionLabel.object, this.edgeGuideLabel.object);
     viewport.scene.add(this.group);
     viewport.onResize(() => this.updateResolution());
     this.updateResolution();
@@ -199,7 +220,7 @@ export class SketchRenderer {
   private updateResolution(): void {
     this.resolution.set(this.viewport.width, this.viewport.height);
     // LineMaterial copies the vector on assignment, so push the new size to every material.
-    for (const material of [this.lineMaterial, this.hoverMaterial, this.selectionMaterial, this.ghostMaterial, this.guideMaterial, this.fadeMaterial]) {
+    for (const material of [this.lineMaterial, this.hoverMaterial, this.selectionMaterial, this.ghostMaterial, this.guideMaterial, this.fadeMaterial, this.edgeGuideMaterial, this.guideReferenceMaterial]) {
       material.resolution = this.resolution;
     }
   }
@@ -331,6 +352,35 @@ export class SketchRenderer {
     this.ink.geometry.dispose();
     this.ink.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(flatten(path), 3));
     this.ink.visible = true;
+  }
+
+  setEdgeGuide(guide: EdgeGuide | null): void {
+    if (guide === this.currentGuide) return;
+    this.currentGuide = guide;
+    if (!guide) {
+      this.guideLines.visible = false;
+      this.guideReference.visible = false;
+      this.edgeGuideLabel.set(null);
+      return;
+    }
+    const unit = this.viewport.worldPerPixel(guide.target);
+    this.edgeGuideMaterial.dashSize = 6 * unit;
+    this.edgeGuideMaterial.gapSize = 4 * unit;
+    const direction = normalize(sub(guide.target, guide.start));
+    const tick = scale(normalize(cross(guide.normal, direction)), 5 * unit);
+    this.replaceSegments(this.guideReference, flatten([guide.reference.a, guide.reference.b]));
+    this.replaceSegments(this.guideLines, flatten([
+      guide.start, guide.target,
+      guide.reference.a, guide.start,
+      guide.reference.b, guide.target,
+      sub(guide.start, tick), add(guide.start, tick),
+      sub(guide.target, tick), add(guide.target, tick),
+    ]));
+    this.guideLines.computeLineDistances();
+    this.edgeGuideLabel.set(
+      guide.matchedLength ? `Equal length · ${formatMm(guide.targetLength)}` : `Parallel · ${formatMm(guide.targetLength)} suggested`,
+      add(guide.target, scale(tick, 2)),
+    );
   }
 
   /** Dashed recognition preview with a dimension label. */

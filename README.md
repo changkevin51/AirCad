@@ -89,7 +89,9 @@ If Windows or macOS asked for camera access on first launch, allow it and start 
 
 ## Draw a closed outline
 
-Hold **Space** or left-drag around any simple closed shape — triangles, concave outlines, and even round loops are kept as drawn (a closed round stroke becomes a polygon outline; circles are no longer fitted). You can also draw the sides as separate lines whose endpoints snap together: the closed loop is then recognised and selectable as one outline. An outline must lie flat on one work plane and must not cross itself; holes are not supported.
+Hold **Space** or left-drag around any simple closed shape — triangles, concave outlines, and even round loops are kept as drawn (a closed round stroke becomes a polygon outline; circles are no longer fitted). Fitted triangles stay as a dedicated triangle entity. You can also draw the sides as separate lines whose endpoints snap together: the closed loop is then recognised and selectable as one outline. An outline must lie flat on one work plane and must not cross itself; holes are not supported.
+
+Select any shape and press **M** to move it on the work plane, or **R** to scale it by dragging a corner while the opposite corner stays fixed. **Enter** (or **M** / **R**) applies the preview as one undoable edit. **Esc** cancels.
 
 ## Extrude with your hand
 
@@ -101,7 +103,7 @@ Hold **Space** or left-drag around any simple closed shape — triangles, concav
 
 Without a webcam, use **Q**, then **left-drag** (or hold **Space** while moving) along the highlighted direction. Release to pause, then **Enter** to apply. Extrusion is one undoable edit; undo restores the outline. Select an existing solid and press **Q** to push/pull any of its faces. **L** on a solid edits depth with one value or, for rectangular bases, base size with `width x height`.
 
-Extrusion supports any simple closed planar outline: triangles, concave shapes, and loops of endpoint-connected lines. Open paths, single lines, and saved circles cannot be extruded; circles remain loadable and renderable but are read-only.
+Extrusion supports any simple closed planar outline: triangles (as triangular prisms), concave shapes, and loops of endpoint-connected lines. Open paths, single lines, and saved circles cannot be extruded; circles remain loadable and renderable but are read-only.
 
 ## Controls
 
@@ -137,7 +139,7 @@ Views glide smoothly into place, and releasing an orbit within about 6° of a vi
 | **G** | Grid snap on / off |
 | **N** | Off-hand palm navigation on / off (one open palm orbits, two palms pan/zoom) |
 
-Nearby vertices, midpoints, and edges attract the cursor before the grid. A soft axis alignment (±16°) uses an exact edge intersection when possible, but will not keep a stroke floating beside a nearby line. X / Y / Z remain hard axis locks. Starting on an object snap moves the work plane through that point.
+Nearby vertices, midpoints, and edges attract the cursor before the grid. A soft axis alignment (±16°) uses an exact edge intersection when possible, but will not keep a stroke floating beside a nearby line. A stroke drawn nearly parallel to an existing edge can adopt that edge's direction and length. X / Y / Z remain hard axis locks. Starting on an object snap moves the work plane through that point.
 
 Roughly matching adjacent rectangles align along the entire shared border, with matching dimensions when the new size is close. Closed outlines can be messy — bowed sides, rounded corners, extra wiggles, and a sizable closing gap still snap to a clean rectangle. This works for closed outlines and continuous three-sided strokes; the preview shows the exact result before release. Clearly smaller attachments keep their partial border, and existing rectangles are never resized. Use L afterward for exact dimensions.
 
@@ -149,10 +151,12 @@ Roughly matching adjacent rectangles align along the entire shared border, with 
 | **Ctrl+Shift+Z** / **Ctrl+Y** | Redo |
 | **Delete** / **Backspace** | Delete the selected, hovered, or last entity |
 | **Ctrl+Backspace** / **Cmd+Backspace** | Clear the sketch |
-| **Esc** | Cancel the current stroke / extrusion, deselect, or close overlays |
+| **Esc** | Cancel the current stroke / move / scale / extrusion, deselect, or close overlays |
 | **S** | Select the shape under the cursor (also pinch or click) |
 | **Q** | Start push/pull on a selected closed outline or solid; press again to apply |
-| **Enter** | Apply the extrusion preview |
+| **M** | Move the selected shape on the work plane; press again to apply |
+| **R** | Scale the selected shape from a corner; press again to apply |
+| **Enter** | Apply the move, scale, or extrusion preview |
 | **L** | Type a line length, rectangle size (W x H), or extrusion depth; mm/cm/m accepted |
 | **V** | Speak a distance for the active line or face pull (recognizer picked in the voice panel) |
 | **E** | Export to FreeCAD |
@@ -167,9 +171,9 @@ Keep the camera **fixed, upright, and approximately level**. The browser maps ca
 | --- | --- |
 | Input panel | Webcam / Depth camera / Mouse, Finger or LED/Colour, scale |
 | **O** | Set origin from a 400 ms stable capture (maps that pose to world 0,0,0) |
-| **R** | Recenter mapping on the last committed endpoint |
+| **Shift+R** | Recenter mapping on the last committed endpoint |
 | **F** | Fit a local workspace cube (about 400 mm physical × scale) |
-| **Space** | Draw a line or rectangle on the current work plane (assembled / shared-border still apply) |
+| **Space** | Draw a line, rectangle, or triangle on the current work plane (assembled / shared-border still apply) |
 | **G** | Optional XYZ grid (off by default in depth mode) |
 | **X / Y / Z** | Hard axis lock in millimetres |
 
@@ -200,7 +204,7 @@ On Windows use `.venv\Scripts\python.exe -u server.py --no-camera --no-browser`.
 
 ## Send a sketch to FreeCAD
 
-Finish at least one line, rectangle, or extrusion, then press **E**. The bridge writes millimetre entities to `.runtime/freecad_drawing.json`, starts FreeCAD as a separate GUI process, and opens an isometric view. Rectangles become faces; lines become wires; extrusions become closed solids. Apply or cancel an extrusion preview before exporting. Export is a one-time snapshot: drawing afterward does not change an already opened FreeCAD document.
+Finish at least one shape, then press **E** in the AirCAD viewport. Every press exports a fresh millimetre snapshot to a new document in the running FreeCAD window, brings that window forward, and fits an isometric view. Lines become wires; rectangles and triangles become faces; rectangular extrusions and triangular prisms become closed solids. The current move, scale, or extrusion preview is included without committing it or changing undo history; a zero-depth extrusion preview is exported as a face. Close a measurement field before using the shortcut. Earlier FreeCAD documents remain unchanged when you draw more or export again.
 
 The bridge looks for `FreeCAD` on `PATH`, the standard macOS app executable, and typical Windows install folders under Program Files. If FreeCAD is installed elsewhere:
 

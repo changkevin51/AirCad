@@ -2,8 +2,9 @@ import type { PlaneKind, WorkPlane } from './plane';
 import { convexHull, recognizeStroke, type RecognizeOptions, type RecognizeResult, type RecognizedShape } from './recognize';
 import { alignRectangleToBorder, completeLineRectangle, completeSharedBorder, sameRectangle } from './rect-completion';
 import type { Projector, SnapResult } from './snap';
-import { type Entity, type EntityInput, type Vertex } from './sketch';
-import { add, distance, distance2, dot, isFinite3, length, nearlyEqual, normalize, roundTo, scale, sub, type Vec2, type Vec3 } from './vec';
+import { snapTriangleToSegments } from './spatial-join';
+import { entitySegments, isTriangleProfile, type Entity, type EntityInput, type TriangleEntity, type Vertex } from './sketch';
+import { add, distance, distance2, dot, isFinite3, length, nearlyEqual, normalize, roundTo, scale, sub, v2, type Vec2, type Vec3 } from './vec';
 
 const OBJECT_SNAPS = new Set(['vertex', 'midpoint', 'edge', 'lock']);
 const LINE_AIM_MIN_PX = 32;
@@ -192,10 +193,11 @@ export class StrokeSession {
     if (isObjectSnap(this.start) && this.start.onPlane) outline[0] = this.start.plane;
     if (isObjectSnap(this.lastSnap) && this.lastSnap.onPlane) outline[outline.length - 1] = this.lastSnap.plane;
     const rawResult = recognizeStroke(outline, options);
-    if (rawResult.shape?.kind === 'polygon') return rawResult;
+    if (rawResult.shape?.kind === 'polygon' || rawResult.shape?.kind === 'rect' || rawResult.shape?.kind === 'triangle') return rawResult;
     const snapped = recognizeStroke(this.planePoints(), options);
     if (snapped.shape?.kind === 'polygon' && !rawResult.shape) return rawResult;
-    return snapped;
+    if (snapped.shape?.kind === 'triangle') return rawResult;
+    return snapped.shape ? snapped : rawResult;
   }
 }
 
@@ -308,6 +310,66 @@ export function buildEntityFromStroke(session: StrokeSession, shape: RecognizedS
   if (shape.kind === 'polygon') {
     return { type: 'polygon', corners: shape.corners.map((c) => plane.toWorld(c)) };
   }
+  if (shape.kind === 'triangle') {
+    const raw = shape.corners.map((corner) => plane.toWorld(corner)) as TriangleEntity['corners'];
+    let edgeAligned: TriangleEntity['corners'] | null = null;
+    const explicitStart = isObjectSnap(session.start) && session.start.onPlane ? session.start.world : null;
+    let protectedCornerIndex = -1;
+    if (explicitStart && context.entities?.length) {
+      const startScreen = context.projector.project(explicitStart);
+      if (startScreen) {
+        let nearest = context.tolerancePx;
+        raw.forEach((corner, index) => {
+          const screen = context.projector.project(corner);
+          if (!screen) return;
+          const d = distance2(startScreen, screen);
+          if (d < nearest) {
+            nearest = d;
+            protectedCornerIndex = index;
+          }
+        });
+      }
+    }
+    const candidateCorners =
+      explicitStart && protectedCornerIndex >= 0
+        ? raw.map((corner, index) => (index === protectedCornerIndex ? { ...explicitStart } : add(corner, sub(explicitStart, raw[protectedCornerIndex]))))
+        : raw;
+    if (context.entities?.length) {
+      const fit = snapTriangleToSegments(candidateCorners, context.entities.flatMap(entitySegments), {
+        plane,
+        projector: context.projector,
+        tolerancePx: context.tolerancePx,
+        protectedAnchor:
+          explicitStart && protectedCornerIndex >= 0
+            ? { point: explicitStart, cornerIndex: protectedCornerIndex }
+            : undefined,
+      });
+      edgeAligned = fit?.corners ?? null;
+    }
+    if (edgeAligned && isTriangleProfile(edgeAligned)) return { type: 'triangle', corners: edgeAligned };
+    const step = context.gridStep ?? 0;
+    const corners = raw.map((corner, index) => {
+      const screen = context.projector.project(corner);
+      let snapped = plane.toWorld(v2(roundTo(shape.corners[index].x, step), roundTo(shape.corners[index].y, step)));
+      let nearest = context.tolerancePx;
+      const candidates = [
+        ...(isObjectSnap(session.start) && session.start.onPlane ? [session.start.world] : []),
+        ...context.vertices.map((vertex) => vertex.point),
+      ];
+      if (screen) for (const point of candidates) {
+        if (!plane.contains(point, 1e-3)) continue;
+        const projected = context.projector.project(point);
+        if (!projected) continue;
+        const distance = distance2(screen, projected);
+        if (distance < nearest) {
+          nearest = distance;
+          snapped = { ...point };
+        }
+      }
+      return snapped;
+    }) as TriangleEntity['corners'];
+    return { type: 'triangle', corners: isTriangleProfile(corners) ? corners : raw };
+  }
   const corners2 = shape.oriented ? shape.corners : alignRectToStart(shape.corners, session.start.plane, context.gridStep ?? 0);
   const rawCorners = corners2.map((c) => plane.toWorld(c));
   const aligned = context.entities
@@ -372,7 +434,7 @@ export function resolveStroke(
     return { status: 'ready', input, removeIds: [], reason: result.reason };
   }
 
-  if (result.shape?.kind === 'rect') {
+  if (result.shape?.kind === 'rect' || result.shape?.kind === 'triangle') {
     const input = buildEntityFromStroke(session, result.shape, context);
     if (input.type === 'rect' && isDuplicateRectangle(input.corners, context.entities)) {
       return { status: 'duplicate', input: null, removeIds: [], reason: 'rectangle already exists' };

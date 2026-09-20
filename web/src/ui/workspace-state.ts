@@ -76,6 +76,8 @@ export function entityLabel(entity: Entity): string {
     entity.type === 'line' ? 'Line'
     : entity.type === 'rect' ? 'Rectangle'
     : entity.type === 'polygon' ? 'Outline'
+    : entity.type === 'triangle' ? 'Triangle'
+    : entity.type === 'prism' ? 'Prism'
     : entity.type === 'circle' ? 'Circle'
     : isRectangleProfile(entity.corners) ? 'Box' : 'Solid';
   return `${noun} ${entity.id}`;
@@ -104,6 +106,7 @@ export function dimensionsAvailability(selected: Entity | null, ctx: Availabilit
   if (guard) return guard;
   if (!selected) return { enabled: false, reason: SELECT_OBJECT };
   if (selected.type === 'circle') return { enabled: false, reason: CIRCLE_READONLY };
+  if (selected.type === 'triangle') return { enabled: false, reason: 'Use Q to extrude the triangle or M to move it.' };
   return { enabled: true };
 }
 

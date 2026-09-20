@@ -46,6 +46,17 @@ class ServerTests(AioHTTPTestCase):
         self.assertEqual(payload["count"], 2)
         self.assertEqual(self.sent, [body["entities"]])
 
+    async def test_repeated_exports_forward_the_latest_3d_snapshot(self) -> None:
+        first = {"units": "mm", "entities": [{"type": "triangle", "points": [[10, 20, 30], [110, 20, 30], [10, 100, 30]]}]}
+        second = {"units": "mm", "entities": [{"type": "prism", "points": first["entities"][0]["points"], "vector": [0, 0, -50]}]}
+        for body in (first, second):
+            async with self.client.post('/api/export/freecad', json=body) as response:
+                self.assertEqual(response.status, 200)
+                payload = await response.json()
+                self.assertTrue(payload['ok'])
+                self.assertEqual(payload['count'], 1)
+        self.assertEqual(self.sent, [first['entities'], second['entities']])
+
     async def test_export_rejects_bad_payloads(self) -> None:
         for body in ({}, {"entities": []}, {"entities": "nope"}, {"units": "inch", "entities": [{"type": "line"}]}):
             with self.subTest(body=body):
